@@ -1,0 +1,98 @@
+# Screener Backtesting Configuration
+# Run multiple tests across different dates to validate screener logic
+
+test_runs:
+  # Format: date should be YYYY-MM-DD
+  # The screener will ONLY use data up to and including this date
+  # (no future data leak)
+
+  - name: "Early August 2024"
+    date: "2024-08-02"
+    description: "Test during summer market"
+
+  - name: "Mid August 2024"
+    date: "2024-08-15"
+    description: "Mid-month test"
+
+  - name: "Late August 2024"
+    date: "2024-08-28"
+    description: "End of month test"
+
+  - name: "September 2024 Start"
+    date: "2024-09-05"
+    description: "Post-Labor Day volatility"
+
+  - name: "October 2024 Start"
+    date: "2024-10-01"
+    description: "Q4 kickoff, typically volatile"
+
+  - name: "November 2024"
+    date: "2024-11-15"
+    description: "Pre-Thanksgiving"
+
+  - name: "January 2025"
+    date: "2026-01-15"
+    description: "New year, new trends"
+
+  - name: "APPLE A Few Days Ago"
+    date: "2026-08-03"
+    description: "Most recent available data"
+
+screener_params:
+  # Parameters for all test runs
+  num_stocks_to_trade: 15
+  min_screener_score: 35
+  candidates_file: "candidates.txt"
+
+  # Bullish Trend Filter
+  # min_momentum: Minimum required recent momentum (%) to qualify
+  #   0 = must be bullish (positive momentum over last N days)
+  #   > 0 = requires at least that % gain (e.g., 1 means +1% minimum)
+  #   -999 = disable filter (accept any momentum)
+  min_momentum: 0
+
+  # trend_days: How many recent days to check for bullish trend
+  #   5 = last 5 days must be bullish
+  #   7 = last week must be bullish
+  #   3 = last 3 days must be bullish
+  trend_days: 5
+
+  # === OPTIONAL ADVANCED TREND FILTERS ===
+  # Uncomment any of these in the code to enable additional filtering
+  #
+  # FILTER 1: Moving Average Crossover
+  # Price must be above N-day SMA
+  # Uncomment in run_screener_tests.py around line 130
+  # sma_period: 10  # Require price > 10-day SMA
+  #
+  # FILTER 2: Higher Lows Pattern
+  # Recent lows must be increasing (uptrend confirmation)
+  # Uncomment in run_screener_tests.py around line 139
+  # higher_lows_enabled: true
+  #
+  # FILTER 3: Bullish Days Ratio
+  # X% of recent days must be up days (close > open)
+  # Uncomment in run_screener_tests.py around line 148
+  # bullish_ratio_threshold: 60  # Require 60% of recent days to be bullish
+  #
+  # FILTER 4: RSI > 50
+  # RSI momentum indicator must be above 50
+  # Uncomment in run_screener_tests.py around line 160
+  # rsi_threshold: 50  # Only select if RSI > 50
+  #
+  # FILTER 5: Consecutive Up Days
+  # Require N consecutive green candles
+  # Uncomment in run_screener_tests.py around line 174
+  # min_consecutive_up: 2  # Require 2+ consecutive up days
+
+# Settings
+settings:
+  # Show detailed breakdown for each stock
+  show_details: true
+
+  # Save results to file
+  save_results: true
+  results_file: "screener_backtest_results.csv"
+
+  # Show top N and bottom N stocks
+  show_bottom_n: 5

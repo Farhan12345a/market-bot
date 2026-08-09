@@ -1,0 +1,68 @@
+trading:
+  # Entry signal parameters
+  volume_spike_multiplier: 1.5  # Volume must be this many times the 20-day average
+  entry_time: "09:35"  # Time to check entry after market open (HH:MM ET)
+
+  # Exit parameters
+  trailing_stop_pct: 0.75  # Trail stop by this %
+  first_exit_pct: 0.33  # Sell this % at first pullback
+  first_exit_loss_pct: -0.5  # Trigger first exit at this loss % from entry
+  final_exit_loss_pct: -1.0  # Sell all remaining at this loss %
+  time_stop_hour: 16  # Close all positions at this hour (ET) if not exited
+
+  # Momentum fade timing (when to start checking for momentum fade)
+  momentum_fade_hour: 10       # Start checking at this hour (ET)
+  momentum_fade_minute: 15     # Start checking at this minute
+  # Combined: 10:15 AM ET
+
+  # Position sizing
+  max_position_per_stock_usd: 10000  # Max $ per stock
+  max_daily_loss_usd: 1000  # Stop trading if daily loss exceeds this
+
+  # Stock universe (can be dynamic or static)
+  use_daily_screener: true  # Set to true to dynamically select stocks each day
+  candidates_file: "candidates.txt"  # File with candidate symbols
+  num_stocks_to_trade: 15  # Number of top stocks to select each day
+  min_screener_score: 35  # Minimum score to trade (0-100)
+
+  # Static stock universe (used if use_daily_screener is false)
+  stock_universe:
+    - "SPY"
+    - "QQQ"
+    - "AAPL"
+    - "MSFT"
+    - "NVDA"
+    - "AMZN"
+    - "TSLA"
+    - "META"
+    - "GOOGL"
+
+  min_stock_price: 5
+  max_stock_price: 300
+  min_avg_volume: 1000000  # Minimum average daily volume
+
+broker:
+  paper_trading: true  # Set to false for live trading
+  base_url: "https://paper-api.alpaca.markets"  # Paper trading endpoint
+
+logging:
+  level: "INFO"
+  log_file: "logs/trading.log"
+
+notifications:
+  email:
+    enabled: true
+    # Gmail setup - Get app-specific password from: https://myaccount.google.com/apppasswords
+    sender_email: "shahbazfarhan25@gmail.com"
+    sender_password: "qgej rnns eztf amnk"  # ← FILL THIS IN (see instructions below)
+    recipient_email: "shahbazfarhan25@gmail.com"
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+
+# EMAIL SETUP INSTRUCTIONS:
+# 1. Go to https://myaccount.google.com/apppasswords
+# 2. Select "Mail" and "Windows Computer" (or your device)
+# 3. Generate app password
+# 4. Copy password here (replace "YOUR_APP_PASSWORD_HERE")
+# 5. Save config.yaml
+# 6. You're done! Bot will email summary after each trading day
