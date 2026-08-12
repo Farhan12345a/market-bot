@@ -4,7 +4,8 @@ from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.data.enums import DataFeed
 import pandas as pd
 from datetime import datetime
 import logging
@@ -89,8 +90,8 @@ class AlpacaBroker:
 
             tf_map = {
                 "1Min": TimeFrame.Minute,
-                "5Min": TimeFrame.FiveMin,
-                "15Min": TimeFrame.FifteenMin,
+                "5Min": TimeFrame(5, TimeFrameUnit.Minute),
+                "15Min": TimeFrame(15, TimeFrameUnit.Minute),
                 "1Hour": TimeFrame.Hour,
                 "1Day": TimeFrame.Day,
             }
@@ -99,7 +100,8 @@ class AlpacaBroker:
                 symbol_or_symbols=symbols,
                 start=start,
                 end=end,
-                timeframe=tf_map.get(timeframe, TimeFrame.Day)
+                timeframe=tf_map.get(timeframe, TimeFrame.Day),
+                feed=DataFeed.IEX
             )
 
             bars = self.data_client.get_stock_bars(request)
@@ -107,7 +109,7 @@ class AlpacaBroker:
             # Convert to DataFrame per symbol
             result = {}
             for symbol in symbols:
-                if symbol in bars:
+                if symbol in bars.data:
                     bar_list = bars[symbol]
                     data = [
                         {
