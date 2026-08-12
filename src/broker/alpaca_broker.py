@@ -20,12 +20,11 @@ class AlpacaBroker:
             raise ValueError("APCA_API_KEY_ID and APCA_API_SECRET_KEY must be set")
 
         self.paper = paper
-        base_url = "https://paper-api.alpaca.markets" if paper else "https://api.alpaca.markets"
 
         self.trading_client = TradingClient(
             api_key=self.api_key,
             secret_key=self.api_secret,
-            base_url=base_url
+            paper=paper
         )
         self.data_client = StockHistoricalDataClient(self.api_key, self.api_secret)
 
