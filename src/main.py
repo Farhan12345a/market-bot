@@ -2,8 +2,8 @@
 """
 Market opening trading bot - Paper trading version
 
-Watches for volume spike + price above open signals at 9:35 ET.
-Uses trailing stop with scale-out exits.
+Watches screened candidates for a rapid price rise during the entry window,
+then manages exits with trailing stop + scale-out logic for the rest of the day.
 
 Setup:
   1. export APCA_API_KEY_ID="your_key"
@@ -16,7 +16,8 @@ import sys
 import yaml
 import logging
 import time
-from datetime import datetime
+from collections import deque
+from datetime import datetime, timedelta
 import pytz
 
 # Add src to path
@@ -45,6 +46,190 @@ def load_config(config_file="config.yaml"):
     with open(config_file, "r") as f:
         return yaml.safe_load(f)
 
+def parse_hhmm_today(hhmm_str, et_tz):
+    """Turn a config 'HH:MM' string into today's datetime in the given tz"""
+    hour, minute = map(int, hhmm_str.split(":"))
+    return datetime.now(et_tz).replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+def select_symbols(config, screener):
+    """
+    Run the daily screener (if enabled) and return the symbol list to trade.
+    ALWAYS falls back to the static stock_universe list if the screener is
+    disabled, errors, or returns zero candidates - the bot never runs with
+    an empty symbol list.
+    """
+    screener_ran = False
+    symbols = []
+
+    if config["trading"].get("use_daily_screener", False) and screener is not None:
+        logger.info("===== PRE-MARKET SCREENER =====")
+        screener_ran = True
+        try:
+            symbols = screener.screen(
+                top_n=config["trading"]["num_stocks_to_trade"],
+                min_score=config["trading"]["min_screener_score"],
+            )
+        except Exception as e:
+            logger.error(f"Screener failed: {e}")
+            symbols = []
+
+    candidates_evaluated = len(screener.candidates) if screener is not None else 0
+
+    if not symbols:
+        if screener_ran:
+            logger.warning(
+                "Screener produced no candidates - falling back to static stock_universe list"
+            )
+        symbols = config["trading"]["stock_universe"]
+
+    logger.info(
+        f"Symbol selection: screener_ran={screener_ran}, "
+        f"candidates_evaluated={candidates_evaluated}, "
+        f"symbols_selected={len(symbols)} ({', '.join(symbols)})"
+    )
+
+    return symbols
+
+def run_entry_window(config, market_data, strategy, executor, symbols, et):
+    """
+    Watch `symbols` from entry_window_start to entry_window_end for a rapid
+    price rise (>= rapid_increase_pct within a trailing rapid_increase_lookback_minutes
+    window) and buy on the first qualifying sample per symbol.
+    """
+    entry_start = parse_hhmm_today(config["trading"]["entry_window_start"], et)
+    entry_end = parse_hhmm_today(config["trading"]["entry_window_end"], et)
+    check_interval = config["trading"]["entry_check_interval_seconds"]
+    lookback = timedelta(minutes=config["trading"]["rapid_increase_lookback_minutes"])
+
+    now = datetime.now(et)
+    while now < entry_start:
+        time.sleep(min(5, (entry_start - now).total_seconds()))
+        now = datetime.now(et)
+
+    logger.info(
+        f"===== ENTRY WINDOW: {entry_start.strftime('%H:%M')} - "
+        f"{entry_end.strftime('%H:%M')} ET ====="
+    )
+
+    price_history = {symbol: deque() for symbol in symbols}
+    entries_triggered = 0
+
+    while datetime.now(et) < entry_end:
+        now = datetime.now(et)
+
+        for symbol in symbols:
+            if symbol in strategy.get_open_trades():
+                continue
+
+            try:
+                bar = market_data.get_latest_bar(symbol, "1Min")
+                if not bar:
+                    continue
+
+                price = bar.get("close", 0)
+                ts = bar.get("timestamp", now)
+                history = price_history[symbol]
+                history.append((ts, price))
+
+                # Drop samples older than the lookback window
+                cutoff = now - lookback
+                while history and history[0][0] < cutoff:
+                    history.popleft()
+
+                if len(history) < 2:
+                    continue
+
+                price_then = history[0][1]
+                qty, pct_change = strategy.check_rapid_increase_entry(symbol, price, price_then)
+
+                if qty > 0:
+                    signal = strategy.enter_trade(symbol, price, qty)
+                    if signal:
+                        logger.info(
+                            f"{symbol}: RAPID INCREASE entry triggered - "
+                            f"+{pct_change:.2f}% over {lookback.total_seconds()/60:.0f}min "
+                            f"(threshold {config['trading']['rapid_increase_pct']}%)"
+                        )
+                        executor.execute_signal(signal)
+                        entries_triggered += 1
+
+            except Exception as e:
+                logger.error(f"Error checking entry for {symbol}: {e}")
+                continue
+
+        time.sleep(check_interval)
+
+    logger.info(
+        f"Entry window closed. symbols_monitored={len(symbols)}, "
+        f"entries_triggered={entries_triggered}"
+    )
+    return entries_triggered
+
+def run_exit_monitoring(config, market_data, strategy, executor, email_notifier, entries_triggered, et):
+    """
+    Monitor open positions for exits until either all positions have closed
+    (only meaningful if we actually entered something today) or the 4 PM
+    time stop is hit.
+    """
+    time_stop_hour = config["trading"]["time_stop_hour"]
+    last_check = datetime.now(et)
+
+    while True:
+        now = datetime.now(et)
+
+        if executor.check_daily_loss_limit():
+            logger.warning("Daily loss limit hit, flattening all positions")
+            executor.flatten_all_positions()
+            executor.save_trades_log()
+            email_notifier.send_daily_summary()
+            return
+
+        if (now - last_check).seconds >= 60 or last_check == now:
+            last_check = now
+
+            for symbol in list(strategy.get_open_trades().keys()):
+                try:
+                    current_bar = market_data.get_latest_bar(symbol, "1Min")
+                    if not current_bar:
+                        continue
+
+                    signal = strategy.process_bar(symbol, current_bar)
+                    if signal:
+                        executor.execute_signal(signal)
+
+                except Exception as e:
+                    logger.error(f"Error checking exits for {symbol}: {e}")
+                    continue
+
+            open_trades = strategy.get_open_trades()
+            if open_trades:
+                logger.info(f"Open positions: {len(open_trades)}")
+            elif entries_triggered > 0:
+                # We entered at least one trade today and everything is now closed.
+                logger.info("All trades closed. Sending daily summary...")
+                executor.save_trades_log()
+                email_notifier.send_daily_summary()
+                logger.info(
+                    f"Daily session complete: entries_triggered={entries_triggered}, "
+                    f"positions_open=0"
+                )
+                return
+            # else: zero trades were ever entered today - keep idling until the time stop,
+            # this is NOT "all trades closed", there was simply nothing to close.
+
+        if now.hour >= time_stop_hour:
+            logger.info("Market closing, flattening all positions...")
+            executor.flatten_all_positions()
+            executor.save_trades_log()
+            email_notifier.send_daily_summary()
+            logger.info(
+                f"Daily session complete: entries_triggered={entries_triggered}, "
+                f"reason=time_stop"
+            )
+            return
+
+        time.sleep(30)
+
 def main():
     """Main trading loop"""
     try:
@@ -64,151 +249,36 @@ def main():
         email_notifier = EmailNotifier(config)
 
         logger.info("Paper trading bot started")
-        logger.info(f"Trading hours: 9:30 AM - 4:00 PM ET")
-        logger.info(f"Entry check at: 9:35 AM ET")
+        logger.info(f"Trading hours: 9:30 AM - {config['trading']['time_stop_hour']}:00 ET")
+        logger.info(
+            f"Entry window: {config['trading']['entry_window_start']} - "
+            f"{config['trading']['entry_window_end']} ET"
+        )
 
         et = pytz.timezone("America/New_York")
 
-        # Use screener or static list
         if config["trading"].get("use_daily_screener", False):
             screener = StockScreener(broker, config["trading"]["candidates_file"])
         else:
             screener = None
 
-        symbols = None  # Will be loaded at entry time
-
-        # Main loop - wait for market to open, then run
+        # Main loop - wait for market to open, run one full session, repeat next day
         while True:
             now = datetime.now(et)
 
-            # Check if market is open
             if not market_data.is_market_open():
-                # Calculate sleep time until market open
-                sleep_seconds = 60
-                logger.debug(f"Market closed. Sleeping {sleep_seconds}s...")
-                time.sleep(sleep_seconds)
+                time.sleep(60)
                 continue
 
             logger.info("Market is open, monitoring for signals...")
 
-            # Entry phase: wait until 9:35 ET
-            screener_run = False
-            while not market_data.is_entry_time():
-                time.sleep(10)
-                now = datetime.now(et)
-
-                # Run screener 5 minutes before entry (at 9:30)
-                if (not screener_run and screener is not None and
-                    now.hour == 9 and now.minute == 30):
-                    logger.info("===== PRE-MARKET SCREENER (9:30 ET) =====")
-                    symbols = screener.screen(
-                        top_n=config["trading"]["num_stocks_to_trade"],
-                        min_score=config["trading"]["min_screener_score"]
-                    )
-                    screener_run = True
-
-                if now.hour >= 16:  # Market closed
-                    logger.info("Market closed, exiting")
-                    executor.flatten_all_positions()
-                    executor.save_trades_log()
-                    return
-
-            # If no screener, use static list
-            if symbols is None:
-                symbols = config["trading"]["stock_universe"]
-
-            logger.info("===== ENTRY TIME (9:35 ET) =====")
-
-            # At 9:35, check all symbols for entry signals
-            for symbol in symbols:
-                try:
-                    # Get avg volume first
-                    avg_volume = market_data.get_20day_avg_volume(symbol)
-
-                    # Get current bar
-                    current_bar = market_data.get_open_bar(symbol)
-                    if not current_bar:
-                        logger.warning(f"No data for {symbol}")
-                        continue
-
-                    # Process through strategy
-                    signal = strategy.process_bar(symbol, current_bar, avg_volume)
-
-                    # Execute if we have a signal
-                    if signal:
-                        executor.execute_signal(signal)
-
-                except Exception as e:
-                    logger.error(f"Error processing {symbol}: {e}")
-                    continue
-
-            logger.info("Entry checks complete. Monitoring exits...")
-
-            # Exit phase: monitor for exits throughout the day
-            last_check = datetime.now(et)
-            while True:
-                now = datetime.now(et)
-
-                # Check daily loss limit
-                if executor.check_daily_loss_limit():
-                    logger.warning("Daily loss limit hit, flattening all positions")
-                    executor.flatten_all_positions()
-                    executor.save_trades_log()
-                    email_notifier.send_daily_summary()
-                    return
-
-                # Check for exits every minute
-                if (now - last_check).seconds >= 60 or last_check == datetime.now(et):
-                    last_check = now
-
-                    for symbol in list(strategy.get_open_trades().keys()):
-                        try:
-                            current_bar = market_data.get_latest_bar(symbol, "1Min")
-                            if not current_bar:
-                                continue
-
-                            current_price = current_bar.get("close", 0)
-                            avg_volume = market_data.cache.get(
-                                f"{symbol}_avg_volume", 1000000
-                            )
-
-                            # Check for exits
-                            signal = strategy.process_bar(symbol, current_bar, avg_volume)
-                            if signal:
-                                executor.execute_signal(signal)
-
-                        except Exception as e:
-                            logger.error(f"Error checking exits for {symbol}: {e}")
-                            continue
-
-                    # Log current positions
-                    positions = broker.get_positions()
-                    if positions:
-                        logger.info(f"Open positions: {len(positions)}")
-                        for sym, pos in positions.items():
-                            logger.info(
-                                f"  {sym}: {pos.qty} @ {pos.current_price} "
-                                f"(P&L: ${pos.unrealized_pl:.2f})"
-                            )
-                    else:
-                        # All trades have closed - send summary and exit
-                        logger.info("All trades closed. Sending daily summary...")
-                        executor.save_trades_log()
-                        email_notifier.send_daily_summary()
-                        logger.info("Daily session complete")
-                        break
-
-                # Exit at 4:00 PM (if any positions still open)
-                if now.hour >= 16:
-                    logger.info("Market closing, flattening all positions...")
-                    executor.flatten_all_positions()
-                    executor.save_trades_log()
-                    logger.info("Daily session complete")
-                    email_notifier.send_daily_summary()
-                    break
-
-                # Sleep before next check
-                time.sleep(30)
+            symbols = select_symbols(config, screener)
+            entries_triggered = run_entry_window(
+                config, market_data, strategy, executor, symbols, et
+            )
+            run_exit_monitoring(
+                config, market_data, strategy, executor, email_notifier, entries_triggered, et
+            )
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user")

@@ -25,53 +25,71 @@ def load_config(config_file="config.yaml"):
         return yaml.safe_load(f)
 
 def simulate_day(broker, strategy, symbol, date, config):
-    """Simulate a single trading day"""
-    # Get daily bar
-    bars = broker.get_historical_bars(symbol, date, date + timedelta(days=1), "1Day")
-    if symbol not in bars or bars[symbol].empty:
-        return None
+    """
+    Simulate a single trading day using the rapid-increase entry window:
+    scan minute bars from entry_window_start to entry_window_end and buy on
+    the first sample where price has risen >= rapid_increase_pct within the
+    trailing rapid_increase_lookback_minutes, then simulate exits with the
+    existing exit rules for the rest of the day.
+    """
+    et = pytz.timezone("America/New_York")
 
-    daily_bar = bars[symbol].iloc[0]
+    start_h, start_m = map(int, config["trading"]["entry_window_start"].split(":"))
+    end_h, end_m = map(int, config["trading"]["entry_window_end"].split(":"))
+    lookback = timedelta(minutes=config["trading"]["rapid_increase_lookback_minutes"])
+    pct_threshold = config["trading"]["rapid_increase_pct"]
 
-    # Get 20-day average volume
-    start_20d = date - timedelta(days=30)
-    bars_20d = broker.get_historical_bars(symbol, start_20d, date, "1Day")
-    if symbol not in bars_20d or bars_20d[symbol].empty:
-        avg_volume = 1000000
-    else:
-        avg_volume = bars_20d[symbol]["volume"].tail(20).mean()
+    entry_start = et.localize(datetime(date.year, date.month, date.day, start_h, start_m))
+    entry_end = et.localize(datetime(date.year, date.month, date.day, end_h, end_m))
+    day_close = et.localize(datetime(date.year, date.month, date.day, 16, 0))
 
-    # Get opening bar (first 5 minutes)
-    open_time = datetime(date.year, date.month, date.day, 9, 30, tzinfo=pytz.timezone("America/New_York"))
-    close_time = open_time + timedelta(minutes=5)
-
-    bars_open = broker.get_historical_bars(symbol, open_time, close_time, "5Min")
-    if symbol not in bars_open or bars_open[symbol].empty:
-        return None
-
-    open_bar = bars_open[symbol].iloc[0].to_dict()
-
-    # Check entry signal
-    signal = strategy.process_bar(symbol, open_bar, avg_volume)
-
-    if signal and signal.get("action") == "ENTRY":
-        entry_price = open_bar["close"]
-        entry_qty = signal["qty"]
-        entry_time = open_time
-
-        # Simulate the rest of the day with intraday bars
-        bars_intra = broker.get_historical_bars(symbol, open_time, datetime(date.year, date.month, date.day, 16, 0), "1Min")
-        if symbol not in bars_intra or bars_intra[symbol].empty:
+    try:
+        # Pull 1-minute bars for the whole session so we can both scan the
+        # entry window and simulate exits from the same dataframe.
+        bars = broker.get_historical_bars(symbol, entry_start, day_close, "1Min")
+        if symbol not in bars or bars[symbol].empty:
             return None
 
-        intra_df = bars_intra[symbol]
+        df = bars[symbol].sort_values("timestamp").reset_index(drop=True)
+        window_df = df[df["timestamp"] < entry_end]
 
-        # Simulate exits throughout the day
+        # Scan the entry window for the first qualifying rapid-increase sample
+        entry_idx = None
+        for i in range(len(window_df)):
+            now_ts = window_df.iloc[i]["timestamp"]
+            now_price = window_df.iloc[i]["close"]
+            cutoff = now_ts - lookback
+            earlier = window_df[
+                (window_df["timestamp"] >= cutoff) & (window_df["timestamp"] <= now_ts)
+            ]
+            if len(earlier) < 2:
+                continue
+
+            price_then = earlier.iloc[0]["close"]
+            qty, pct_change = strategy.check_rapid_increase_entry(symbol, now_price, price_then)
+            if qty > 0:
+                entry_idx = i
+                break
+
+        if entry_idx is None:
+            return None
+
+        entry_row = window_df.iloc[entry_idx]
+        entry_price = entry_row["close"]
+        entry_time = entry_row["timestamp"]
+
+        signal = strategy.enter_trade(symbol, entry_price, qty)
+        if not signal:
+            return None
+        entry_qty = signal["qty"]
+
+        # Simulate exits using bars after the entry point
+        intra_df = df[df["timestamp"] > entry_time]
+
         exits = []
         for idx, row in intra_df.iterrows():
             current_price = row["close"]
 
-            # Check exit conditions
             exit_qty = strategy.trades[symbol].check_final_exit(current_price)
             if exit_qty > 0:
                 exits.append({
@@ -125,7 +143,13 @@ def simulate_day(broker, strategy, symbol, date, config):
                 "pnl_pct": pnl_pct,
             }
 
-    return None
+        return None
+    finally:
+        # Backtest reuses one Strategy across every symbol/day - always clear
+        # any open trade so a symbol that never fully exited in the exit-bar
+        # window doesn't stay permanently "open" and block future days.
+        if symbol in strategy.trades:
+            del strategy.trades[symbol]
 
 def backtest(symbols, start_date, end_date, config):
     """Run backtest"""

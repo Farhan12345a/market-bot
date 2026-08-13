@@ -91,21 +91,3 @@ class MarketDataManager:
 
         return market_open <= now <= market_close
 
-    def is_entry_time(self):
-        """Check if we're at entry time (9:35 ET)"""
-        now = datetime.now(self.et)
-        entry_hour, entry_min = 9, 35
-
-        # Simple check: are we in the 9:35 minute?
-        return now.hour == entry_hour and now.minute == entry_min
-
-    def get_time_until_entry(self):
-        """Get seconds until entry time"""
-        now = datetime.now(self.et)
-        entry_time = now.replace(hour=9, minute=35, second=0, microsecond=0)
-
-        if now >= entry_time:
-            # If past entry time today, next entry is tomorrow
-            entry_time += timedelta(days=1)
-
-        return (entry_time - now).total_seconds()

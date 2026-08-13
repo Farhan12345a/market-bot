@@ -1,7 +1,24 @@
 trading:
-  # Entry signal parameters
-  volume_spike_multiplier: 1.5  # Volume must be this many times the 20-day average
-  entry_time: "09:35"  # Time to check entry after market open (HH:MM ET)
+  # --- Entry signal parameters ---
+  # Entry decisions are made by watching each screened candidate's price DURING
+  # the entry window below (not at one single instant anymore). If a symbol's
+  # price rises by at least `rapid_increase_pct` within any trailing
+  # `rapid_increase_lookback_minutes` window, it is bought.
+  entry_window_start: "09:30"        # Start watching candidates for a rapid price rise (HH:MM ET)
+  entry_window_end: "09:45"          # Stop looking for NEW entries after this time (HH:MM ET). Configurable - replaces the old hardcoded single 9:35 instant.
+  entry_check_interval_seconds: 60   # How often to re-check prices during the entry window, in seconds.
+                                      # Kept at 60s (matches the 1-minute bar data we fetch) - polling faster
+                                      # than that just re-reads the same bar and burns Alpaca's free-tier
+                                      # data-request quota for no benefit.
+  rapid_increase_pct: 0.5            # Minimum % price gain within the lookback window to trigger a buy (e.g. 0.5 = 0.5%)
+  rapid_increase_lookback_minutes: 2 # Rolling window, in minutes, that the % gain above is measured over.
+                                      # Starting value for testing - tune based on backtest/paper results.
+
+  # volume_spike_multiplier: 1.5  # NOT CURRENTLY USED (kept here for reference).
+  # The old entry check required a single 5-minute bar's volume to be >= 1.5x
+  # a full TRADING DAY's average volume - a unit mismatch (5 minutes of volume
+  # vs. ~390 minutes of average volume) that was almost never satisfiable.
+  # Dropped in favor of the rapid_increase_* price-based check above.
 
   # Exit parameters
   trailing_stop_pct: 0.75  # Trail stop by this %
@@ -25,7 +42,11 @@ trading:
   num_stocks_to_trade: 15  # Number of top stocks to select each day
   min_screener_score: 35  # Minimum score to trade (0-100)
 
-  # Static stock universe (used if use_daily_screener is false)
+  # Fallback / static stock universe. Edit this list anytime to add or remove symbols.
+  # Used directly when use_daily_screener is false, and ALWAYS used as a fallback
+  # if the daily screener is enabled but comes back with zero candidates (e.g. the
+  # candidates file is missing, every symbol scored below min_screener_score, or
+  # the screener errors out) - the bot never runs with an empty symbol list.
   stock_universe:
     - "SPY"
     - "QQQ"

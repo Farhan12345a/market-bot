@@ -152,50 +152,38 @@ class Strategy:
         self.config = config
         self.trades = {}  # symbol -> TradeManager
 
-    def check_entry_signal(self, symbol, current_bar, avg_volume):
+    def check_rapid_increase_entry(self, symbol, price_now, price_then):
         """
-        Entry signal: volume spike + price above open
+        Entry signal: price rose by at least `rapid_increase_pct` between
+        price_then (start of the lookback window) and price_now (latest sample).
 
-        Returns: qty to enter, or 0 if no entry
+        Returns: (qty, pct_change). qty is 0 if no entry signal.
         """
-        volume_spike_multiplier = self.config["trading"]["volume_spike_multiplier"]
-        current_volume = current_bar.get("volume", 0)
-        current_close = current_bar.get("close", 0)
-        current_open = current_bar.get("open", 0)
+        if symbol in self.trades or price_then <= 0:
+            return 0, 0.0
 
-        # Check volume spike
-        volume_spiked = current_volume >= avg_volume * volume_spike_multiplier
+        pct_threshold = self.config["trading"]["rapid_increase_pct"]
+        pct_change = (price_now - price_then) / price_then * 100
 
-        # Check price above open
-        price_above_open = current_close > current_open
-
-        if volume_spiked and price_above_open:
-            # Calculate qty based on position size
+        if pct_change >= pct_threshold:
             max_position_usd = self.config["trading"]["max_position_per_stock_usd"]
-            qty = int(max_position_usd / current_close)
-            logger.info(
-                f"{symbol}: Entry signal triggered. Volume: {current_volume} "
-                f"(avg: {avg_volume}, spike: {volume_spike_multiplier}x), "
-                f"Price: {current_close} > {current_open}"
-            )
-            return qty
-        return 0
+            qty = int(max_position_usd / price_now)
+            return qty, pct_change
 
-    def process_bar(self, symbol, current_bar, avg_volume):
-        """Process a new bar for a symbol"""
+        return 0, pct_change
+
+    def enter_trade(self, symbol, price, qty):
+        """Open a new position for symbol (called once check_rapid_increase_entry signals)"""
+        if symbol in self.trades or qty <= 0:
+            return None
+        self.trades[symbol] = TradeManager(symbol, price, qty, self.config)
+        logger.info(f"{symbol}: Entered {qty} shares at {price}")
+        return {"action": "ENTRY", "symbol": symbol, "qty": qty, "price": price}
+
+    def process_bar(self, symbol, current_bar):
+        """Process a new bar for a symbol that already has an open trade (exit checks only)"""
         current_price = current_bar.get("close", 0)
 
-        # Check for new entry
-        if symbol not in self.trades:
-            qty = self.check_entry_signal(symbol, current_bar, avg_volume)
-            if qty > 0:
-                self.trades[symbol] = TradeManager(
-                    symbol, current_price, qty, self.config
-                )
-                logger.info(f"{symbol}: Entered {qty} shares at {current_price}")
-                return {"action": "ENTRY", "symbol": symbol, "qty": qty, "price": current_price}
-
-        # Process active trade
         if symbol in self.trades:
             trade = self.trades[symbol]
 
