@@ -15,9 +15,9 @@ import os
 import sys
 import yaml
 import logging
-import signal
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
 import pytz
 
@@ -52,9 +52,6 @@ def parse_hhmm_today(hhmm_str, et_tz):
     hour, minute = map(int, hhmm_str.split(":"))
     return datetime.now(et_tz).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-def _alarm_handler(signum, frame):
-    raise TimeoutError("Screener timed out")
-
 def select_symbols(config, screener):
     """
     Run the daily screener (if enabled) and return the symbol list to trade.
@@ -62,6 +59,17 @@ def select_symbols(config, screener):
     disabled, errors, returns zero candidates, or doesn't finish within
     screener_timeout_seconds - the bot never runs with an empty symbol list,
     and never lets a slow screener eat into the entry window.
+
+    The timeout runs the screener in a background thread and simply stops
+    waiting after screener_timeout_seconds, rather than trying to interrupt it
+    with a signal. A signal-based interrupt was tried first and doesn't work
+    here: get_historical_bars() (and every scoring helper in stock_screener.py)
+    wraps its body in a broad `except Exception`, which would silently catch
+    and swallow a signal-raised TimeoutError before it could ever reach this
+    function - and since signal.alarm() only fires once, that single swallowed
+    exception would fully disable the timeout for the rest of the run.
+    Abandoning a background thread instead sidesteps that entirely: this
+    function just stops waiting, regardless of what the thread does internally.
     """
     screener_ran = False
     screener_timed_out = False
@@ -72,14 +80,15 @@ def select_symbols(config, screener):
         screener_ran = True
         timeout_seconds = config["trading"].get("screener_timeout_seconds", 420)
 
-        previous_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-        signal.alarm(timeout_seconds)
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(
+            screener.screen,
+            top_n=config["trading"]["num_stocks_to_trade"],
+            min_score=config["trading"]["min_screener_score"],
+        )
         try:
-            symbols = screener.screen(
-                top_n=config["trading"]["num_stocks_to_trade"],
-                min_score=config["trading"]["min_screener_score"],
-            )
-        except TimeoutError:
+            symbols = future.result(timeout=timeout_seconds)
+        except FutureTimeoutError:
             screener_timed_out = True
             logger.warning(
                 f"Screener did not finish within {timeout_seconds}s - "
@@ -90,8 +99,9 @@ def select_symbols(config, screener):
             logger.error(f"Screener failed: {e}")
             symbols = []
         finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, previous_handler)
+            # Don't block waiting for an abandoned/still-running screener thread -
+            # we've already moved on; let it finish (or not) in the background.
+            executor.shutdown(wait=False)
 
     candidates_evaluated = len(screener.candidates) if screener is not None else 0
 

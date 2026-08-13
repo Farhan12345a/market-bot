@@ -20,17 +20,31 @@ trading:
   # vs. ~390 minutes of average volume) that was almost never satisfiable.
   # Dropped in favor of the rapid_increase_* price-based check above.
 
-  # Exit parameters
-  trailing_stop_pct: 0.75  # Trail stop by this %
-  first_exit_pct: 0.33  # Sell this % at first pullback
-  first_exit_loss_pct: -0.5  # Trigger first exit at this loss % from entry
-  final_exit_loss_pct: -1.0  # Sell all remaining at this loss %
-  time_stop_hour: 16  # Close all positions at this hour (ET) if not exited
+  # --- Exit parameters ---
+  # Checked in this priority order every exit-monitoring pass (~once per minute
+  # live): final_exit > first_exit > momentum_fade > resistance > trailing_stop
+  # > time_stop. The first one that fires wins for that pass.
+  final_exit_loss_pct: -1.0    # Hard stop: sell ALL remaining shares if price falls this much from entry (%)
+  first_exit_loss_pct: -0.5    # Scale-out: sell first_exit_pct of the position if price falls this much from entry (%)
+  first_exit_pct: 0.33         # Fraction of the original position sold on the first_exit_loss_pct trigger above
+  trailing_stop_pct: 0.75      # Trailing stop: exit ALL remaining shares if price falls this % below the
+                                # HIGHEST price seen since entry (not below entry price - protects gains already made)
+  time_stop_hour: 16           # Close all positions at this hour (ET) if nothing else has exited yet
 
-  # Momentum fade timing (when to start checking for momentum fade)
-  momentum_fade_hour: 10       # Start checking at this hour (ET)
-  momentum_fade_minute: 15     # Start checking at this minute
-  # Combined: 10:15 AM ET
+  # Momentum fade: bails on a trade that's stalled (flat/negative trend) even
+  # without a loss, rather than waiting for it to reverse into one.
+  momentum_fade_hour: 10                 # Start checking momentum fade at this hour (ET)
+  momentum_fade_minute: 15               # ...and this minute. Combined: 10:15 AM ET by default.
+  momentum_fade_window_samples: 5        # Number of recent price samples used in the trend calc.
+                                          # One sample is taken per exit-check pass (~once per minute
+                                          # live), so 5 samples ~= the trend over the last ~4-5 minutes.
+  momentum_fade_slope_threshold: 0.0001  # Trend is considered "faded" (and the position is closed)
+                                          # when the regression slope ($ per sample) drops to or below this.
+
+  # Resistance rejection: a "high, then two lower closes" pattern right at the
+  # trade's peak is treated as a failed breakout and exits.
+  resistance_lookback_samples: 3   # Number of recent price samples checked for the failed-breakout
+                                    # pattern (oldest sample = peak, must strictly decline from there)
 
   # Position sizing
   max_position_per_stock_usd: 10000  # Max $ per stock

@@ -74,8 +74,18 @@ class TradeManager:
             return self.qty_remaining
         return 0
 
-    def calculate_momentum(self, window=5):
-        """Calculate momentum (slope of last N prices)"""
+    def calculate_momentum(self):
+        """
+        Calculate momentum: slope of a linear regression fit over the last N
+        price samples (N = momentum_fade_window_samples in config). Each sample
+        is one exit-check pass (~once per minute in live trading, see
+        run_exit_monitoring's 60s check gate), so window=5 means "the trend
+        over roughly the last 4-5 minutes." The x-axis is the sample INDEX
+        (0, 1, 2, ...), not elapsed seconds, so the slope is $ per sample,
+        which only approximates $ per minute for as long as checks land close
+        to every 60s.
+        """
+        window = self.config["trading"].get("momentum_fade_window_samples", 5)
         if len(self.price_history) < window:
             return None
 
@@ -90,7 +100,7 @@ class TradeManager:
         return None
 
     def check_momentum_fade(self, current_price):
-        """Check if momentum is fading (configurable time)"""
+        """Check if momentum is fading (configurable time, window, and threshold)"""
         now = datetime.now()
 
         # Only check momentum fade after configured time (default: 10:15 AM)
@@ -104,30 +114,32 @@ class TradeManager:
         if current_minutes < fade_start_minutes:
             return 0
 
-        momentum = self.calculate_momentum(window=5)
+        momentum = self.calculate_momentum()
+        slope_threshold = self.config["trading"].get("momentum_fade_slope_threshold", 0.0001)
 
-        # If momentum is negative or very weak, exit
-        if momentum is not None and momentum < 0.0001:
+        # If momentum is negative or very weak (slope <= threshold), exit
+        if momentum is not None and momentum < slope_threshold:
             logger.info(f"{self.symbol}: Momentum fading (slope: {momentum:.6f}), exiting")
             return self.qty_remaining
 
         return 0
 
     def check_resistance(self, current_price):
-        """Check if price hit resistance and bounced back"""
+        """Check if price hit resistance and bounced back (configurable lookback)"""
         # Resistance is when price approaches the high but can't break through
-        # and then pulls back
+        # and then pulls back: the oldest sample in the lookback is the peak,
+        # and every sample since has been strictly lower (failed breakout).
 
-        if len(self.price_history) < 3:
+        lookback = self.config["trading"].get("resistance_lookback_samples", 3)
+        if len(self.price_history) < lookback:
             return 0
 
-        recent_3 = self.price_history[-3:]
+        recent = self.price_history[-lookback:]
+        monotonic_decline = all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
 
-        # Pattern: high, lower, even lower = failed breakout, exit
-        if (recent_3[-1] < recent_3[-2] < recent_3[-3] and
-            recent_3[-3] == self.highest_since_entry):
+        if monotonic_decline and recent[0] == self.highest_since_entry:
             logger.info(
-                f"{self.symbol}: Resistance detected (high: {recent_3[-3]:.2f}, "
+                f"{self.symbol}: Resistance detected (high: {recent[0]:.2f}, "
                 f"now: {current_price:.2f}), exiting"
             )
             return self.qty_remaining
