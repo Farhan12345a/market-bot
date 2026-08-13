@@ -41,6 +41,12 @@ trading:
   candidates_file: "candidates.txt"  # File with candidate symbols
   num_stocks_to_trade: 15  # Number of top stocks to select each day
   min_screener_score: 35  # Minimum score to trade (0-100)
+  screener_timeout_seconds: 420  # 7 min hard cap on the screener. With ~50+ candidates,
+                                  # each scored via several sequential API calls (including
+                                  # a yfinance earnings lookup), the screener can run slow.
+                                  # If it hasn't finished by this deadline, it's aborted and
+                                  # the bot falls back to the static stock_universe list below
+                                  # rather than eating into the entry window.
 
   # Fallback / static stock universe. Edit this list anytime to add or remove symbols.
   # Used directly when use_daily_screener is false, and ALWAYS used as a fallback

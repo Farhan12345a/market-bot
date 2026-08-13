@@ -15,6 +15,7 @@ import os
 import sys
 import yaml
 import logging
+import signal
 import time
 from collections import deque
 from datetime import datetime, timedelta
@@ -51,32 +52,51 @@ def parse_hhmm_today(hhmm_str, et_tz):
     hour, minute = map(int, hhmm_str.split(":"))
     return datetime.now(et_tz).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
+def _alarm_handler(signum, frame):
+    raise TimeoutError("Screener timed out")
+
 def select_symbols(config, screener):
     """
     Run the daily screener (if enabled) and return the symbol list to trade.
     ALWAYS falls back to the static stock_universe list if the screener is
-    disabled, errors, or returns zero candidates - the bot never runs with
-    an empty symbol list.
+    disabled, errors, returns zero candidates, or doesn't finish within
+    screener_timeout_seconds - the bot never runs with an empty symbol list,
+    and never lets a slow screener eat into the entry window.
     """
     screener_ran = False
+    screener_timed_out = False
     symbols = []
 
     if config["trading"].get("use_daily_screener", False) and screener is not None:
         logger.info("===== PRE-MARKET SCREENER =====")
         screener_ran = True
+        timeout_seconds = config["trading"].get("screener_timeout_seconds", 420)
+
+        previous_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(timeout_seconds)
         try:
             symbols = screener.screen(
                 top_n=config["trading"]["num_stocks_to_trade"],
                 min_score=config["trading"]["min_screener_score"],
             )
+        except TimeoutError:
+            screener_timed_out = True
+            logger.warning(
+                f"Screener did not finish within {timeout_seconds}s - "
+                f"aborting and falling back to static stock_universe list"
+            )
+            symbols = []
         except Exception as e:
             logger.error(f"Screener failed: {e}")
             symbols = []
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous_handler)
 
     candidates_evaluated = len(screener.candidates) if screener is not None else 0
 
     if not symbols:
-        if screener_ran:
+        if screener_ran and not screener_timed_out:
             logger.warning(
                 "Screener produced no candidates - falling back to static stock_universe list"
             )
