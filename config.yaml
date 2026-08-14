@@ -11,8 +11,11 @@ trading:
                                       # than that just re-reads the same bar and burns Alpaca's free-tier
                                       # data-request quota for no benefit.
   rapid_increase_pct: 0.5            # Minimum % price gain within the lookback window to trigger a buy (e.g. 0.5 = 0.5%)
-  rapid_increase_lookback_minutes: 2 # Rolling window, in minutes, that the % gain above is measured over.
-                                      # Starting value for testing - tune based on backtest/paper results.
+  rapid_increase_lookback_minutes: 5 # Rolling window, in minutes, that the % gain above is measured over.
+                                      # Widened from 2min: the free IEX feed lags wall-clock by ~2-3min, and the
+                                      # lookback cutoff is computed against wall-clock time, so a window shorter
+                                      # than the feed delay could never accumulate 2 in-window samples (see the
+                                      # wall-clock-cutoff fix in run_entry_window in main.py).
 
   # volume_spike_multiplier: 1.5  # NOT CURRENTLY USED (kept here for reference).
   # The old entry check required a single 5-minute bar's volume to be >= 1.5x

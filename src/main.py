@@ -161,8 +161,11 @@ def run_entry_window(config, market_data, strategy, executor, symbols, et):
                 history = price_history[symbol]
                 history.append((ts, price))
 
-                # Drop samples older than the lookback window
-                cutoff = now - lookback
+                # Drop samples older than the lookback window, measured from the latest
+                # BAR's own timestamp (not wall-clock `now`) - the feed can lag wall-clock
+                # by a few minutes, and anchoring to `now` would evict every sample before
+                # two ever accumulate whenever that lag exceeds `lookback`.
+                cutoff = ts - lookback
                 while history and history[0][0] < cutoff:
                     history.popleft()
 
