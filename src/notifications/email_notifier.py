@@ -134,6 +134,7 @@ class EmailNotifier:
                             <th>Entry</th>
                             <th>Exit</th>
                             <th>Qty</th>
+                            <th>% Change</th>
                             <th>P&L</th>
                             <th>Exit Reason</th>
                         </tr>
@@ -141,12 +142,13 @@ class EmailNotifier:
                     <tbody>
         """
 
-        for trade in sorted(trades, key=lambda x: x.get("exit_time", ""), reverse=True):
+        for trade in sorted(trades, key=lambda x: x.get("timestamp", ""), reverse=True):
             symbol = trade.get("symbol", "N/A")
-            entry_price = trade.get("entry_price", 0)
-            exit_price = trade.get("exit_price", 0)
+            entry_price = trade.get("entry_price") or 0
+            exit_price = trade.get("exit_price") or 0
             qty = trade.get("qty", 0)
             pl = trade.get("pl", 0)
+            pl_pct = trade.get("pl_pct", 0)
             exit_reason = trade.get("exit_reason", "Unknown")
 
             pl_class = "profit" if pl >= 0 else "loss"
@@ -158,6 +160,7 @@ class EmailNotifier:
                             <td>${entry_price:.2f}</td>
                             <td>${exit_price:.2f}</td>
                             <td>{qty}</td>
+                            <td class="{pl_class}">{pl_sign}{pl_pct:.2f}%</td>
                             <td class="{pl_class}"><strong>{pl_sign}${pl:,.2f}</strong></td>
                             <td><span class="exit-reason">{exit_reason}</span></td>
                         </tr>
