@@ -5,7 +5,7 @@ trading:
   # price rises by at least `rapid_increase_pct` within any trailing
   # `rapid_increase_lookback_minutes` window, it is bought.
   entry_window_start: "09:30"        # Start watching candidates for a rapid price rise (HH:MM ET)
-  entry_window_end: "09:45"          # Stop looking for NEW entries after this time (HH:MM ET). Configurable - replaces the old hardcoded single 9:35 instant.
+  entry_window_end: "09:55"          # Stop looking for NEW entries after this time (HH:MM ET). Widened from 09:45.
   entry_check_interval_seconds: 60   # How often to re-check prices during the entry window, in seconds.
                                       # Kept at 60s (matches the 1-minute bar data we fetch) - polling faster
                                       # than that just re-reads the same bar and burns Alpaca's free-tier
@@ -16,6 +16,28 @@ trading:
                                       # lookback cutoff is computed against wall-clock time, so a window shorter
                                       # than the feed delay could never accumulate 2 in-window samples (see the
                                       # wall-clock-cutoff fix in run_entry_window in main.py).
+
+  # --- RSI pre-filter ---
+  # Computed once per candidate at symbol-selection time (market open); would
+  # gate entries on RSI < rsi_max_for_entry. Disabled: on the sharp opening-range
+  # breakouts this strategy targets, RSI often shoots up through 50-70 as PART
+  # of the move itself, so requiring RSI < 50 was filtering out exactly the
+  # kind of aggressive breakout being chased. Left in place (off) rather than
+  # removed in case it's wanted again later.
+  use_rsi_filter: false
+  rsi_period: 14        # Standard RSI lookback, in daily bars
+  rsi_max_for_entry: 50 # Only watch candidates with RSI below this for entry signals
+
+  # --- Pullback entry ---
+  # Instead of buying the instant a rapid increase is detected (which can mean
+  # buying right into the top of the initial thrust, just before a normal
+  # pullback), wait for price to pull back off the peak and then resume
+  # upward before actually entering - aims for a better average entry price
+  # and avoids buying the exact local top of the spike.
+  use_pullback_entry: true
+  pullback_min_pct: 0.1              # Min retracement from the post-thrust peak (%) to count as "a pullback started"
+  pullback_max_giveback_fraction: 0.75 # Invalidate the setup if the pullback erases more than this fraction of the thrust's gain (failed breakout)
+  resumption_confirm_pct: 0.05       # Min bounce off the pullback low (%) to confirm resumption and actually buy
 
   # volume_spike_multiplier: 1.5  # NOT CURRENTLY USED (kept here for reference).
   # The old entry check required a single 5-minute bar's volume to be >= 1.5x
@@ -65,21 +87,29 @@ trading:
                                   # the bot falls back to the static stock_universe list below
                                   # rather than eating into the entry window.
 
-  # Fallback / static stock universe. Edit this list anytime to add or remove symbols.
-  # Used directly when use_daily_screener is false, and ALWAYS used as a fallback
-  # if the daily screener is enabled but comes back with zero candidates (e.g. the
-  # candidates file is missing, every symbol scored below min_screener_score, or
-  # the screener errors out) - the bot never runs with an empty symbol list.
+  # Default stock universe. Watched EVERY DAY no matter what - merged with
+  # (not replaced by) whatever the daily screener additionally picks. Also
+  # used directly when use_daily_screener is false, and as the fallback if
+  # the screener errors, times out, or returns zero candidates.
   stock_universe:
-    - "SPY"
-    - "QQQ"
-    - "AAPL"
-    - "MSFT"
-    - "NVDA"
-    - "AMZN"
-    - "TSLA"
-    - "META"
-    - "GOOGL"
+    - "UBER"
+    - "LYFT"
+    - "ABNB"
+    - "DASH"
+    - "RBLX"
+    - "PLTR"
+    - "HOOD"
+    - "COIN"
+    - "SOFI"
+    - "SNAP"
+    - "ROKU"
+    - "CVNA"
+    - "RIVN"
+    - "U"
+    - "AFRM"
+    - "UPST"
+    - "MARA"
+    - "RIOT"
 
   min_stock_price: 5
   max_stock_price: 300

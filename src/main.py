@@ -52,13 +52,24 @@ def parse_hhmm_today(hhmm_str, et_tz):
     hour, minute = map(int, hhmm_str.split(":"))
     return datetime.now(et_tz).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-def select_symbols(config, screener):
+def select_symbols(config, screener, market_data):
     """
-    Run the daily screener (if enabled) and return the symbol list to trade.
-    ALWAYS falls back to the static stock_universe list if the screener is
-    disabled, errors, returns zero candidates, or doesn't finish within
-    screener_timeout_seconds - the bot never runs with an empty symbol list,
-    and never lets a slow screener eat into the entry window.
+    Run the daily screener (if enabled) and return the symbol list to trade,
+    ALWAYS merged with the static stock_universe default list - the default
+    list is watched every day no matter what the screener does (previously
+    this was either/or: screener picks OR the fallback list, never both).
+    The screener's picks (if it ran and found any) are added on top of the
+    defaults, deduplicated.
+
+    Also computes RSI(rsi_period) once per symbol here, at market-open, and
+    returns it alongside the symbol list. This is NOT used to filter which
+    symbols get watched - a daily-bar RSI barely moves within a single
+    trading day, so a once-at-open computation is exactly as fresh as any
+    later recomputation would be. Instead it's checked in run_entry_window as
+    one half of the combined entry signal: a rapid price increase AND
+    RSI < rsi_max_for_entry at the same time is what actually triggers a buy,
+    so every symbol still gets watched for the price signal regardless of its
+    RSI, but only enters when both conditions line up together.
 
     The timeout runs the screener in a background thread and simply stops
     waiting after screener_timeout_seconds, rather than trying to interrupt it
@@ -105,12 +116,17 @@ def select_symbols(config, screener):
 
     candidates_evaluated = len(screener.candidates) if screener is not None else 0
 
-    if not symbols:
-        if screener_ran and not screener_timed_out:
-            logger.warning(
-                "Screener produced no candidates - falling back to static stock_universe list"
-            )
-        symbols = config["trading"]["stock_universe"]
+    if not symbols and screener_ran and not screener_timed_out:
+        logger.warning("Screener produced no candidates")
+
+    default_list = config["trading"]["stock_universe"]
+    merged = list(dict.fromkeys(symbols + default_list))  # screener picks first, then defaults, deduped
+    if len(merged) != len(symbols):
+        logger.info(
+            f"Merged screener picks with the default stock_universe list: "
+            f"{len(symbols)} screener + {len(default_list)} default -> {len(merged)} total watched"
+        )
+    symbols = merged
 
     logger.info(
         f"Symbol selection: screener_ran={screener_ran}, "
@@ -118,18 +134,43 @@ def select_symbols(config, screener):
         f"symbols_selected={len(symbols)} ({', '.join(symbols)})"
     )
 
-    return symbols
+    rsi_values = {}
+    if config["trading"].get("use_rsi_filter", False):
+        rsi_period = config["trading"].get("rsi_period", 14)
+        rsi_values = {symbol: market_data.get_rsi(symbol, period=rsi_period) for symbol in symbols}
+        logger.info(
+            "RSI(%d) at market open: %s",
+            rsi_period,
+            ", ".join(
+                f"{s}={rsi_values[s]:.1f}" if rsi_values[s] is not None else f"{s}=N/A"
+                for s in symbols
+            ),
+        )
 
-def run_entry_window(config, market_data, strategy, executor, symbols, et):
+    return symbols, rsi_values
+
+def run_entry_window(config, market_data, strategy, executor, symbols, rsi_values, et):
     """
     Watch `symbols` from entry_window_start to entry_window_end for a rapid
     price rise (>= rapid_increase_pct within a trailing rapid_increase_lookback_minutes
-    window) and buy on the first qualifying sample per symbol.
+    window). If use_rsi_filter is on, also requires RSI (from rsi_values,
+    computed once at market open by select_symbols) below rsi_max_for_entry -
+    a rapid increase on an already-overbought symbol is logged but not bought.
+
+    If use_pullback_entry is on (the default): a detected rapid increase does
+    NOT buy immediately. Instead it starts tracking that symbol for a pullback
+    off the post-thrust peak followed by a resumption higher, and only buys on
+    the resumption - aiming for a better average entry than buying directly
+    into the top of the initial spike. See _advance_pullback_state for the
+    state machine. If off, falls back to the original buy-on-detection behavior.
     """
     entry_start = parse_hhmm_today(config["trading"]["entry_window_start"], et)
     entry_end = parse_hhmm_today(config["trading"]["entry_window_end"], et)
     check_interval = config["trading"]["entry_check_interval_seconds"]
     lookback = timedelta(minutes=config["trading"]["rapid_increase_lookback_minutes"])
+    use_rsi_filter = config["trading"].get("use_rsi_filter", False)
+    rsi_max = config["trading"].get("rsi_max_for_entry", 50)
+    use_pullback_entry = config["trading"].get("use_pullback_entry", False)
 
     now = datetime.now(et)
     while now < entry_start:
@@ -142,6 +183,7 @@ def run_entry_window(config, market_data, strategy, executor, symbols, et):
     )
 
     price_history = {symbol: deque() for symbol in symbols}
+    pending_pullbacks = {}  # symbol -> state dict, only used when use_pullback_entry is on
     entries_triggered = 0
 
     while datetime.now(et) < entry_end:
@@ -169,6 +211,20 @@ def run_entry_window(config, market_data, strategy, executor, symbols, et):
                 while history and history[0][0] < cutoff:
                     history.popleft()
 
+                symbol_rsi = rsi_values.get(symbol)
+                if use_rsi_filter and (symbol_rsi is None or symbol_rsi >= rsi_max):
+                    continue  # doesn't qualify on RSI at all - don't bother tracking it
+
+                if use_pullback_entry and symbol in pending_pullbacks:
+                    _advance_pullback_state(
+                        config, strategy, executor, symbol, price,
+                        pending_pullbacks, symbol_rsi,
+                    )
+                    if symbol in strategy.get_open_trades():
+                        entries_triggered += 1
+                        del pending_pullbacks[symbol]
+                    continue
+
                 if len(history) < 2:
                     continue
 
@@ -176,12 +232,29 @@ def run_entry_window(config, market_data, strategy, executor, symbols, et):
                 qty, pct_change = strategy.check_rapid_increase_entry(symbol, price, price_then)
 
                 if qty > 0:
+                    if use_pullback_entry:
+                        pending_pullbacks[symbol] = {
+                            "qty": qty,
+                            "base_price": price_then,
+                            "thrust_price": price,
+                            "peak": price,
+                            "pullback_low": None,
+                            "pct_change": pct_change,
+                        }
+                        logger.info(
+                            f"{symbol}: RAPID INCREASE detected (+{pct_change:.2f}% over "
+                            f"{lookback.total_seconds()/60:.0f}min) - watching for a pullback "
+                            f"and resumption before entering"
+                        )
+                        continue
+
                     signal = strategy.enter_trade(symbol, price, qty)
                     if signal:
+                        rsi_note = f", RSI={symbol_rsi:.1f}" if symbol_rsi is not None else ""
                         logger.info(
                             f"{symbol}: RAPID INCREASE entry triggered - "
                             f"+{pct_change:.2f}% over {lookback.total_seconds()/60:.0f}min "
-                            f"(threshold {config['trading']['rapid_increase_pct']}%)"
+                            f"(threshold {config['trading']['rapid_increase_pct']}%){rsi_note}"
                         )
                         executor.execute_signal(signal)
                         entries_triggered += 1
@@ -197,6 +270,68 @@ def run_entry_window(config, market_data, strategy, executor, symbols, et):
         f"entries_triggered={entries_triggered}"
     )
     return entries_triggered
+
+def _advance_pullback_state(config, strategy, executor, symbol, price, pending_pullbacks, symbol_rsi):
+    """
+    Advance one symbol's pullback-entry state machine by one price sample.
+    Only called (from run_entry_window) once a rapid-increase thrust has
+    already been detected for `symbol` and it hasn't been bought yet.
+
+    Resumption is checked BEFORE peak-tracking/invalidation: if price has
+    bounced far enough off a tracked pullback low, that's a buy regardless of
+    whether it also happens to exceed the prior peak - checking peak-update
+    first would mean a resumption strong enough to blow straight past the old
+    peak in one tick could skip the buy entirely, which defeats the point.
+    """
+    setup = pending_pullbacks[symbol]
+    min_pullback_pct = config["trading"].get("pullback_min_pct", 0.1) / 100
+    max_giveback_fraction = config["trading"].get("pullback_max_giveback_fraction", 0.75)
+    resumption_confirm_pct = config["trading"].get("resumption_confirm_pct", 0.05) / 100
+
+    if setup["pullback_low"] is not None:
+        if price < setup["pullback_low"]:
+            setup["pullback_low"] = price
+        else:
+            bounce_pct = (price - setup["pullback_low"]) / setup["pullback_low"]
+            if bounce_pct >= resumption_confirm_pct:
+                qty = int(config["trading"]["max_position_per_stock_usd"] / price)
+                if qty <= 0:
+                    del pending_pullbacks[symbol]
+                    return
+                signal = strategy.enter_trade(symbol, price, qty)
+                if signal:
+                    rsi_note = f", RSI={symbol_rsi:.1f}" if symbol_rsi is not None else ""
+                    logger.info(
+                        f"{symbol}: PULLBACK RESUMPTION entry triggered - thrust "
+                        f"+{setup['pct_change']:.2f}%, peak {setup['peak']:.2f}, pulled back to "
+                        f"{setup['pullback_low']:.2f}, resumed to {price:.2f}{rsi_note}"
+                    )
+                    executor.execute_signal(signal)
+                return
+
+    if price > setup["peak"]:
+        setup["peak"] = price
+        setup["pullback_low"] = None
+        return
+
+    thrust_gain = setup["peak"] - setup["base_price"]
+    if thrust_gain <= 0:
+        del pending_pullbacks[symbol]
+        return
+
+    giveback = setup["peak"] - price
+    if giveback / thrust_gain >= max_giveback_fraction:
+        logger.info(
+            f"{symbol}: pullback gave back {giveback / thrust_gain * 100:.0f}% of the thrust's "
+            f"gain (peak {setup['peak']:.2f} -> {price:.2f}) - setup invalidated"
+        )
+        del pending_pullbacks[symbol]
+        return
+
+    if setup["pullback_low"] is None:
+        retracement_pct = giveback / setup["peak"]
+        if retracement_pct >= min_pullback_pct:
+            setup["pullback_low"] = price
 
 def run_exit_monitoring(config, market_data, strategy, executor, email_notifier, entries_triggered, et):
     """
@@ -305,9 +440,9 @@ def main():
 
             logger.info("Market is open, monitoring for signals...")
 
-            symbols = select_symbols(config, screener)
+            symbols, rsi_values = select_symbols(config, screener, market_data)
             entries_triggered = run_entry_window(
-                config, market_data, strategy, executor, symbols, et
+                config, market_data, strategy, executor, symbols, rsi_values, et
             )
             run_exit_monitoring(
                 config, market_data, strategy, executor, email_notifier, entries_triggered, et
