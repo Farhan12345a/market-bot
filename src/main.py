@@ -25,7 +25,7 @@ import pytz
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.broker.alpaca_broker import AlpacaBroker
-from src.strategy.strategy import Strategy
+from src.strategy.strategy import Strategy, TradeManager
 from src.data.market_data import MarketDataManager
 from src.executor.executor import Executor
 from src.screener.stock_screener import StockScreener
@@ -398,6 +398,65 @@ def run_exit_monitoring(config, market_data, strategy, executor, email_notifier,
 
         time.sleep(30)
 
+def reconcile_existing_positions(broker, strategy):
+    """
+    Adopt any positions that already exist in the broker account but aren't
+    tracked in strategy.trades. This happens whenever the process restarts
+    (e.g. after the hosting environment reclaims the container) while
+    positions are still open - a fresh Strategy() starts with empty in-memory
+    tracking, so without this, the tiered stop-loss/trailing-stop logic in
+    Strategy.process_bar never runs again for those positions until they're
+    closed or the 4pm time-stop flatten sweeps everything.
+
+    Uses the broker's own avg_entry_price, mirroring the same fallback
+    executor.flatten_all_positions() already uses for positions it didn't
+    itself open. The trailing-stop high-water mark is seeded with
+    max(entry_price, current_price) rather than entry_price alone - a partial
+    correction for not knowing the position's true peak since its original
+    entry, since the broker doesn't expose intraday high-since-entry.
+    """
+    try:
+        positions = broker.get_positions()
+    except Exception as e:
+        logger.error(f"Error reconciling existing positions: {e}")
+        return
+
+    for symbol, position in positions.items():
+        if symbol in strategy.trades:
+            continue
+        try:
+            qty = int(abs(float(position.qty)))
+            if qty <= 0:
+                continue
+
+            avg_entry = getattr(position, "avg_entry_price", None)
+            current_price_attr = getattr(position, "current_price", None)
+            current_price = float(current_price_attr) if current_price_attr else None
+            entry_price = float(avg_entry) if avg_entry else current_price
+
+            if not entry_price or entry_price <= 0:
+                logger.warning(
+                    f"{symbol}: found an open position on startup but couldn't "
+                    f"determine an entry price - leaving unmanaged, will still be "
+                    f"caught by the time-stop/daily-loss-limit safety nets"
+                )
+                continue
+
+            trade = TradeManager(symbol, entry_price, qty, strategy.config)
+            if current_price and current_price > trade.highest_price:
+                trade.highest_price = current_price
+                trade.highest_since_entry = current_price
+                trade.price_history = [entry_price, current_price]
+
+            strategy.trades[symbol] = trade
+            logger.info(
+                f"{symbol}: adopted pre-existing position on startup - {qty} shares "
+                f"@ {entry_price:.2f} (broker avg_entry_price) - resuming stop-loss/"
+                f"trailing-stop management"
+            )
+        except Exception as e:
+            logger.error(f"Error reconciling position for {symbol}: {e}")
+
 def main():
     """Main trading loop"""
     try:
@@ -413,6 +472,7 @@ def main():
         # Initialize components
         market_data = MarketDataManager(broker)
         strategy = Strategy(config)
+        reconcile_existing_positions(broker, strategy)
         executor = Executor(broker, config)
         email_notifier = EmailNotifier(config)
 
