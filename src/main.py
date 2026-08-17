@@ -398,7 +398,7 @@ def run_exit_monitoring(config, market_data, strategy, executor, email_notifier,
 
         time.sleep(30)
 
-def reconcile_existing_positions(broker, strategy):
+def reconcile_existing_positions(broker, strategy, executor):
     """
     Adopt any positions that already exist in the broker account but aren't
     tracked in strategy.trades. This happens whenever the process restarts
@@ -414,6 +414,12 @@ def reconcile_existing_positions(broker, strategy):
     max(entry_price, current_price) rather than entry_price alone - a partial
     correction for not knowing the position's true peak since its original
     entry, since the broker doesn't expose intraday high-since-entry.
+
+    Also seeds executor.open_entries[symbol] with the same entry price -
+    Executor.submit_exit_order() reads P&L from that dict (populated
+    separately from strategy.trades, only on a normal submit_entry_order()
+    call), so without this a reconciled position's eventual exit would log
+    an accurate STOP DECISION but a wrong "entry was None, P&L: $0.00" record.
     """
     try:
         positions = broker.get_positions()
@@ -449,6 +455,7 @@ def reconcile_existing_positions(broker, strategy):
                 trade.price_history = [entry_price, current_price]
 
             strategy.trades[symbol] = trade
+            executor.open_entries[symbol] = entry_price
             logger.info(
                 f"{symbol}: adopted pre-existing position on startup - {qty} shares "
                 f"@ {entry_price:.2f} (broker avg_entry_price) - resuming stop-loss/"
@@ -472,8 +479,8 @@ def main():
         # Initialize components
         market_data = MarketDataManager(broker)
         strategy = Strategy(config)
-        reconcile_existing_positions(broker, strategy)
         executor = Executor(broker, config)
+        reconcile_existing_positions(broker, strategy, executor)
         email_notifier = EmailNotifier(config)
 
         logger.info("Paper trading bot started")
