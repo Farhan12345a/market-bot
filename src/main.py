@@ -16,6 +16,8 @@ import sys
 import yaml
 import logging
 import time
+import csv
+from pathlib import Path
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
@@ -241,6 +243,8 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
                             f"green 1min bars, closes {closes[0]:.2f} -> {closes[1]:.2f} -> "
                             f"{closes[2]:.2f}{rsi_note}"
                         )
+                        signal["entry_method"] = "THREE_BAR_MOMENTUM"
+                        signal["entry_rsi"] = symbol_rsi
                         executor.execute_signal(signal)
                         entries_triggered += 1
                         pending_pullbacks.pop(symbol, None)
@@ -287,6 +291,8 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
                             f"+{pct_change:.2f}% over {lookback.total_seconds()/60:.0f}min "
                             f"(threshold {config['trading']['rapid_increase_pct']}%){rsi_note}"
                         )
+                        signal["entry_method"] = "RAPID_INCREASE_IMMEDIATE"
+                        signal["entry_rsi"] = symbol_rsi
                         executor.execute_signal(signal)
                         entries_triggered += 1
 
@@ -373,6 +379,8 @@ def _advance_pullback_state(config, strategy, executor, symbol, price, pending_p
                         f"+{setup['pct_change']:.2f}%, peak {setup['peak']:.2f}, pulled back to "
                         f"{setup['pullback_low']:.2f}, resumed to {price:.2f}{rsi_note}"
                     )
+                    signal["entry_method"] = "PULLBACK_RESUMPTION"
+                    signal["entry_rsi"] = symbol_rsi
                     executor.execute_signal(signal)
                 return
 
@@ -400,7 +408,7 @@ def _advance_pullback_state(config, strategy, executor, symbol, price, pending_p
         if retracement_pct >= min_pullback_pct:
             setup["pullback_low"] = price
 
-def run_exit_monitoring(config, market_data, strategy, executor, email_notifier, entries_triggered, et):
+def run_exit_monitoring(config, market_data, strategy, executor, email_notifier, entries_triggered, et, symbols=None):
     """
     Monitor open positions for exits until either all positions have closed
     (only meaningful if we actually entered something today) or the 4 PM
@@ -414,9 +422,18 @@ def run_exit_monitoring(config, market_data, strategy, executor, email_notifier,
     the second half, a restart-recovered position closing out would never be
     recognized as "all trades closed" and the trades.json/email summary
     would only ever fire off the blunt 4pm time-stop instead.
+
+    `symbols` (the day's full watched list, screener + defaults merged) is
+    optional only for callers that don't have it handy - it's used purely to
+    fill in the "symbols watched" column of the daily summary CSV.
     """
     time_stop_hour = config["trading"]["time_stop_hour"]
     had_any_trades = entries_triggered > 0 or bool(strategy.get_open_trades())
+    starting_cash = None
+    try:
+        starting_cash = float(market_data.broker.get_account().cash)
+    except Exception as e:
+        logger.debug(f"Could not read starting cash for daily summary: {e}")
     last_check = datetime.now(et)
 
     while True:
@@ -427,6 +444,7 @@ def run_exit_monitoring(config, market_data, strategy, executor, email_notifier,
             executor.flatten_all_positions()
             executor.save_trades_log()
             email_notifier.send_daily_summary()
+            _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et)
             return
 
         if (now - last_check).seconds >= 60 or last_check == now:
@@ -440,6 +458,17 @@ def run_exit_monitoring(config, market_data, strategy, executor, email_notifier,
 
                     signal = strategy.process_bar(symbol, current_bar)
                     if signal:
+                        # RSI is purely for the daily report - a failure here (API
+                        # hiccup, insufficient history) must never block the actual
+                        # exit order, so it's isolated in its own try/except rather
+                        # than sharing the outer one that guards execute_signal.
+                        try:
+                            signal["exit_rsi"] = market_data.get_rsi(
+                                symbol, period=config["trading"].get("rsi_period", 14)
+                            )
+                        except Exception as rsi_err:
+                            logger.debug(f"Could not fetch exit RSI for {symbol}: {rsi_err}")
+                            signal["exit_rsi"] = None
                         executor.execute_signal(signal)
 
                 except Exception as e:
@@ -454,6 +483,7 @@ def run_exit_monitoring(config, market_data, strategy, executor, email_notifier,
                 logger.info("All trades closed. Sending daily summary...")
                 executor.save_trades_log()
                 email_notifier.send_daily_summary()
+                _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et)
                 logger.info(
                     f"Daily session complete: entries_triggered={entries_triggered}, "
                     f"positions_open=0"
@@ -467,6 +497,7 @@ def run_exit_monitoring(config, market_data, strategy, executor, email_notifier,
             executor.flatten_all_positions()
             executor.save_trades_log()
             email_notifier.send_daily_summary()
+            _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et)
             logger.info(
                 f"Daily session complete: entries_triggered={entries_triggered}, "
                 f"reason=time_stop"
@@ -474,6 +505,59 @@ def run_exit_monitoring(config, market_data, strategy, executor, email_notifier,
             return
 
         time.sleep(30)
+
+def _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et, filepath="logs/daily_summary.csv"):
+    """
+    Append one row to a running, never-overwritten master CSV - one row per
+    trading DAY (as opposed to trade_history.csv's one row per trade) - for
+    the "how did each day's settings/results compare" view: date, P&L,
+    win rate, which entry method(s) were active, symbols watched, etc.
+    """
+    try:
+        today_trades = [t for t in executor.trades_log if (t.get("exit_time") or "").startswith(datetime.now(et).strftime("%Y-%m-%d"))]
+        total_pl = sum(t.get("pl", 0) for t in today_trades)
+        wins = [t for t in today_trades if t.get("pl", 0) > 0]
+        losses = [t for t in today_trades if t.get("pl", 0) < 0]
+        win_rate = (len(wins) / len(today_trades) * 100) if today_trades else 0.0
+
+        ending_cash = None
+        try:
+            ending_cash = float(market_data.broker.get_account().cash)
+        except Exception as e:
+            logger.debug(f"Could not read ending cash for daily summary: {e}")
+
+        row = {
+            "date": datetime.now(et).strftime("%Y-%m-%d"),
+            "total_pl": round(total_pl, 2),
+            "starting_cash": starting_cash,
+            "ending_cash": ending_cash,
+            "trades_count": len(today_trades),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate_pct": round(win_rate, 1),
+            "entries_triggered": entries_triggered,
+            "symbols_watched_count": len(symbols) if symbols else None,
+            "symbols_watched": "|".join(symbols) if symbols else "",
+            "symbols_traded": "|".join(sorted({t["symbol"] for t in today_trades})),
+            "use_pullback_entry": config["trading"].get("use_pullback_entry"),
+            "use_three_bar_momentum": config["trading"].get("use_three_bar_momentum"),
+            "use_rsi_filter": config["trading"].get("use_rsi_filter"),
+            "rapid_increase_pct": config["trading"].get("rapid_increase_pct"),
+            "entry_window": f"{config['trading'].get('entry_window_start')}-{config['trading'].get('entry_window_end')}",
+        }
+
+        fieldnames = list(row.keys())
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not path.exists() or path.stat().st_size == 0
+        with open(path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+        logger.info(f"Wrote daily summary row to {filepath}")
+    except Exception as e:
+        logger.error(f"Error writing daily summary CSV: {e}")
 
 def reconcile_existing_positions(broker, strategy, executor):
     """
@@ -547,6 +631,7 @@ def reconcile_existing_positions(broker, strategy, executor):
 
             strategy.trades[symbol] = trade
             executor.open_entries[symbol] = entry_price
+            executor.record_entry_meta(symbol, method="RECONCILED", rsi=None, entry_time=None)
             logger.info(
                 f"{symbol}: adopted pre-existing position on startup - {qty} shares "
                 f"@ {entry_price:.2f} (broker avg_entry_price) - resuming stop-loss/"
@@ -604,7 +689,7 @@ def main():
                 config, market_data, strategy, executor, symbols, rsi_values, et
             )
             run_exit_monitoring(
-                config, market_data, strategy, executor, email_notifier, entries_triggered, et
+                config, market_data, strategy, executor, email_notifier, entries_triggered, et, symbols
             )
 
     except KeyboardInterrupt:

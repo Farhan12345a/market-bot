@@ -132,11 +132,15 @@ class EmailNotifier:
                         <tr>
                             <th>Symbol</th>
                             <th>Entry</th>
+                            <th>Entry Method</th>
+                            <th>Entry RSI</th>
                             <th>Exit</th>
+                            <th>Exit RSI</th>
                             <th>Qty</th>
                             <th>% Change</th>
                             <th>P&L</th>
                             <th>Exit Reason</th>
+                            <th>Stop Loss?</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -150,6 +154,12 @@ class EmailNotifier:
             pl = trade.get("pl", 0)
             pl_pct = trade.get("pl_pct", 0)
             exit_reason = trade.get("exit_reason", "Unknown")
+            entry_method = trade.get("entry_method") or "N/A"
+            entry_rsi = trade.get("entry_rsi")
+            exit_rsi = trade.get("exit_rsi")
+            entry_rsi_str = f"{entry_rsi:.1f}" if isinstance(entry_rsi, (int, float)) else "N/A"
+            exit_rsi_str = f"{exit_rsi:.1f}" if isinstance(exit_rsi, (int, float)) else "N/A"
+            stop_loss_str = "Yes" if trade.get("stop_loss_used") else "No"
 
             pl_class = "profit" if pl >= 0 else "loss"
             pl_sign = "+" if pl >= 0 else ""
@@ -158,11 +168,15 @@ class EmailNotifier:
                         <tr>
                             <td class="symbol">{symbol}</td>
                             <td>${entry_price:.2f}</td>
+                            <td><span class="exit-reason">{entry_method}</span></td>
+                            <td>{entry_rsi_str}</td>
                             <td>${exit_price:.2f}</td>
+                            <td>{exit_rsi_str}</td>
                             <td>{qty}</td>
                             <td class="{pl_class}">{pl_sign}{pl_pct:.2f}%</td>
                             <td class="{pl_class}"><strong>{pl_sign}${pl:,.2f}</strong></td>
                             <td><span class="exit-reason">{exit_reason}</span></td>
+                            <td>{stop_loss_str}</td>
                         </tr>
             """
 

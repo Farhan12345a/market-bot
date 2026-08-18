@@ -1,9 +1,15 @@
+import csv
 import logging
 import json
 from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Exit reasons that represent a protective stop firing (vs. a discretionary/
+# time-based exit) - used to fill the "was a stop-loss used" column in the
+# daily trade report.
+STOP_LOSS_EXIT_REASONS = {"FINAL_EXIT_-1.0%", "FIRST_EXIT_-0.5%", "TRAILING_STOP", "FLATTEN_ALL"}
 
 class Executor:
     """Handles order submission and trade tracking"""
@@ -20,12 +26,31 @@ class Executor:
         self.daily_pnl = 0.0
         self.order_history = []
         self.open_entries = {}  # symbol -> entry price, used to compute P&L when the matching exit(s) happen
+        self.entry_meta = {}  # symbol -> {method, rsi, entry_time}, for the daily trade report
+        self._csv_appended_count = 0  # how many trades_log rows have already been written to trade_history.csv -
+        # trades_log is never cleared across days in a long-running process, so without this cursor,
+        # calling save_trades_log() on day 2 would re-append day 1's trades to the CSV a second time.
 
-    def submit_entry_order(self, symbol, qty, price=None):
+    def record_entry_meta(self, symbol, method, rsi, entry_time=None):
+        """
+        Record how/when a position was opened, independent of open_entries
+        (which only holds price and is read by the P&L calc). Called for
+        every entry path (three-bar momentum, pullback resumption, rapid
+        increase, and reconciliation on restart) so submit_exit_order can
+        attach it to that trade's row in the daily report.
+        """
+        self.entry_meta[symbol] = {
+            "method": method,
+            "rsi": rsi,
+            "entry_time": entry_time or datetime.now().isoformat(),
+        }
+
+    def submit_entry_order(self, symbol, qty, price=None, entry_method=None, entry_rsi=None):
         """Submit a market order to enter a position"""
         try:
             order = self.broker.submit_market_order(symbol, qty, side="buy")
             self.open_entries[symbol] = price
+            self.record_entry_meta(symbol, method=entry_method or "UNKNOWN", rsi=entry_rsi)
 
             self.order_history.append({
                 "timestamp": datetime.now().isoformat(),
@@ -43,19 +68,27 @@ class Executor:
             logger.error(f"Failed to submit entry order for {symbol}: {e}")
             raise
 
-    def submit_exit_order(self, symbol, qty, reason="", price=None):
+    def submit_exit_order(self, symbol, qty, reason="", price=None, exit_rsi=None):
         """Submit a market order to exit a position and record a documented trade row"""
         try:
             order = self.broker.submit_market_order(symbol, qty, side="sell")
 
             entry_price = self.open_entries.get(symbol)
+            meta = self.entry_meta.get(symbol, {})
+            now_iso = datetime.now().isoformat()
             trade_record = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": now_iso,
                 "symbol": symbol,
+                "entry_time": meta.get("entry_time"),
                 "entry_price": entry_price,
+                "entry_method": meta.get("method"),
+                "entry_rsi": meta.get("rsi"),
+                "exit_time": now_iso,
                 "exit_price": price,
                 "qty": qty,
                 "exit_reason": reason,
+                "exit_rsi": exit_rsi,
+                "stop_loss_used": reason in STOP_LOSS_EXIT_REASONS,
                 "order_id": order.id if hasattr(order, "id") else None,
             }
             if entry_price and price is not None:
@@ -99,9 +132,13 @@ class Executor:
 
         try:
             if action == "ENTRY":
-                return self.submit_entry_order(symbol, qty, price)
+                return self.submit_entry_order(
+                    symbol, qty, price,
+                    entry_method=signal.get("entry_method"),
+                    entry_rsi=signal.get("entry_rsi"),
+                )
             elif action in ["EXIT_ALL", "PARTIAL_EXIT"]:
-                return self.submit_exit_order(symbol, qty, reason, price)
+                return self.submit_exit_order(symbol, qty, reason, price, exit_rsi=signal.get("exit_rsi"))
         except Exception as e:
             logger.error(f"Error executing signal: {e}")
             raise
@@ -141,6 +178,8 @@ class Executor:
                     if symbol not in self.open_entries or not self.open_entries[symbol]:
                         avg_entry = getattr(position, "avg_entry_price", None)
                         self.open_entries[symbol] = float(avg_entry) if avg_entry else None
+                    if symbol not in self.entry_meta:
+                        self.record_entry_meta(symbol, method="RECONCILED", rsi=None)
                     current_price = getattr(position, "current_price", None)
                     price = float(current_price) if current_price else None
 
@@ -154,7 +193,13 @@ class Executor:
             raise
 
     def save_trades_log(self, filepath="logs/trades.json"):
-        """Save trades log to file"""
+        """
+        Save today's trades log to file (overwritten each day - this is what
+        email_notifier reads for the same-day summary) AND append every trade
+        from today to a running, never-overwritten master CSV
+        (logs/trade_history.csv) - one row per completed trade across every
+        trading day this bot has ever run, for cross-day analysis.
+        """
         try:
             Path(filepath).parent.mkdir(parents=True, exist_ok=True)
             with open(filepath, "w") as f:
@@ -162,3 +207,38 @@ class Executor:
             logger.info(f"Trades log saved to {filepath}")
         except Exception as e:
             logger.error(f"Error saving trades log: {e}")
+
+        self._append_trade_history_csv()
+
+    def _append_trade_history_csv(self, filepath="logs/trade_history.csv"):
+        """Append only NEW trades_log rows (since the last call) to the
+        running master CSV, one row per completed trade. trades_log itself is
+        never cleared across days in a long-running process, so _csv_appended_count
+        tracks how much has already been written to avoid re-appending the
+        same trades on every subsequent day's save_trades_log() call."""
+        new_trades = self.trades_log[self._csv_appended_count:]
+        if not new_trades:
+            return
+
+        fieldnames = [
+            "date", "symbol", "entry_time", "entry_price", "entry_method", "entry_rsi",
+            "exit_time", "exit_price", "exit_reason", "stop_loss_used", "exit_rsi",
+            "qty", "pl", "pl_pct",
+        ]
+        try:
+            path = Path(filepath)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_header = not path.exists() or path.stat().st_size == 0
+
+            with open(path, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+                if write_header:
+                    writer.writeheader()
+                for trade in new_trades:
+                    row = dict(trade)
+                    row["date"] = (trade.get("exit_time") or trade.get("timestamp") or "")[:10]
+                    writer.writerow(row)
+            self._csv_appended_count = len(self.trades_log)
+            logger.info(f"Appended {len(new_trades)} trade(s) to {filepath}")
+        except Exception as e:
+            logger.error(f"Error appending trade history CSV: {e}")
