@@ -73,23 +73,50 @@ class StockScreener:
             return 0
 
     def _get_volume_ratio(self, symbol) -> float:
-        """Calculate recent volume vs 20-day average"""
+        """
+        Compare today's volume-so-far (since market open) to the average
+        volume accumulated by this same time of day over the past 10 trading
+        days. screen() runs at/after today's market open (see main()), so
+        this is a live same-morning signal - it reacts to a volume surge
+        actually happening right now. The old version compared yesterday's
+        completed full-day volume to a 20-day average, which only reflects
+        what happened yesterday and never changes across the trading day.
+        """
         try:
-            end = datetime.now(self.et).date()
-            start = end - timedelta(days=30)
+            now = datetime.now(self.et)
+            today = now.date()
+            cutoff_time = now.time()
 
-            bars = self.broker.get_historical_bars(symbol, start, end, "1Day")
+            lookback_days = 10
+            start = today - timedelta(days=lookback_days * 2)  # buffer for weekends/holidays
 
-            if symbol not in bars or len(bars[symbol]) < 2:
+            bars = self.broker.get_historical_bars(symbol, start, today, "5Min")
+
+            if symbol not in bars or bars[symbol].empty:
                 return 1.0
 
-            df = bars[symbol].sort_values("timestamp")
+            df = bars[symbol].copy()
+            df["ts_et"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(self.et)
+            df["date"] = df["ts_et"].dt.date
+            df["time"] = df["ts_et"].dt.time
 
-            # Latest volume vs 20-day average
-            latest_vol = df.iloc[-1]["volume"]
-            avg_vol = df.tail(20)["volume"].mean()
+            today_vol = df.loc[(df["date"] == today) & (df["time"] <= cutoff_time), "volume"].sum()
+            if today_vol == 0:
+                return 1.0
 
-            return latest_vol / avg_vol if avg_vol > 0 else 1.0
+            prior_days = sorted(d for d in df["date"].unique() if d < today)[-lookback_days:]
+
+            prior_sums = []
+            for d in prior_days:
+                day_vol = df.loc[(df["date"] == d) & (df["time"] <= cutoff_time), "volume"].sum()
+                if day_vol > 0:
+                    prior_sums.append(day_vol)
+
+            if not prior_sums:
+                return 1.0
+
+            avg_prior = sum(prior_sums) / len(prior_sums)
+            return today_vol / avg_prior if avg_prior > 0 else 1.0
 
         except Exception as e:
             logger.debug(f"Error calculating volume ratio for {symbol}: {e}")
