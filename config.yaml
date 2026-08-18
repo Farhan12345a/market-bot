@@ -34,7 +34,13 @@ trading:
   # pullback), wait for price to pull back off the peak and then resume
   # upward before actually entering - aims for a better average entry price
   # and avoids buying the exact local top of the spike.
-  use_pullback_entry: true
+  # OFF for now: this contradicts use_three_bar_momentum below in practice -
+  # the cleanest, strongest thrusts (the ones that pass 3-bar momentum) are
+  # exactly the moves this patient logic exists to NOT buy immediately, so
+  # running both together meant the best-looking setups got the least
+  # disciplined entry while choppier ones got the most. Toggle back on to
+  # A/B test against the three-bar fast path.
+  use_pullback_entry: false
   pullback_min_pct: 0.1              # Min retracement from the post-thrust peak (%) to count as "a pullback started"
   pullback_max_giveback_fraction: 0.75 # Invalidate the setup if the pullback erases more than this fraction of the thrust's gain (failed breakout)
   resumption_confirm_pct: 0.05       # Min bounce off the pullback low (%) to confirm resumption and actually buy
@@ -46,6 +52,8 @@ trading:
   # a faster, more aggressive confirmation than waiting for a % threshold to
   # accumulate over rapid_increase_lookback_minutes. Still gated by the RSI
   # filter above (if enabled). Runs alongside, not instead of, the signal below.
+  # Independently toggleable from use_pullback_entry above so both can be
+  # A/B tested separately.
   use_three_bar_momentum: true
 
   # volume_spike_multiplier: 1.5  # NOT CURRENTLY USED (kept here for reference).
@@ -119,6 +127,39 @@ trading:
     - "UPST"
     - "MARA"
     - "RIOT"
+    # --- expanded from 18 to 50, same mid-cap/high-beta character as above ---
+    - "CLSK"  # crypto miner
+    - "HUT"   # crypto miner
+    - "CIFR"  # crypto miner
+    - "WULF"  # crypto miner
+    - "BITF"  # crypto miner
+    - "LCID"  # EV
+    - "NIO"   # EV
+    - "XPEV"  # EV
+    - "LI"    # EV
+    - "PINS"  # consumer/social
+    - "DKNG"  # gaming/betting
+    - "BMBL"  # consumer/social
+    - "CHWY"  # consumer e-commerce
+    - "MTCH"  # consumer/social
+    - "GME"   # high-beta/retail favorite
+    - "AMC"   # high-beta/retail favorite
+    - "TLRY"  # cannabis
+    - "CGC"   # cannabis
+    - "PLUG"  # clean energy
+    - "FCEL"  # clean energy
+    - "RUN"   # clean energy
+    - "IONQ"  # AI/quantum momentum
+    - "SOUN"  # AI/quantum momentum
+    - "RGTI"  # AI/quantum momentum
+    - "AI"    # AI/quantum momentum
+    - "RKLB"  # space
+    - "ASTS"  # space
+    - "OPEN"  # gig/marketplace
+    - "CART"  # gig/marketplace
+    - "GRAB"  # gig/marketplace
+    - "NU"    # fintech
+    - "FUBO"  # streaming
 
   min_stock_price: 5
   max_stock_price: 300

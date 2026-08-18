@@ -1,7 +1,7 @@
 import os
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -81,6 +81,26 @@ class AlpacaBroker:
         except Exception as e:
             logger.error(f"Error submitting limit order: {e}")
             raise
+
+    def get_filled_sell_orders_since(self, symbol, since):
+        """
+        Filled SELL orders for `symbol` at or after `since` (tz-aware datetime).
+        Used on startup to detect whether a position already had a partial
+        exit before a restart, so reconciliation doesn't re-arm an exit
+        tranche that already fired.
+        """
+        try:
+            request = GetOrdersRequest(
+                status=QueryOrderStatus.CLOSED,
+                symbols=[symbol],
+                side=OrderSide.SELL,
+                after=since,
+            )
+            orders = self.trading_client.get_orders(request)
+            return [o for o in orders if float(getattr(o, "filled_qty", 0) or 0) > 0]
+        except Exception as e:
+            logger.error(f"Error fetching sell orders for {symbol}: {e}")
+            return []
 
     def get_historical_bars(self, symbols, start, end, timeframe="1Day"):
         """Get historical bar data"""

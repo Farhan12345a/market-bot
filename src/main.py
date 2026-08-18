@@ -196,6 +196,7 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
     price_history = {symbol: deque() for symbol in symbols}
     bar_history = {symbol: deque(maxlen=3) for symbol in symbols}  # last 3 1min bars, for use_three_bar_momentum
     pending_pullbacks = {}  # symbol -> state dict, only used when use_pullback_entry is on
+    symbol_price_log = {symbol: [] for symbol in symbols}  # full (untrimmed) history, for _write_price_log
     entries_triggered = 0
 
     while datetime.now(et) < entry_end:
@@ -215,6 +216,7 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
                 history = price_history[symbol]
                 history.append((ts, price))
                 bar_history[symbol].append(bar)
+                symbol_price_log[symbol].append((ts, price))
 
                 # Drop samples older than the lookback window, measured from the latest
                 # BAR's own timestamp (not wall-clock `now`) - the feed can lag wall-clock
@@ -298,7 +300,30 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
         f"Entry window closed. symbols_monitored={len(symbols)}, "
         f"entries_triggered={entries_triggered}"
     )
+    _write_price_log(symbol_price_log, et)
     return entries_triggered
+
+def _write_price_log(symbol_price_log, et):
+    """
+    Dump this entry window's minute-by-minute price samples for every
+    watched symbol (screener picks + default watchlist) to a dedicated,
+    per-day log file - one block per symbol, chronological within each -
+    so the actual price action behind a day's entries (or non-entries) can
+    be eyeballed directly instead of dug out of trading.log. Separate file,
+    doesn't touch trading.log.
+    """
+    date_str = datetime.now(et).strftime("%Y-%m-%d")
+    path = os.path.join("logs", f"price_log_{date_str}.txt")
+    try:
+        os.makedirs("logs", exist_ok=True)
+        with open(path, "a") as f:
+            f.write(f"\n===== entry window price log - written {datetime.now(et)} =====\n")
+            for symbol, samples in symbol_price_log.items():
+                for ts, price in samples:
+                    f.write(f"{symbol} {ts} {price}\n")
+        logger.info(f"Wrote entry-window price log to {path}")
+    except Exception as e:
+        logger.error(f"Error writing price log: {e}")
 
 def _check_three_bar_momentum(bars):
     """
@@ -380,8 +405,18 @@ def run_exit_monitoring(config, market_data, strategy, executor, email_notifier,
     Monitor open positions for exits until either all positions have closed
     (only meaningful if we actually entered something today) or the 4 PM
     time stop is hit.
+
+    "Did this session ever have trades" is entries_triggered (bought fresh
+    this run) OR there being open trades already at the moment this function
+    starts (adopted via reconcile_existing_positions on a restart mid-day,
+    after the entry window already closed - entries_triggered would be 0 for
+    that run even though real positions are open and being managed). Without
+    the second half, a restart-recovered position closing out would never be
+    recognized as "all trades closed" and the trades.json/email summary
+    would only ever fire off the blunt 4pm time-stop instead.
     """
     time_stop_hour = config["trading"]["time_stop_hour"]
+    had_any_trades = entries_triggered > 0 or bool(strategy.get_open_trades())
     last_check = datetime.now(et)
 
     while True:
@@ -414,8 +449,8 @@ def run_exit_monitoring(config, market_data, strategy, executor, email_notifier,
             open_trades = strategy.get_open_trades()
             if open_trades:
                 logger.info(f"Open positions: {len(open_trades)}")
-            elif entries_triggered > 0:
-                # We entered at least one trade today and everything is now closed.
+            elif had_any_trades:
+                # We entered (or adopted via reconciliation) at least one trade today, and everything is now closed.
                 logger.info("All trades closed. Sending daily summary...")
                 executor.save_trades_log()
                 email_notifier.send_daily_summary()
@@ -462,12 +497,22 @@ def reconcile_existing_positions(broker, strategy, executor):
     separately from strategy.trades, only on a normal submit_entry_order()
     call), so without this a reconciled position's eventual exit would log
     an accurate STOP DECISION but a wrong "entry was None, P&L: $0.00" record.
+
+    Also checks the broker's own order history for a filled SELL on this
+    symbol since midnight ET today, and marks first_exit_done accordingly -
+    a fresh TradeManager always starts with first_exit_done=False, so
+    without this check, a position that already had its -0.5% scale-out
+    fire before a restart would be eligible to fire ANOTHER first-exit
+    tranche after reconciliation, over-trimming the position.
     """
     try:
         positions = broker.get_positions()
     except Exception as e:
         logger.error(f"Error reconciling existing positions: {e}")
         return
+
+    et = pytz.timezone("America/New_York")
+    today_start = datetime.now(et).replace(hour=0, minute=0, second=0, microsecond=0)
 
     for symbol, position in positions.items():
         if symbol in strategy.trades:
@@ -496,12 +541,17 @@ def reconcile_existing_positions(broker, strategy, executor):
                 trade.highest_since_entry = current_price
                 trade.price_history = [entry_price, current_price]
 
+            prior_sells = broker.get_filled_sell_orders_since(symbol, today_start)
+            if prior_sells:
+                trade.first_exit_done = True
+
             strategy.trades[symbol] = trade
             executor.open_entries[symbol] = entry_price
             logger.info(
                 f"{symbol}: adopted pre-existing position on startup - {qty} shares "
                 f"@ {entry_price:.2f} (broker avg_entry_price) - resuming stop-loss/"
                 f"trailing-stop management"
+                + (f" (first_exit already fired today, {len(prior_sells)} prior sell(s) - won't re-arm it)" if prior_sells else "")
             )
         except Exception as e:
             logger.error(f"Error reconciling position for {symbol}: {e}")
