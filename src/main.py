@@ -542,7 +542,10 @@ def _write_daily_summary_csv(config, executor, symbols, entries_triggered, start
             "use_pullback_entry": config["trading"].get("use_pullback_entry"),
             "use_three_bar_momentum": config["trading"].get("use_three_bar_momentum"),
             "use_rsi_filter": config["trading"].get("use_rsi_filter"),
-            "rapid_increase_pct": config["trading"].get("rapid_increase_pct"),
+            "rapid_increase_config": f"{config['trading'].get('rapid_increase_pct')}% / {config['trading'].get('rapid_increase_lookback_minutes')}min",
+            "final_stop_loss_pct": config["trading"].get("final_exit_loss_pct"),
+            "first_scale_out_config": f"{config['trading'].get('first_exit_loss_pct')}% / {config['trading'].get('first_exit_pct', 0) * 100:.0f}%",
+            "trailing_stop_pct": config["trading"].get("trailing_stop_pct"),
             "entry_window": f"{config['trading'].get('entry_window_start')}-{config['trading'].get('entry_window_end')}",
         }
 
