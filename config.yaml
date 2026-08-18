@@ -92,6 +92,18 @@ trading:
   max_position_per_stock_usd: 10000  # Max $ per stock
   max_daily_loss_usd: 1000  # Stop trading if daily loss exceeds this
 
+  # --- Exposure caps ---
+  # Checked BEFORE every entry attempt (see Executor.pre_entry_check) - the
+  # bot will never even try to submit an order that would breach either of
+  # these, rather than relying on the broker's margin engine to eventually
+  # reject it once out of room. This is what let the account run to ~2.8x
+  # leverage across 28 simultaneous positions on 2026-08-18 before anything
+  # stopped it - Alpaca's own rejection was the only backstop that existed.
+  max_concurrent_positions: 10      # never hold more than this many positions open at once
+  max_total_exposure_fraction: 0.9  # never commit more than this fraction of CURRENT equity, combined,
+                                     # across all open positions - a fraction (not a fixed $) so it scales
+                                     # automatically with account size instead of needing to be re-tuned
+
   # Stock universe (can be dynamic or static)
   use_daily_screener: true  # Set to true to dynamically select stocks each day
   candidates_file: "candidates.txt"  # File with candidate symbols

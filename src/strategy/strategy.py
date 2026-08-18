@@ -34,14 +34,18 @@ class TradeManager:
         self.orders_log = []
 
     def check_first_exit(self, current_price):
-        """Check if we should sell 33% at -0.5% loss"""
+        """
+        Check if we should sell 33% at -0.5% loss. Pure check - does NOT set
+        first_exit_done (that only happens in process_exit, once the broker
+        has actually confirmed the sell filled). Setting it here, before
+        confirmation, would permanently disable the first-exit tranche for
+        this position if the order ever failed to submit.
+        """
         loss_pct = (current_price - self.entry_price) / self.entry_price
         first_exit_trigger = self.config["trading"]["first_exit_loss_pct"] / 100
 
         if not self.first_exit_done and loss_pct <= first_exit_trigger:
-            qty_to_sell = int(self.entry_qty * self.config["trading"]["first_exit_pct"])
-            self.first_exit_done = True
-            return qty_to_sell
+            return int(self.entry_qty * self.config["trading"]["first_exit_pct"])
         return 0
 
     def check_final_exit(self, current_price):
@@ -147,8 +151,12 @@ class TradeManager:
         return 0
 
     def process_exit(self, qty_to_exit, exit_reason):
-        """Record an exit"""
+        """Record a CONFIRMED exit - call only after the broker has actually
+        filled the sell order. This is where first_exit_done actually gets
+        set (see check_first_exit's docstring for why)."""
         self.qty_remaining -= qty_to_exit
+        if exit_reason == "FIRST_EXIT_-0.5%":
+            self.first_exit_done = True
         self.orders_log.append({
             "action": "EXIT",
             "qty": qty_to_exit,
@@ -184,86 +192,80 @@ class Strategy:
 
         return 0, pct_change
 
-    def enter_trade(self, symbol, price, qty):
-        """Open a new position for symbol (called once check_rapid_increase_entry signals)"""
-        if symbol in self.trades or qty <= 0:
-            return None
+    def can_enter(self, symbol, qty):
+        """Pure eligibility check - no state mutation. Symbol must not already
+        be tracked and qty must be positive."""
+        return symbol not in self.trades and qty > 0
+
+    def confirm_entry(self, symbol, price, qty):
+        """
+        Commit a new position to internal tracking. Call this ONLY after the
+        broker has confirmed the entry order actually filled - never before.
+
+        Calling this before confirmation was the root cause of the 2026-08-18
+        phantom-entry bug: the old enter_trade() committed the position here
+        unconditionally, before the broker call even happened. When a buy
+        later failed (e.g. insufficient buying power), the bot still believed
+        it held a long position. When exit logic eventually fired against
+        that phantom long, the resulting SELL order - for shares that were
+        never actually bought - was accepted by Alpaca's margin account as
+        opening a real, completely untracked SHORT position. 16 of them
+        happened this way in one session before being caught.
+        """
         self.trades[symbol] = TradeManager(symbol, price, qty, self.config)
         logger.info(f"{symbol}: Entered {qty} shares at {price}")
-        return {"action": "ENTRY", "symbol": symbol, "qty": qty, "price": price}
 
-    def process_bar(self, symbol, current_bar):
-        """Process a new bar for a symbol that already has an open trade (exit checks only)"""
+    def check_exit(self, symbol, current_bar):
+        """
+        Check whether `symbol`'s open position should exit, in priority order.
+        Updates lightweight tracking bookkeeping (price_history, highest_since_entry)
+        inline since that's harmless observation, not a commitment - but does
+        NOT decrement qty_remaining or remove the trade from self.trades. That
+        only happens in confirm_exit, after the broker confirms the sell filled.
+
+        Returns an exit_info dict ({"qty", "reason", "price"}) or None.
+        """
+        if symbol not in self.trades:
+            return None
+
+        trade = self.trades[symbol]
         current_price = current_bar.get("close", 0)
 
-        if symbol in self.trades:
-            trade = self.trades[symbol]
+        trade.price_history.append(current_price)
+        if current_price > trade.highest_since_entry:
+            trade.highest_since_entry = current_price
 
-            # Update price history for momentum calculation
-            trade.price_history.append(current_price)
-            if current_price > trade.highest_since_entry:
-                trade.highest_since_entry = current_price
-
-            # Check exits in priority order
-            exits = []
-
-            # 1. Check final exit first (most aggressive)
-            qty = trade.check_final_exit(current_price)
+        checks = [
+            ("FINAL_EXIT_-1.0%", trade.check_final_exit),
+            ("FIRST_EXIT_-0.5%", trade.check_first_exit),
+            ("MOMENTUM_FADE", trade.check_momentum_fade),
+            ("RESISTANCE", trade.check_resistance),
+            ("TRAILING_STOP", trade.update_trailing_stop),
+            ("TIME_STOP_4PM", lambda price: trade.check_time_exit()),
+        ]
+        for reason, check_fn in checks:
+            qty = check_fn(current_price)
             if qty > 0:
-                exits.append({"qty": qty, "reason": "FINAL_EXIT_-1.0%"})
-
-            # 2. Check first partial exit
-            if not exits:
-                qty = trade.check_first_exit(current_price)
-                if qty > 0:
-                    exits.append({"qty": qty, "reason": "FIRST_EXIT_-0.5%"})
-
-            # 3. Check momentum fade (around 10 AM)
-            if not exits:
-                qty = trade.check_momentum_fade(current_price)
-                if qty > 0:
-                    exits.append({"qty": qty, "reason": "MOMENTUM_FADE"})
-
-            # 4. Check resistance rejection
-            if not exits:
-                qty = trade.check_resistance(current_price)
-                if qty > 0:
-                    exits.append({"qty": qty, "reason": "RESISTANCE"})
-
-            # 5. Check trailing stop
-            if not exits:
-                qty = trade.update_trailing_stop(current_price)
-                if qty > 0:
-                    exits.append({"qty": qty, "reason": "TRAILING_STOP"})
-
-            # 6. Check time stop (full day close at 4 PM)
-            if not exits:
-                qty = trade.check_time_exit()
-                if qty > 0:
-                    exits.append({"qty": qty, "reason": "TIME_STOP_4PM"})
-
-            if exits:
-                for exit_info in exits:
-                    trade.process_exit(exit_info["qty"], exit_info["reason"])
-                    if trade.qty_remaining == 0:
-                        del self.trades[symbol]
-                        return {
-                            "action": "EXIT_ALL",
-                            "symbol": symbol,
-                            "qty": exit_info["qty"],
-                            "reason": exit_info["reason"],
-                            "price": current_price,
-                        }
-                    else:
-                        return {
-                            "action": "PARTIAL_EXIT",
-                            "symbol": symbol,
-                            "qty": exit_info["qty"],
-                            "reason": exit_info["reason"],
-                            "price": current_price,
-                        }
+                return {"qty": qty, "reason": reason, "price": current_price}
 
         return None
+
+    def confirm_exit(self, symbol, qty, reason, price):
+        """
+        Commit a CONFIRMED exit - call ONLY after the broker has actually
+        filled the sell order. If the broker order fails instead, don't call
+        this: the position stays fully tracked exactly as before, and the
+        same exit condition will simply be re-checked (and retried) on the
+        next poll cycle rather than silently vanishing from tracking while
+        still genuinely open at the broker.
+        """
+        trade = self.trades[symbol]
+        trade.process_exit(qty, reason)
+        if trade.qty_remaining == 0:
+            del self.trades[symbol]
+            return {"action": "EXIT_ALL", "symbol": symbol, "qty": qty, "reason": reason, "price": price}
+        else:
+            return {"action": "PARTIAL_EXIT", "symbol": symbol, "qty": qty, "reason": reason, "price": price}
 
     def get_open_trades(self):
         """Return all open trades"""

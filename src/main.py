@@ -67,7 +67,7 @@ def select_symbols(config, screener, market_data):
     returns it alongside the symbol list. This is NOT used to filter which
     symbols get watched - a daily-bar RSI barely moves within a single
     trading day, so a once-at-open computation is exactly as fresh as any
-    later recomputation would be. Instead it's checked in run_entry_window as
+    later recomputation would be. Instead it's checked in run_trading_day as
     one half of the combined entry signal: a rapid price increase AND
     RSI < rsi_max_for_entry at the same time is what actually triggers a buy,
     so every symbol still gets watched for the price signal regardless of its
@@ -151,39 +151,80 @@ def select_symbols(config, screener, market_data):
 
     return symbols, rsi_values
 
-def run_entry_window(config, market_data, strategy, executor, symbols, rsi_values, et):
+def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi):
     """
-    Watch `symbols` from entry_window_start to entry_window_end for a rapid
-    price rise (>= rapid_increase_pct within a trailing rapid_increase_lookback_minutes
-    window). If use_rsi_filter is on, also requires RSI (from rsi_values,
-    computed once at market open by select_symbols) below rsi_max_for_entry -
-    a rapid increase on an already-overbought symbol is logged but not bought.
+    Shared entry path for all three entry signals (three-bar momentum, rapid
+    increase immediate, pullback resumption). Returns True if a position was
+    actually opened.
 
-    If use_pullback_entry is on (the default): a detected rapid increase does
-    NOT buy immediately. Instead it starts tracking that symbol for a pullback
-    off the post-thrust peak followed by a resumption higher, and only buys on
-    the resumption - aiming for a better average entry than buying directly
-    into the top of the initial spike. See _advance_pullback_state for the
-    state machine. If off, falls back to the original buy-on-detection behavior.
+    Order matters, and is the fix for the 2026-08-18 phantom-entry bug:
+      1. strategy.can_enter - pure check, no state mutated.
+      2. executor.pre_entry_check - funds/exposure check, no broker call made.
+      3. executor.submit_entry_order - the ONLY step that touches the broker.
+      4. strategy.confirm_entry - commits to strategy.trades, and ONLY runs
+         if step 3 actually succeeded.
+    Previously, step 4's equivalent (the old enter_trade()) ran BEFORE step 3,
+    so a failed broker order (e.g. insufficient buying power) left a phantom
+    position in the bot's memory. When exit logic later fired against that
+    phantom long, the resulting sell - for shares never actually bought -
+    was accepted by Alpaca's margin account as opening a real, completely
+    untracked short position. 16 of them happened this way in one session.
+    """
+    qty = int(config["trading"]["max_position_per_stock_usd"] / price)
+    if not strategy.can_enter(symbol, qty):
+        return False
 
-    If use_three_bar_momentum is on: a separate, faster signal checked ahead of
-    everything else above. The instant 3 consecutive 1-minute bars are all
-    green (close > open) with each bar's close higher than the previous bar's
-    close, it buys immediately - no waiting for rapid_increase_pct's %
-    threshold to accumulate, and no pullback-wait either. This exists because
-    the %-over-lookback-window and pullback-wait signals are both deliberately
-    patient, and on a stock opening with a hard, clean thrust that patience
-    costs a meaningfully worse entry price. Same exit/stop-loss handling
-    applies once entered - this only changes how fast the buy fires.
+    ok, reason = executor.pre_entry_check(qty, price)
+    if not ok:
+        logger.info(f"{symbol}: entry skipped - {reason}")
+        return False
+
+    order = executor.submit_entry_order(symbol, qty, price, entry_method=entry_method, entry_rsi=symbol_rsi)
+    if order is None:
+        return False  # broker rejected/failed - already logged by submit_entry_order, nothing committed
+
+    strategy.confirm_entry(symbol, price, qty)
+    rsi_note = f", RSI={symbol_rsi:.1f}" if symbol_rsi is not None else ""
+    logger.info(f"{symbol}: {entry_method} entry confirmed - {qty} shares @ {price:.2f}{rsi_note}")
+    return True
+
+def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values, email_notifier, et):
+    """
+    Runs the entire trading day as ONE continuous loop, from entry_window_start
+    until either all positions have closed after the entry window ends, or the
+    4 PM time stop is hit.
+
+    This replaces the old run_entry_window -> run_exit_monitoring design,
+    which ran the full 9:30-9:55 entry window as one blocking phase before
+    exit-checking ever started - meaning a position opened at, say, 9:31 got
+    ZERO stop-loss protection until 9:55. On 2026-08-18, FCEL ran to -7.42%
+    (well past both the -0.5% and -1.0% stop thresholds) before the bot ever
+    checked it, purely because exit monitoring hadn't started yet. Now, every
+    poll cycle checks exits for everything already open AND checks entries
+    for everything not yet open (while still inside the entry window) in the
+    same pass - stop-losses are live from the moment a position opens.
+
+    If use_pullback_entry is on: a detected rapid increase does NOT buy
+    immediately. Instead it starts tracking that symbol for a pullback off
+    the post-thrust peak followed by a resumption higher, and only buys on
+    the resumption - see _advance_pullback_state for the state machine. If
+    off, a rapid increase buys immediately via _attempt_entry.
+
+    If use_three_bar_momentum is on: a separate, faster signal checked ahead
+    of everything else. The instant 3 consecutive 1-minute bars are all green
+    with each bar's close higher than the last, it buys immediately - no
+    waiting for rapid_increase_pct's % threshold, no pullback-wait either.
     """
     entry_start = parse_hhmm_today(config["trading"]["entry_window_start"], et)
     entry_end = parse_hhmm_today(config["trading"]["entry_window_end"], et)
+    time_stop_hour = config["trading"]["time_stop_hour"]
     check_interval = config["trading"]["entry_check_interval_seconds"]
     lookback = timedelta(minutes=config["trading"]["rapid_increase_lookback_minutes"])
     use_rsi_filter = config["trading"].get("use_rsi_filter", False)
     rsi_max = config["trading"].get("rsi_max_for_entry", 50)
     use_pullback_entry = config["trading"].get("use_pullback_entry", False)
     use_three_bar_momentum = config["trading"].get("use_three_bar_momentum", False)
+    rsi_period = config["trading"].get("rsi_period", 14)
 
     now = datetime.now(et)
     while now < entry_start:
@@ -191,8 +232,9 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
         now = datetime.now(et)
 
     logger.info(
-        f"===== ENTRY WINDOW: {entry_start.strftime('%H:%M')} - "
-        f"{entry_end.strftime('%H:%M')} ET ====="
+        f"===== TRADING DAY START: entries watched {entry_start.strftime('%H:%M')}-"
+        f"{entry_end.strftime('%H:%M')} ET, exits watched continuously from the moment "
+        f"a position opens ====="
     )
 
     price_history = {symbol: deque() for symbol in symbols}
@@ -200,114 +242,166 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
     pending_pullbacks = {}  # symbol -> state dict, only used when use_pullback_entry is on
     symbol_price_log = {symbol: [] for symbol in symbols}  # full (untrimmed) history, for _write_price_log
     entries_triggered = 0
+    had_any_trades = bool(strategy.get_open_trades())  # true if reconciliation adopted positions on startup
+    starting_cash = None
+    try:
+        starting_cash = float(market_data.broker.get_account().cash)
+    except Exception as e:
+        logger.debug(f"Could not read starting cash for daily summary: {e}")
 
-    while datetime.now(et) < entry_end:
+    def finish_day(reason):
+        executor.save_trades_log()
+        email_notifier.send_daily_summary()
+        _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et)
+        _write_price_log(symbol_price_log, et)
+        logger.info(f"Daily session complete: entries_triggered={entries_triggered}, reason={reason}")
+
+    while True:
         now = datetime.now(et)
+        executor.refresh_account_snapshot()
 
-        for symbol in symbols:
-            if symbol in strategy.get_open_trades():
-                continue
+        if executor.check_daily_loss_limit():
+            logger.warning("Daily loss limit hit, flattening all positions")
+            executor.flatten_all_positions()
+            finish_day("daily_loss_limit")
+            return entries_triggered
 
+        # ---- EXIT CHECKS: every open position, every cycle, from the moment it opens ----
+        for symbol in list(strategy.get_open_trades().keys()):
             try:
-                bar = market_data.get_latest_bar(symbol, "1Min")
-                if not bar:
+                current_bar = market_data.get_latest_bar(symbol, "1Min")
+                if not current_bar:
                     continue
 
-                price = bar.get("close", 0)
-                ts = bar.get("timestamp", now)
-                history = price_history[symbol]
-                history.append((ts, price))
-                bar_history[symbol].append(bar)
-                symbol_price_log[symbol].append((ts, price))
+                exit_info = strategy.check_exit(symbol, current_bar)
+                if exit_info:
+                    # RSI is purely for the daily report - a failure here (API
+                    # hiccup, insufficient history) must never block the
+                    # actual exit order.
+                    try:
+                        exit_rsi = market_data.get_rsi(symbol, period=rsi_period)
+                    except Exception as rsi_err:
+                        logger.debug(f"Could not fetch exit RSI for {symbol}: {rsi_err}")
+                        exit_rsi = None
 
-                # Drop samples older than the lookback window, measured from the latest
-                # BAR's own timestamp (not wall-clock `now`) - the feed can lag wall-clock
-                # by a few minutes, and anchoring to `now` would evict every sample before
-                # two ever accumulate whenever that lag exceeds `lookback`.
-                cutoff = ts - lookback
-                while history and history[0][0] < cutoff:
-                    history.popleft()
-
-                symbol_rsi = rsi_values.get(symbol)
-                if use_rsi_filter and (symbol_rsi is None or symbol_rsi >= rsi_max):
-                    continue  # doesn't qualify on RSI at all - don't bother tracking it
-
-                if use_three_bar_momentum and _check_three_bar_momentum(bar_history[symbol]):
-                    qty = int(config["trading"]["max_position_per_stock_usd"] / price)
-                    signal = strategy.enter_trade(symbol, price, qty)
-                    if signal:
-                        rsi_note = f", RSI={symbol_rsi:.1f}" if symbol_rsi is not None else ""
-                        closes = [b.get("close", 0) for b in bar_history[symbol]]
-                        logger.info(
-                            f"{symbol}: THREE-BAR MOMENTUM entry triggered - 3 consecutive "
-                            f"green 1min bars, closes {closes[0]:.2f} -> {closes[1]:.2f} -> "
-                            f"{closes[2]:.2f}{rsi_note}"
-                        )
-                        signal["entry_method"] = "THREE_BAR_MOMENTUM"
-                        signal["entry_rsi"] = symbol_rsi
-                        executor.execute_signal(signal)
-                        entries_triggered += 1
-                        pending_pullbacks.pop(symbol, None)
-                    continue
-
-                if use_pullback_entry and symbol in pending_pullbacks:
-                    _advance_pullback_state(
-                        config, strategy, executor, symbol, price,
-                        pending_pullbacks, symbol_rsi,
+                    order = executor.submit_exit_order(
+                        symbol, exit_info["qty"], exit_info["reason"], exit_info["price"], exit_rsi=exit_rsi
                     )
-                    if symbol in strategy.get_open_trades():
-                        entries_triggered += 1
-                        del pending_pullbacks[symbol]
-                    continue
-
-                if len(history) < 2:
-                    continue
-
-                price_then = history[0][1]
-                qty, pct_change = strategy.check_rapid_increase_entry(symbol, price, price_then)
-
-                if qty > 0:
-                    if use_pullback_entry:
-                        pending_pullbacks[symbol] = {
-                            "qty": qty,
-                            "base_price": price_then,
-                            "thrust_price": price,
-                            "peak": price,
-                            "pullback_low": None,
-                            "pct_change": pct_change,
-                        }
-                        logger.info(
-                            f"{symbol}: RAPID INCREASE detected (+{pct_change:.2f}% over "
-                            f"{lookback.total_seconds()/60:.0f}min) - watching for a pullback "
-                            f"and resumption before entering"
+                    if order is not None:
+                        strategy.confirm_exit(symbol, exit_info["qty"], exit_info["reason"], exit_info["price"])
+                        had_any_trades = True
+                    else:
+                        logger.error(
+                            f"{symbol}: exit order FAILED to submit ({exit_info['reason']}) - "
+                            f"position remains tracked, will retry next check"
                         )
-                        continue
-
-                    signal = strategy.enter_trade(symbol, price, qty)
-                    if signal:
-                        rsi_note = f", RSI={symbol_rsi:.1f}" if symbol_rsi is not None else ""
-                        logger.info(
-                            f"{symbol}: RAPID INCREASE entry triggered - "
-                            f"+{pct_change:.2f}% over {lookback.total_seconds()/60:.0f}min "
-                            f"(threshold {config['trading']['rapid_increase_pct']}%){rsi_note}"
-                        )
-                        signal["entry_method"] = "RAPID_INCREASE_IMMEDIATE"
-                        signal["entry_rsi"] = symbol_rsi
-                        executor.execute_signal(signal)
-                        entries_triggered += 1
 
             except Exception as e:
-                logger.error(f"Error checking entry for {symbol}: {e}")
+                logger.error(f"Error checking exits for {symbol}: {e}")
                 continue
 
-        time.sleep(check_interval)
+        # ---- ENTRY CHECKS: only within the window, only for symbols not already open ----
+        if now < entry_end:
+            for symbol in symbols:
+                if symbol in strategy.get_open_trades():
+                    continue
 
-    logger.info(
-        f"Entry window closed. symbols_monitored={len(symbols)}, "
-        f"entries_triggered={entries_triggered}"
-    )
-    _write_price_log(symbol_price_log, et)
-    return entries_triggered
+                try:
+                    bar = market_data.get_latest_bar(symbol, "1Min")
+                    if not bar:
+                        continue
+
+                    price = bar.get("close", 0)
+                    ts = bar.get("timestamp", now)
+                    history = price_history[symbol]
+                    history.append((ts, price))
+                    bar_history[symbol].append(bar)
+                    symbol_price_log[symbol].append((ts, price))
+
+                    # Drop samples older than the lookback window, measured from the latest
+                    # BAR's own timestamp (not wall-clock `now`) - the feed can lag wall-clock
+                    # by a few minutes, and anchoring to `now` would evict every sample before
+                    # two ever accumulate whenever that lag exceeds `lookback`.
+                    cutoff = ts - lookback
+                    while history and history[0][0] < cutoff:
+                        history.popleft()
+
+                    symbol_rsi = rsi_values.get(symbol)
+                    if use_rsi_filter and (symbol_rsi is None or symbol_rsi >= rsi_max):
+                        continue  # doesn't qualify on RSI at all - don't bother tracking it
+
+                    if use_three_bar_momentum and _check_three_bar_momentum(bar_history[symbol]):
+                        closes = [b.get("close", 0) for b in bar_history[symbol]]
+                        logger.info(
+                            f"{symbol}: THREE-BAR MOMENTUM signal - 3 consecutive green 1min "
+                            f"bars, closes {closes[0]:.2f} -> {closes[1]:.2f} -> {closes[2]:.2f}"
+                        )
+                        if _attempt_entry(config, strategy, executor, symbol, price, "THREE_BAR_MOMENTUM", symbol_rsi):
+                            entries_triggered += 1
+                            had_any_trades = True
+                            pending_pullbacks.pop(symbol, None)
+                        continue
+
+                    if use_pullback_entry and symbol in pending_pullbacks:
+                        entered = _advance_pullback_state(
+                            config, strategy, executor, symbol, price, pending_pullbacks, symbol_rsi,
+                        )
+                        if entered:
+                            entries_triggered += 1
+                            had_any_trades = True
+                            pending_pullbacks.pop(symbol, None)
+                        continue
+
+                    if len(history) < 2:
+                        continue
+
+                    price_then = history[0][1]
+                    qty, pct_change = strategy.check_rapid_increase_entry(symbol, price, price_then)
+
+                    if qty > 0:
+                        if use_pullback_entry:
+                            pending_pullbacks[symbol] = {
+                                "qty": qty,
+                                "base_price": price_then,
+                                "thrust_price": price,
+                                "peak": price,
+                                "pullback_low": None,
+                                "pct_change": pct_change,
+                            }
+                            logger.info(
+                                f"{symbol}: RAPID INCREASE detected (+{pct_change:.2f}% over "
+                                f"{lookback.total_seconds()/60:.0f}min) - watching for a pullback "
+                                f"and resumption before entering"
+                            )
+                            continue
+
+                        logger.info(
+                            f"{symbol}: RAPID INCREASE signal - +{pct_change:.2f}% over "
+                            f"{lookback.total_seconds()/60:.0f}min (threshold "
+                            f"{config['trading']['rapid_increase_pct']}%)"
+                        )
+                        if _attempt_entry(config, strategy, executor, symbol, price, "RAPID_INCREASE_IMMEDIATE", symbol_rsi):
+                            entries_triggered += 1
+                            had_any_trades = True
+
+                except Exception as e:
+                    logger.error(f"Error checking entry for {symbol}: {e}")
+                    continue
+
+        # ---- day-completion checks ----
+        open_trades = strategy.get_open_trades()
+        if not open_trades and now >= entry_end and had_any_trades:
+            logger.info("All trades closed. Sending daily summary...")
+            finish_day("all_closed")
+            return entries_triggered
+
+        if now.hour >= time_stop_hour:
+            logger.info("Market closing, flattening all positions...")
+            executor.flatten_all_positions()
+            finish_day("time_stop")
+            return entries_triggered
+
+        time.sleep(check_interval)
 
 def _write_price_log(symbol_price_log, et):
     """
@@ -347,8 +441,12 @@ def _check_three_bar_momentum(bars):
 def _advance_pullback_state(config, strategy, executor, symbol, price, pending_pullbacks, symbol_rsi):
     """
     Advance one symbol's pullback-entry state machine by one price sample.
-    Only called (from run_entry_window) once a rapid-increase thrust has
+    Only called (from run_trading_day) once a rapid-increase thrust has
     already been detected for `symbol` and it hasn't been bought yet.
+    Returns True if a position was opened this call (caller should then pop
+    pending_pullbacks[symbol] - this function does NOT pop it on a successful
+    entry, only on invalidation, so the caller has one consistent place to
+    decide when tracking for this symbol is done).
 
     Resumption is checked BEFORE peak-tracking/invalidation: if price has
     bounced far enough off a tracked pullback low, that's a buy regardless of
@@ -367,32 +465,22 @@ def _advance_pullback_state(config, strategy, executor, symbol, price, pending_p
         else:
             bounce_pct = (price - setup["pullback_low"]) / setup["pullback_low"]
             if bounce_pct >= resumption_confirm_pct:
-                qty = int(config["trading"]["max_position_per_stock_usd"] / price)
-                if qty <= 0:
-                    del pending_pullbacks[symbol]
-                    return
-                signal = strategy.enter_trade(symbol, price, qty)
-                if signal:
-                    rsi_note = f", RSI={symbol_rsi:.1f}" if symbol_rsi is not None else ""
-                    logger.info(
-                        f"{symbol}: PULLBACK RESUMPTION entry triggered - thrust "
-                        f"+{setup['pct_change']:.2f}%, peak {setup['peak']:.2f}, pulled back to "
-                        f"{setup['pullback_low']:.2f}, resumed to {price:.2f}{rsi_note}"
-                    )
-                    signal["entry_method"] = "PULLBACK_RESUMPTION"
-                    signal["entry_rsi"] = symbol_rsi
-                    executor.execute_signal(signal)
-                return
+                logger.info(
+                    f"{symbol}: PULLBACK RESUMPTION signal - thrust +{setup['pct_change']:.2f}%, "
+                    f"peak {setup['peak']:.2f}, pulled back to {setup['pullback_low']:.2f}, "
+                    f"resumed to {price:.2f}"
+                )
+                return _attempt_entry(config, strategy, executor, symbol, price, "PULLBACK_RESUMPTION", symbol_rsi)
 
     if price > setup["peak"]:
         setup["peak"] = price
         setup["pullback_low"] = None
-        return
+        return False
 
     thrust_gain = setup["peak"] - setup["base_price"]
     if thrust_gain <= 0:
         del pending_pullbacks[symbol]
-        return
+        return False
 
     giveback = setup["peak"] - price
     if giveback / thrust_gain >= max_giveback_fraction:
@@ -401,110 +489,13 @@ def _advance_pullback_state(config, strategy, executor, symbol, price, pending_p
             f"gain (peak {setup['peak']:.2f} -> {price:.2f}) - setup invalidated"
         )
         del pending_pullbacks[symbol]
-        return
+        return False
 
     if setup["pullback_low"] is None:
         retracement_pct = giveback / setup["peak"]
         if retracement_pct >= min_pullback_pct:
             setup["pullback_low"] = price
-
-def run_exit_monitoring(config, market_data, strategy, executor, email_notifier, entries_triggered, et, symbols=None):
-    """
-    Monitor open positions for exits until either all positions have closed
-    (only meaningful if we actually entered something today) or the 4 PM
-    time stop is hit.
-
-    "Did this session ever have trades" is entries_triggered (bought fresh
-    this run) OR there being open trades already at the moment this function
-    starts (adopted via reconcile_existing_positions on a restart mid-day,
-    after the entry window already closed - entries_triggered would be 0 for
-    that run even though real positions are open and being managed). Without
-    the second half, a restart-recovered position closing out would never be
-    recognized as "all trades closed" and the trades.json/email summary
-    would only ever fire off the blunt 4pm time-stop instead.
-
-    `symbols` (the day's full watched list, screener + defaults merged) is
-    optional only for callers that don't have it handy - it's used purely to
-    fill in the "symbols watched" column of the daily summary CSV.
-    """
-    time_stop_hour = config["trading"]["time_stop_hour"]
-    had_any_trades = entries_triggered > 0 or bool(strategy.get_open_trades())
-    starting_cash = None
-    try:
-        starting_cash = float(market_data.broker.get_account().cash)
-    except Exception as e:
-        logger.debug(f"Could not read starting cash for daily summary: {e}")
-    last_check = datetime.now(et)
-
-    while True:
-        now = datetime.now(et)
-
-        if executor.check_daily_loss_limit():
-            logger.warning("Daily loss limit hit, flattening all positions")
-            executor.flatten_all_positions()
-            executor.save_trades_log()
-            email_notifier.send_daily_summary()
-            _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et)
-            return
-
-        if (now - last_check).seconds >= 60 or last_check == now:
-            last_check = now
-
-            for symbol in list(strategy.get_open_trades().keys()):
-                try:
-                    current_bar = market_data.get_latest_bar(symbol, "1Min")
-                    if not current_bar:
-                        continue
-
-                    signal = strategy.process_bar(symbol, current_bar)
-                    if signal:
-                        # RSI is purely for the daily report - a failure here (API
-                        # hiccup, insufficient history) must never block the actual
-                        # exit order, so it's isolated in its own try/except rather
-                        # than sharing the outer one that guards execute_signal.
-                        try:
-                            signal["exit_rsi"] = market_data.get_rsi(
-                                symbol, period=config["trading"].get("rsi_period", 14)
-                            )
-                        except Exception as rsi_err:
-                            logger.debug(f"Could not fetch exit RSI for {symbol}: {rsi_err}")
-                            signal["exit_rsi"] = None
-                        executor.execute_signal(signal)
-
-                except Exception as e:
-                    logger.error(f"Error checking exits for {symbol}: {e}")
-                    continue
-
-            open_trades = strategy.get_open_trades()
-            if open_trades:
-                logger.info(f"Open positions: {len(open_trades)}")
-            elif had_any_trades:
-                # We entered (or adopted via reconciliation) at least one trade today, and everything is now closed.
-                logger.info("All trades closed. Sending daily summary...")
-                executor.save_trades_log()
-                email_notifier.send_daily_summary()
-                _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et)
-                logger.info(
-                    f"Daily session complete: entries_triggered={entries_triggered}, "
-                    f"positions_open=0"
-                )
-                return
-            # else: zero trades were ever entered today - keep idling until the time stop,
-            # this is NOT "all trades closed", there was simply nothing to close.
-
-        if now.hour >= time_stop_hour:
-            logger.info("Market closing, flattening all positions...")
-            executor.flatten_all_positions()
-            executor.save_trades_log()
-            email_notifier.send_daily_summary()
-            _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et)
-            logger.info(
-                f"Daily session complete: entries_triggered={entries_triggered}, "
-                f"reason=time_stop"
-            )
-            return
-
-        time.sleep(30)
+    return False
 
 def _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et, filepath="logs/daily_summary.csv"):
     """
@@ -688,11 +679,8 @@ def main():
             logger.info("Market is open, monitoring for signals...")
 
             symbols, rsi_values = select_symbols(config, screener, market_data)
-            entries_triggered = run_entry_window(
-                config, market_data, strategy, executor, symbols, rsi_values, et
-            )
-            run_exit_monitoring(
-                config, market_data, strategy, executor, email_notifier, entries_triggered, et, symbols
+            run_trading_day(
+                config, market_data, strategy, executor, symbols, rsi_values, email_notifier, et
             )
 
     except KeyboardInterrupt:

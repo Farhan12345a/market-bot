@@ -31,6 +31,78 @@ class Executor:
         # trades_log is never cleared across days in a long-running process, so without this cursor,
         # calling save_trades_log() on day 2 would re-append day 1's trades to the CSV a second time.
 
+        # Cached account/exposure snapshot, refreshed once per poll cycle (see
+        # refresh_account_snapshot) rather than once per symbol - used by
+        # pre_entry_check() to gate entries on real available capital/exposure
+        # BEFORE ever attempting a broker order, instead of relying on the
+        # broker's margin engine to eventually reject an order once out of
+        # room (which is what let the account run to ~2.8x leverage across 28
+        # simultaneous positions on 2026-08-18 before anything stopped it).
+        # Starts fail-closed (0 buying power) so nothing can enter before the
+        # first real refresh happens.
+        self._equity = 0.0
+        self._buying_power = 0.0
+        self._open_position_count = 0
+        self._total_exposure_usd = 0.0
+
+    def refresh_account_snapshot(self):
+        """
+        Pull current equity/buying-power/position-count/total-exposure from
+        the broker (source of truth - not strategy.trades, which could in
+        principle drift from what the broker actually holds) and cache it.
+        Call this once per poll cycle, not once per symbol - it's two API
+        calls, and doing it per-symbol across 65+ watched symbols every cycle
+        would be wasteful and slow.
+        """
+        try:
+            account = self.broker.get_account()
+            positions = self.broker.get_positions()
+            self._equity = float(account.equity)
+            self._buying_power = float(account.buying_power)
+            self._open_position_count = len(positions)
+            self._total_exposure_usd = sum(abs(float(p.market_value)) for p in positions.values())
+        except Exception as e:
+            logger.error(f"Error refreshing account snapshot: {e}")
+            # Fail closed: on error, assume zero buying power and max exposure
+            # so pre_entry_check blocks new entries rather than proceeding on
+            # stale/unknown state. Equity and position count are left at their
+            # last-known values since those aren't used to gate "can we buy" -
+            # only buying_power and total_exposure_usd are, and both are
+            # deliberately zeroed/maxed here.
+            self._buying_power = 0.0
+            self._total_exposure_usd = float("inf")
+
+    def pre_entry_check(self, qty, price):
+        """
+        Returns (ok: bool, reason: str). Checked BEFORE ever attempting a
+        broker order for a new entry - closes the gap where only Alpaca's own
+        margin rejection used to be the backstop against over-leveraging.
+        Three independent checks, all must pass:
+          1. Enough buying power for this specific order.
+          2. Not already at max_concurrent_positions.
+          3. Adding this position wouldn't push total committed capital past
+             max_total_exposure_fraction of current equity.
+        """
+        cost = qty * price
+
+        if cost > self._buying_power:
+            return False, f"insufficient buying power (need ${cost:.2f}, have ${self._buying_power:.2f})"
+
+        max_positions = self.config["trading"].get("max_concurrent_positions")
+        if max_positions and self._open_position_count >= max_positions:
+            return False, f"at max_concurrent_positions ({self._open_position_count}/{max_positions})"
+
+        max_exposure_fraction = self.config["trading"].get("max_total_exposure_fraction")
+        if max_exposure_fraction and self._equity > 0:
+            max_exposure_usd = self._equity * max_exposure_fraction
+            if self._total_exposure_usd + cost > max_exposure_usd:
+                return False, (
+                    f"would exceed max_total_exposure_fraction "
+                    f"(${self._total_exposure_usd:.2f} committed + ${cost:.2f} > ${max_exposure_usd:.2f} cap)"
+                )
+
+        return True, ""
+
     def record_entry_meta(self, symbol, method, rsi, entry_time=None):
         """
         Record how/when a position was opened, independent of open_entries
@@ -46,33 +118,59 @@ class Executor:
         }
 
     def submit_entry_order(self, symbol, qty, price=None, entry_method=None, entry_rsi=None):
-        """Submit a market order to enter a position"""
+        """
+        Submit a market order to enter a position. Returns the order on
+        success, or None on failure (does NOT raise) - callers must check the
+        return value and only commit the position to Strategy tracking
+        (strategy.confirm_entry) when this returns non-None. This is the
+        entry-side half of the phantom-entry fix: previously the caller
+        recorded the position as open in Strategy BEFORE this was even
+        called, so a failure here left an untracked phantom long that later
+        became a real, invisible short. Returning None (not raising) makes
+        "did it actually work" an explicit value the caller must check,
+        rather than an exception that could be caught too late or in the
+        wrong place.
+        """
         try:
             order = self.broker.submit_market_order(symbol, qty, side="buy")
-            self.open_entries[symbol] = price
-            self.record_entry_meta(symbol, method=entry_method or "UNKNOWN", rsi=entry_rsi)
-
-            self.order_history.append({
-                "timestamp": datetime.now().isoformat(),
-                "action": "ENTRY",
-                "symbol": symbol,
-                "qty": qty,
-                "price": price,
-                "status": "SUBMITTED",
-                "order_id": order.id if hasattr(order, "id") else None,
-            })
-
-            logger.info(f"Entry order submitted for {symbol}: {qty} shares at {price}")
-            return order
         except Exception as e:
             logger.error(f"Failed to submit entry order for {symbol}: {e}")
-            raise
+            return None
+
+        self.open_entries[symbol] = price
+        self.record_entry_meta(symbol, method=entry_method or "UNKNOWN", rsi=entry_rsi)
+
+        self.order_history.append({
+            "timestamp": datetime.now().isoformat(),
+            "action": "ENTRY",
+            "symbol": symbol,
+            "qty": qty,
+            "price": price,
+            "status": "SUBMITTED",
+            "order_id": order.id if hasattr(order, "id") else None,
+        })
+
+        logger.info(f"Entry order submitted for {symbol}: {qty} shares at {price}")
+        return order
 
     def submit_exit_order(self, symbol, qty, reason="", price=None, exit_rsi=None):
-        """Submit a market order to exit a position and record a documented trade row"""
+        """
+        Submit a market order to exit a position and record a documented
+        trade row. Returns the order on success, or None on failure (does NOT
+        raise) - callers must check the return value and only commit the exit
+        to Strategy tracking (strategy.confirm_exit) when this returns
+        non-None, exactly mirroring submit_entry_order's contract. If a sell
+        fails, the position must stay fully tracked so the same exit
+        condition gets retried on the next poll cycle instead of the bot
+        silently forgetting it still holds (and needs to protect) it.
+        """
         try:
             order = self.broker.submit_market_order(symbol, qty, side="sell")
+        except Exception as e:
+            logger.error(f"Failed to submit exit order for {symbol}: {e}")
+            return None
 
+        try:
             entry_price = self.open_entries.get(symbol)
             meta = self.entry_meta.get(symbol, {})
             now_iso = datetime.now().isoformat()
@@ -114,34 +212,15 @@ class Executor:
                 f"Exit order submitted for {symbol}: {qty} shares at {price} ({reason}) - "
                 f"entry was {entry_price}, P&L: ${trade_record['pl']:.2f} ({trade_record['pl_pct']:+.2f}%)"
             )
-            return order
         except Exception as e:
-            logger.error(f"Failed to submit exit order for {symbol}: {e}")
-            raise
+            # The broker order above already succeeded - a failure here is a
+            # bookkeeping bug (trades_log/order_history), not an order
+            # failure. Still return the order so the caller correctly commits
+            # the exit; a bookkeeping gap is far better than the alternative
+            # (strategy thinking a genuinely-sold position is still held).
+            logger.error(f"Exit order for {symbol} filled but record-keeping failed: {e}")
 
-    def execute_signal(self, signal):
-        """Execute a trade signal from the strategy"""
-        if signal is None:
-            return None
-
-        action = signal.get("action")
-        symbol = signal.get("symbol")
-        qty = signal.get("qty")
-        reason = signal.get("reason", "")
-        price = signal.get("price")
-
-        try:
-            if action == "ENTRY":
-                return self.submit_entry_order(
-                    symbol, qty, price,
-                    entry_method=signal.get("entry_method"),
-                    entry_rsi=signal.get("entry_rsi"),
-                )
-            elif action in ["EXIT_ALL", "PARTIAL_EXIT"]:
-                return self.submit_exit_order(symbol, qty, reason, price, exit_rsi=signal.get("exit_rsi"))
-        except Exception as e:
-            logger.error(f"Error executing signal: {e}")
-            raise
+        return order
 
     def check_daily_loss_limit(self):
         """Check if we've exceeded max daily loss"""
@@ -184,8 +263,11 @@ class Executor:
                     price = float(current_price) if current_price else None
 
                     order = self.submit_exit_order(symbol, qty, "FLATTEN_ALL", price)
-                    closed_orders.append(order)
-                    logger.info(f"Flattened {symbol}: {qty} shares at {price}")
+                    if order is not None:
+                        closed_orders.append(order)
+                        logger.info(f"Flattened {symbol}: {qty} shares at {price}")
+                    else:
+                        logger.error(f"Failed to flatten {symbol}: {qty} shares - order was not submitted")
 
             return closed_orders
         except Exception as e:
