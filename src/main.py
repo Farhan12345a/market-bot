@@ -163,6 +163,16 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
     the resumption - aiming for a better average entry than buying directly
     into the top of the initial spike. See _advance_pullback_state for the
     state machine. If off, falls back to the original buy-on-detection behavior.
+
+    If use_three_bar_momentum is on: a separate, faster signal checked ahead of
+    everything else above. The instant 3 consecutive 1-minute bars are all
+    green (close > open) with each bar's close higher than the previous bar's
+    close, it buys immediately - no waiting for rapid_increase_pct's %
+    threshold to accumulate, and no pullback-wait either. This exists because
+    the %-over-lookback-window and pullback-wait signals are both deliberately
+    patient, and on a stock opening with a hard, clean thrust that patience
+    costs a meaningfully worse entry price. Same exit/stop-loss handling
+    applies once entered - this only changes how fast the buy fires.
     """
     entry_start = parse_hhmm_today(config["trading"]["entry_window_start"], et)
     entry_end = parse_hhmm_today(config["trading"]["entry_window_end"], et)
@@ -171,6 +181,7 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
     use_rsi_filter = config["trading"].get("use_rsi_filter", False)
     rsi_max = config["trading"].get("rsi_max_for_entry", 50)
     use_pullback_entry = config["trading"].get("use_pullback_entry", False)
+    use_three_bar_momentum = config["trading"].get("use_three_bar_momentum", False)
 
     now = datetime.now(et)
     while now < entry_start:
@@ -183,6 +194,7 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
     )
 
     price_history = {symbol: deque() for symbol in symbols}
+    bar_history = {symbol: deque(maxlen=3) for symbol in symbols}  # last 3 1min bars, for use_three_bar_momentum
     pending_pullbacks = {}  # symbol -> state dict, only used when use_pullback_entry is on
     entries_triggered = 0
 
@@ -202,6 +214,7 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
                 ts = bar.get("timestamp", now)
                 history = price_history[symbol]
                 history.append((ts, price))
+                bar_history[symbol].append(bar)
 
                 # Drop samples older than the lookback window, measured from the latest
                 # BAR's own timestamp (not wall-clock `now`) - the feed can lag wall-clock
@@ -214,6 +227,22 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
                 symbol_rsi = rsi_values.get(symbol)
                 if use_rsi_filter and (symbol_rsi is None or symbol_rsi >= rsi_max):
                     continue  # doesn't qualify on RSI at all - don't bother tracking it
+
+                if use_three_bar_momentum and _check_three_bar_momentum(bar_history[symbol]):
+                    qty = int(config["trading"]["max_position_per_stock_usd"] / price)
+                    signal = strategy.enter_trade(symbol, price, qty)
+                    if signal:
+                        rsi_note = f", RSI={symbol_rsi:.1f}" if symbol_rsi is not None else ""
+                        closes = [b.get("close", 0) for b in bar_history[symbol]]
+                        logger.info(
+                            f"{symbol}: THREE-BAR MOMENTUM entry triggered - 3 consecutive "
+                            f"green 1min bars, closes {closes[0]:.2f} -> {closes[1]:.2f} -> "
+                            f"{closes[2]:.2f}{rsi_note}"
+                        )
+                        executor.execute_signal(signal)
+                        entries_triggered += 1
+                        pending_pullbacks.pop(symbol, None)
+                    continue
 
                 if use_pullback_entry and symbol in pending_pullbacks:
                     _advance_pullback_state(
@@ -270,6 +299,19 @@ def run_entry_window(config, market_data, strategy, executor, symbols, rsi_value
         f"entries_triggered={entries_triggered}"
     )
     return entries_triggered
+
+def _check_three_bar_momentum(bars):
+    """
+    True if `bars` holds exactly 3 1-minute bars, all green (close > open),
+    with each bar's close strictly higher than the previous bar's close -
+    i.e. a clean 3-bar upward thrust, not just 3 green bars chopping sideways.
+    """
+    if len(bars) < 3:
+        return False
+    bars = list(bars)
+    if any(b.get("close", 0) <= b.get("open", 0) for b in bars):
+        return False
+    return all(curr.get("close", 0) > prev.get("close", 0) for prev, curr in zip(bars, bars[1:]))
 
 def _advance_pullback_state(config, strategy, executor, symbol, price, pending_pullbacks, symbol_rsi):
     """

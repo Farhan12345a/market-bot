@@ -39,6 +39,15 @@ trading:
   pullback_max_giveback_fraction: 0.75 # Invalidate the setup if the pullback erases more than this fraction of the thrust's gain (failed breakout)
   resumption_confirm_pct: 0.05       # Min bounce off the pullback low (%) to confirm resumption and actually buy
 
+  # --- 3-bar momentum entry (fast path) ---
+  # Checked ahead of the rapid_increase_pct/pullback logic above. Buys
+  # IMMEDIATELY (no pullback-wait) the instant 3 consecutive 1-minute bars
+  # are all green (close > open) with each bar's close higher than the last -
+  # a faster, more aggressive confirmation than waiting for a % threshold to
+  # accumulate over rapid_increase_lookback_minutes. Still gated by the RSI
+  # filter above (if enabled). Runs alongside, not instead of, the signal below.
+  use_three_bar_momentum: true
+
   # volume_spike_multiplier: 1.5  # NOT CURRENTLY USED (kept here for reference).
   # The old entry check required a single 5-minute bar's volume to be >= 1.5x
   # a full TRADING DAY's average volume - a unit mismatch (5 minutes of volume
