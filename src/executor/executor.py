@@ -11,6 +11,19 @@ logger = logging.getLogger(__name__)
 # daily trade report.
 STOP_LOSS_EXIT_REASONS = {"FINAL_EXIT_-1.0%", "FIRST_EXIT_-0.5%", "TRAILING_STOP", "FLATTEN_ALL"}
 
+# FIRST_EXIT_-0.5% is the only exit reason that ever sells a PARTIAL position
+# (first_exit_pct, e.g. 33%) - every other reason always sells the entire
+# qty_remaining (see TradeManager/Strategy.check_exit). Used to color-code
+# entry/exit log lines for live journalctl monitoring - green (buy), red
+# (100% sold), yellow (partial sold) - so a scan of the live log makes the
+# nature of each fill obvious at a glance.
+PARTIAL_EXIT_REASONS = {"FIRST_EXIT_-0.5%"}
+
+ANSI_GREEN = "\033[92m"
+ANSI_RED = "\033[91m"
+ANSI_YELLOW = "\033[93m"
+ANSI_RESET = "\033[0m"
+
 class Executor:
     """Handles order submission and trade tracking"""
 
@@ -150,7 +163,7 @@ class Executor:
             "order_id": order.id if hasattr(order, "id") else None,
         })
 
-        logger.info(f"Entry order submitted for {symbol}: {qty} shares at {price}")
+        logger.info(f"{ANSI_GREEN}Entry order submitted for {symbol}: {qty} shares at {price}{ANSI_RESET}")
         return order
 
     def submit_exit_order(self, symbol, qty, reason="", price=None, exit_rsi=None):
@@ -208,9 +221,10 @@ class Executor:
                 "order_id": trade_record["order_id"],
             })
 
+            color = ANSI_YELLOW if reason in PARTIAL_EXIT_REASONS else ANSI_RED
             logger.info(
-                f"Exit order submitted for {symbol}: {qty} shares at {price} ({reason}) - "
-                f"entry was {entry_price}, P&L: ${trade_record['pl']:.2f} ({trade_record['pl_pct']:+.2f}%)"
+                f"{color}Exit order submitted for {symbol}: {qty} shares at {price} ({reason}) - "
+                f"entry was {entry_price}, P&L: ${trade_record['pl']:.2f} ({trade_record['pl_pct']:+.2f}%){ANSI_RESET}"
             )
         except Exception as e:
             # The broker order above already succeeded - a failure here is a
