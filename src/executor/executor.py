@@ -163,6 +163,20 @@ class Executor:
             "order_id": order.id if hasattr(order, "id") else None,
         })
 
+        # Update the cached exposure snapshot immediately, not just on the next
+        # refresh_account_snapshot() call - refresh only happens once per poll
+        # cycle (deliberately, to avoid an API call per symbol), so without
+        # this, multiple entries firing within the SAME poll (e.g. many
+        # symbols moving together right at the open) would each check
+        # pre_entry_check() against the same stale pre-poll snapshot and all
+        # get approved, letting the account blow well past
+        # max_concurrent_positions/max_total_exposure_fraction before the
+        # next poll's fresh query ever catches up. This closes that race.
+        if price:
+            self._buying_power -= qty * price
+            self._total_exposure_usd += qty * price
+        self._open_position_count += 1
+
         logger.info(f"{ANSI_GREEN}Entry order submitted for {symbol}: {qty} shares at {price}{ANSI_RESET}")
         return order
 
@@ -182,6 +196,19 @@ class Executor:
         except Exception as e:
             logger.error(f"Failed to submit exit order for {symbol}: {e}")
             return None
+
+        # Mirror the immediate cache update in submit_entry_order, for the
+        # same reason - keeps pre_entry_check() accurate for any entry
+        # checked later in the SAME poll cycle, not just after the next
+        # refresh_account_snapshot(). Only FIRST_EXIT_-0.5% is ever a partial
+        # sale (see PARTIAL_EXIT_REASONS) - every other reason always sells
+        # the entire remaining position, so the open-position count only
+        # decrements for those.
+        if price:
+            self._buying_power += qty * price
+            self._total_exposure_usd = max(0.0, self._total_exposure_usd - qty * price)
+        if reason not in PARTIAL_EXIT_REASONS:
+            self._open_position_count = max(0, self._open_position_count - 1)
 
         try:
             entry_price = self.open_entries.get(symbol)
