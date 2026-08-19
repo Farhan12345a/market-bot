@@ -921,20 +921,69 @@ def main():
         else:
             screener = None
 
-        # Main loop - wait for market to open, run one full session, repeat next day
+        # Screener runs BEFORE the open, so the entry window starts with the
+        # symbol list already in hand. Previously the loop waited on
+        # is_market_open() and only then screened, which on 2026-08-19 meant
+        # the screener started at 09:30:51 and finished at 09:32:15 - burning
+        # the first 2.5 minutes of a 25-minute entry window before the bot
+        # could take a single trade.
+        screener_start = config["trading"].get("screener_start_time", "09:05")
+        screener_hour, screener_minute = (int(x) for x in screener_start.split(":"))
+
+        # Holds the pre-market screener result until the open consumes it.
+        pending_selection = None
+
         while True:
             now = datetime.now(et)
 
-            if not market_data.is_market_open():
-                time.sleep(60)
+            if market_data.is_market_open():
+                if pending_selection is None:
+                    # No pre-market run happened - the process started late,
+                    # or was restarted mid-session. Screen now rather than
+                    # trade a stale/empty list; this is the old behavior and
+                    # costs entry-window time, hence the warning.
+                    logger.warning(
+                        "Market already open with no pre-market screener result "
+                        "(late start or mid-session restart) - screening now, "
+                        "which eats into the entry window"
+                    )
+                    pending_selection = select_symbols(config, screener, market_data)
+
+                symbols, rsi_values = pending_selection
+                pending_selection = None
+
+                logger.info("Market is open, monitoring for signals...")
+                run_trading_day(
+                    config, market_data, strategy, executor, symbols, rsi_values, email_notifier, et
+                )
                 continue
 
-            logger.info("Market is open, monitoring for signals...")
-
-            symbols, rsi_values = select_symbols(config, screener, market_data)
-            run_trading_day(
-                config, market_data, strategy, executor, symbols, rsi_values, email_notifier, et
+            # Market closed. Run the screener once, inside the pre-market
+            # window that starts at screener_start_time and ends at the open.
+            market_open_today = now.replace(hour=9, minute=30, second=0, microsecond=0)
+            screener_time_today = now.replace(
+                hour=screener_hour, minute=screener_minute, second=0, microsecond=0
             )
+
+            if (
+                pending_selection is None
+                and market_data.is_trading_day(now)
+                and screener_time_today <= now < market_open_today
+            ):
+                logger.info(
+                    f"===== PRE-MARKET: screening at {now:%H:%M:%S} ET, "
+                    f"{(market_open_today - now).total_seconds() / 60:.0f} min ahead of the open ====="
+                )
+                pending_selection = select_symbols(config, screener, market_data)
+                finished = datetime.now(et)
+                if finished >= market_open_today:
+                    logger.warning(
+                        f"Screener ran past the open (finished {finished:%H:%M:%S} ET) - "
+                        f"move screener_start_time earlier than {screener_start}"
+                    )
+                continue
+
+            time.sleep(30)
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user")

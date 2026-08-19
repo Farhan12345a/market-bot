@@ -115,6 +115,15 @@ class MarketDataManager:
             logger.error(f"Error fetching latest bar for {symbol}: {e}")
             return None
 
+    def is_trading_day(self, now=None):
+        """
+        True if today is a weekday. Mirrors is_market_open's own weekday-only
+        notion of a trading day - neither consults a holiday calendar, so both
+        will treat a market holiday as a trading day and simply find no data.
+        """
+        now = now or datetime.now(self.et)
+        return now.weekday() < 5
+
     def is_market_open(self):
         """Check if the market is currently open"""
         now = datetime.now(self.et)

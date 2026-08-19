@@ -163,6 +163,10 @@ trading:
 
   # Stock universe (can be dynamic or static)
   use_daily_screener: true  # Set to true to dynamically select stocks each day
+  screener_start_time: "09:05"  # ET. Screener runs PRE-MARKET so the symbol list is ready
+                                 # at the bell. It previously waited for the market to open
+                                 # first, which burned the first ~2.5 min of the entry window.
+                                 # Leave enough headroom for screener_timeout_seconds below.
   candidates_file: "candidates.txt"  # File with candidate symbols
   num_stocks_to_trade: 15  # Number of top stocks to select each day
   min_screener_score: 35  # Minimum score to trade (0-100)

@@ -74,13 +74,20 @@ class StockScreener:
 
     def _get_volume_ratio(self, symbol) -> float:
         """
-        Compare today's volume-so-far (since market open) to the average
-        volume accumulated by this same time of day over the past 10 trading
-        days. screen() runs at/after today's market open (see main()), so
-        this is a live same-morning signal - it reacts to a volume surge
-        actually happening right now. The old version compared yesterday's
-        completed full-day volume to a 20-day average, which only reflects
-        what happened yesterday and never changes across the trading day.
+        Compare today's volume-so-far to the average volume accumulated by
+        this same time of day over the past 10 trading days.
+
+        The same-time-of-day comparison is what makes this work at any hour,
+        including pre-market: screen() now runs before the open (see
+        screener_start_time), so "today so far" is today's pre-market volume
+        and each prior day is measured to the same pre-market cutoff. Heavy
+        pre-market volume relative to the same stock's own norm is one of the
+        few genuinely forward-looking signals available before the bell.
+
+        Returns a neutral 1.0 when there isn't enough data to judge - thin or
+        absent pre-market prints on the free IEX feed are common for less
+        liquid names, and a missing measurement should not be scored as a
+        volume surge.
         """
         try:
             now = datetime.now(self.et)
@@ -90,7 +97,14 @@ class StockScreener:
             lookback_days = 10
             start = today - timedelta(days=lookback_days * 2)  # buffer for weekends/holidays
 
-            bars = self.broker.get_historical_bars(symbol, start, today, "5Min")
+            # `end` must be a DATETIME, not a date. A bare date is coerced to
+            # midnight, so passing `today` asked for bars strictly BEFORE
+            # today - today's own bars were never returned, today_vol was
+            # always 0, and the function returned its neutral 1.0 fallback
+            # every single time. That is why every candidate scored an
+            # identical "Vol Ratio: 1.00x" on 2026-08-19: volume was
+            # contributing nothing to the ranking at all.
+            bars = self.broker.get_historical_bars(symbol, start, now, "5Min")
 
             if symbol not in bars or bars[symbol].empty:
                 return 1.0

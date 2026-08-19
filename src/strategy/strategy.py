@@ -1,10 +1,36 @@
 import pandas as pd
 import logging
+import pytz
 from enum import Enum
 from datetime import datetime, timedelta
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+ET = pytz.timezone("America/New_York")
+
+
+def _now_et():
+    """
+    Current time in US market time.
+
+    Every hour-of-day threshold in config (time_stop_hour, momentum_fade_hour)
+    is documented and intended as ET, but these checks used a naive
+    datetime.now(), which is the SERVER's local clock. The production VPS runs
+    UTC, so on 2026-08-19 both gates were evaluated four hours ahead of where
+    they were meant to sit:
+
+      momentum_fade_hour: 10  ->  10:15 UTC = 06:15 ET, i.e. already elapsed
+                                  before the opening bell, so momentum-fade
+                                  was live from the first bar of the session
+                                  instead of being dormant until 10:15 ET.
+                                  All 17 of that day's momentum-fade exits
+                                  fired between 09:38 and 09:52 ET, inside
+                                  the window the rule was supposed to be off.
+      time_stop_hour: 16      ->  16:00 UTC = 12:00 ET, closing every open
+                                  position at noon rather than 4pm.
+    """
+    return datetime.now(ET)
 
 class TradeState(Enum):
     FLAT = "flat"
@@ -23,7 +49,7 @@ class TradeManager:
         self.config = config
 
         self.state = TradeState.LONG
-        self.entry_time = datetime.now()
+        self.entry_time = _now_et()
         self.highest_price = entry_price
         self.first_exit_done = False
 
@@ -72,7 +98,7 @@ class TradeManager:
     def check_time_exit(self):
         """Check if we've hit the time stop"""
         time_stop_hour = self.config["trading"]["time_stop_hour"]
-        now = datetime.now()
+        now = _now_et()
 
         if now.hour >= time_stop_hour:
             return self.qty_remaining
@@ -105,7 +131,7 @@ class TradeManager:
 
     def check_momentum_fade(self, current_price):
         """Check if momentum is fading (configurable time, window, and threshold)"""
-        now = datetime.now()
+        now = _now_et()
 
         # Only check momentum fade after configured time (default: 10:15 AM)
         momentum_fade_hour = self.config["trading"].get("momentum_fade_hour", 10)
@@ -161,7 +187,7 @@ class TradeManager:
             "action": "EXIT",
             "qty": qty_to_exit,
             "reason": exit_reason,
-            "time": datetime.now(),
+            "time": _now_et(),
         })
         logger.info(f"{self.symbol}: Exiting {qty_to_exit} shares ({exit_reason})")
 
