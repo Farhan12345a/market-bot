@@ -56,6 +56,25 @@ trading:
   # A/B tested separately.
   use_three_bar_momentum: true
 
+  # --- Opening reversal (U-shape) entry ---
+  # Catches the OPPOSITE pattern from every signal above: a stock that DROPS
+  # at the open, bottoms out, then reverses upward - a U or V shaped
+  # recovery. None of the other three entry paths can ever detect this,
+  # since they all require an UPWARD move to even start watching a symbol.
+  # OFF by default - new, unproven logic that hasn't run live even once yet.
+  # Both the drop and the bounce are confirmed via consecutive-bar counting
+  # (see _check_consecutive_bar_pattern) - the same "N clean bars in a row,
+  # not just one tick" discipline use_three_bar_momentum already uses for
+  # its up-signal, applied here in both directions.
+  use_opening_reversal_entry: false
+  opening_reversal_window_minutes: 5    # only watch for the INITIAL drop within this many minutes of market
+                                         # open - an "opening dip" stops meaning anything once the morning's
+                                         # well underway, so no new decline-tracking starts after this
+  opening_reversal_drop_bars: 5         # consecutive red (declining) 1-min bars that counts as "a drastic
+                                         # drop" worth watching (not just normal noise)
+  opening_reversal_confirm_bars: 5      # consecutive green (rising) 1-min bars off the tracked low needed
+                                         # to confirm the reversal is real and buy
+
   # volume_spike_multiplier: 1.5  # NOT CURRENTLY USED (kept here for reference).
   # The old entry check required a single 5-minute bar's volume to be >= 1.5x
   # a full TRADING DAY's average volume - a unit mismatch (5 minutes of volume

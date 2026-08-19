@@ -224,6 +224,10 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     rsi_max = config["trading"].get("rsi_max_for_entry", 50)
     use_pullback_entry = config["trading"].get("use_pullback_entry", False)
     use_three_bar_momentum = config["trading"].get("use_three_bar_momentum", False)
+    use_opening_reversal_entry = config["trading"].get("use_opening_reversal_entry", False)
+    opening_reversal_window = timedelta(minutes=config["trading"].get("opening_reversal_window_minutes", 5))
+    opening_reversal_drop_bars = config["trading"].get("opening_reversal_drop_bars", 5)
+    opening_reversal_confirm_bars = config["trading"].get("opening_reversal_confirm_bars", 5)
     rsi_period = config["trading"].get("rsi_period", 14)
 
     now = datetime.now(et)
@@ -240,6 +244,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     price_history = {symbol: deque() for symbol in symbols}
     bar_history = {symbol: deque(maxlen=3) for symbol in symbols}  # last 3 1min bars, for use_three_bar_momentum
     pending_pullbacks = {}  # symbol -> state dict, only used when use_pullback_entry is on
+    pending_reversals = {}  # symbol -> state dict, only used when use_opening_reversal_entry is on
+    reversal_drop_bar_history = {symbol: deque(maxlen=opening_reversal_drop_bars) for symbol in symbols}  # only used when use_opening_reversal_entry is on
+    symbol_open_price = {}  # symbol -> first observed price this window, purely for the log message - only tracked when use_opening_reversal_entry is on
     symbol_price_log = {symbol: [] for symbol in symbols}  # full (untrimmed) history, for _write_price_log
     entries_triggered = 0
     had_any_trades = bool(strategy.get_open_trades())  # true if reconciliation adopted positions on startup
@@ -352,6 +359,37 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                             pending_pullbacks.pop(symbol, None)
                         continue
 
+                    if use_opening_reversal_entry:
+                        if symbol not in symbol_open_price:
+                            symbol_open_price[symbol] = price
+
+                        if symbol in pending_reversals:
+                            entered = _advance_reversal_state(
+                                config, strategy, executor, symbol, bar, pending_reversals, symbol_rsi,
+                            )
+                            if entered:
+                                entries_triggered += 1
+                                had_any_trades = True
+                                pending_reversals.pop(symbol, None)
+                            continue
+
+                        elif now - entry_start <= opening_reversal_window:
+                            reversal_drop_bar_history[symbol].append(bar)
+                            if _check_reversal_bar_pattern(
+                                reversal_drop_bar_history[symbol], opening_reversal_drop_bars, direction="down"
+                            ):
+                                pending_reversals[symbol] = {
+                                    "base_price": symbol_open_price[symbol],
+                                    "low": price,
+                                    "bounce_bar_history": deque(maxlen=opening_reversal_confirm_bars),
+                                }
+                                logger.info(
+                                    f"{symbol}: OPENING DECLINE detected - {opening_reversal_drop_bars} "
+                                    f"consecutive red bars from open {symbol_open_price[symbol]:.2f}, now "
+                                    f"{price:.2f} - watching for a reversal bounce"
+                                )
+                                continue
+
                     if len(history) < 2:
                         continue
 
@@ -438,6 +476,35 @@ def _check_three_bar_momentum(bars):
         return False
     return all(curr.get("close", 0) > prev.get("close", 0) for prev, curr in zip(bars, bars[1:]))
 
+def _check_reversal_bar_pattern(bars, count, direction):
+    """
+    Standalone bar-run check used only by the opening-reversal (U-shape)
+    feature - deliberately NOT shared with _check_three_bar_momentum above,
+    even though the underlying logic is similar, so this new/unproven
+    feature can never touch or risk that already-live production check.
+
+    True if the most recent `count` bars in `bars` are all the same color in
+    `direction`, with each bar's close strictly further in that direction
+    than the previous bar's close - i.e. a clean N-bar run, not just N
+    same-colored bars chopping sideways.
+
+    direction="down": all red (close < open), closes strictly falling - used
+    to detect a "drastic drop" worth watching for use_opening_reversal_entry.
+    direction="up": all green (close > open), closes strictly rising - used
+    to confirm the reversal bounce off the tracked low is real.
+    """
+    if len(bars) < count:
+        return False
+    recent = list(bars)[-count:]
+    if direction == "up":
+        if any(b.get("close", 0) <= b.get("open", 0) for b in recent):
+            return False
+        return all(curr.get("close", 0) > prev.get("close", 0) for prev, curr in zip(recent, recent[1:]))
+    else:
+        if any(b.get("close", 0) >= b.get("open", 0) for b in recent):
+            return False
+        return all(curr.get("close", 0) < prev.get("close", 0) for prev, curr in zip(recent, recent[1:]))
+
 def _advance_pullback_state(config, strategy, executor, symbol, price, pending_pullbacks, symbol_rsi):
     """
     Advance one symbol's pullback-entry state machine by one price sample.
@@ -495,6 +562,53 @@ def _advance_pullback_state(config, strategy, executor, symbol, price, pending_p
         retracement_pct = giveback / setup["peak"]
         if retracement_pct >= min_pullback_pct:
             setup["pullback_low"] = price
+    return False
+
+def _advance_reversal_state(config, strategy, executor, symbol, bar, pending_reversals, symbol_rsi):
+    """
+    Advance one symbol's opening-reversal (U-shape) state machine by one bar.
+    Only called once a "drastic drop" (opening_reversal_drop_bars consecutive
+    red bars) has already been detected for `symbol` within
+    opening_reversal_window_minutes of market open, and it hasn't been
+    bought yet. Returns True if a position was opened this call.
+
+    Confirmation mirrors use_three_bar_momentum's own logic (via the
+    separate _check_reversal_bar_pattern helper) rather than a simple
+    %-bounce threshold: requires opening_reversal_confirm_bars consecutive
+    GREEN bars off the tracked low before buying - the same "don't chase a
+    single tick, wait for a real run" discipline already used for the
+    up-momentum signal,
+    applied to confirming the reversal itself is real rather than a
+    single-bar fakeout.
+
+    Structurally mirrors _advance_pullback_state - tracking a trough instead
+    of a peak - but deliberately simpler: pullback exists to avoid buying
+    the TOP of an ALREADY-ESTABLISHED up-thrust, so it needs the extra
+    giveback/max_giveback_fraction invalidation logic to tell "a normal
+    pullback within a real breakout" apart from "a failed breakout that
+    shouldn't be bought at all." That distinction doesn't have a clean
+    equivalent here: catching the bounce off the trough IS the entire
+    signal - there's no pre-existing trend being resumed to protect against
+    overpaying for, so there's nothing analogous to invalidate against. A
+    red bar breaking a forming bounce just falls out of the rolling
+    confirm-bar window on its own - no separate invalidation branch needed.
+    """
+    setup = pending_reversals[symbol]
+    price = bar.get("close", 0)
+    confirm_bars = config["trading"].get("opening_reversal_confirm_bars", 5)
+
+    if price < setup["low"]:
+        setup["low"] = price
+
+    setup["bounce_bar_history"].append(bar)
+
+    if _check_reversal_bar_pattern(setup["bounce_bar_history"], confirm_bars, direction="up"):
+        logger.info(
+            f"{symbol}: OPENING REVERSAL signal - {confirm_bars} consecutive green bars off a "
+            f"low of {setup['low']:.2f} (dropped from open {setup['base_price']:.2f}), now {price:.2f}"
+        )
+        return _attempt_entry(config, strategy, executor, symbol, price, "OPENING_REVERSAL", symbol_rsi)
+
     return False
 
 def _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et, filepath="logs/daily_summary.csv"):
