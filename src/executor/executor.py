@@ -1,10 +1,20 @@
 import csv
 import logging
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# How long a just-opened position is trusted as open even while the broker's
+# position list still doesn't show it. Alpaca's get_all_positions() lags a
+# fill by a second or two, so a refresh landing in that gap would otherwise
+# report the position as not existing and undercount live exposure. Two poll
+# cycles (poll is 60s) is comfortably longer than any observed lag, while
+# still being short enough that a position closed outside the bot's own exit
+# path can't linger in the count indefinitely.
+ENTRY_CONFIRM_GRACE_SECONDS = 120
 
 # Exit reasons that represent a protective stop firing (vs. a discretionary/
 # time-based exit) - used to fill the "was a stop-loss used" column in the
@@ -55,8 +65,23 @@ class Executor:
         # first real refresh happens.
         self._equity = 0.0
         self._buying_power = 0.0
-        self._open_position_count = 0
         self._total_exposure_usd = 0.0
+
+        # Open positions are tracked as a SET OF SYMBOLS, not a bare count.
+        # A count was maintained by two mechanisms that could disagree -
+        # refresh_account_snapshot() assigning len(broker_positions), and
+        # +1/-1 per confirmed order - and every poll the assignment clobbered
+        # the increments. When the broker's position list lagged the fills
+        # from the previous poll (it lags by a second or two), the count
+        # reset BELOW the true number of open positions, and the cap let
+        # extra entries through. That is how a buy was approved at 10/10 on
+        # 2026-08-19 even after the same-poll race had been fixed. A set can
+        # be reconciled against the broker element-by-element instead of
+        # being overwritten wholesale, so a lagging broker response can no
+        # longer erase a position the bot knows it just opened.
+        self._open_symbols = set()
+        self._entry_recorded_at = {}  # symbol -> time.monotonic() when we recorded the entry
+        self._pending_cost = {}  # symbol -> cost basis, for exposure while the broker lags
 
     def refresh_account_snapshot(self):
         """
@@ -72,8 +97,43 @@ class Executor:
             positions = self.broker.get_positions()
             self._equity = float(account.equity)
             self._buying_power = float(account.buying_power)
-            self._open_position_count = len(positions)
-            self._total_exposure_usd = sum(abs(float(p.market_value)) for p in positions.values())
+
+            # Reconcile rather than overwrite. The broker's list is the source
+            # of truth for anything it reports, but it LAGS recent fills, so a
+            # position we opened moments ago can legitimately be missing from
+            # it. Those are carried over for a bounded grace period instead of
+            # being dropped (see ENTRY_CONFIRM_GRACE_SECONDS). Symbols we've
+            # exited were already discarded from _open_symbols, so this can
+            # only preserve genuinely-open positions, never resurrect closed
+            # ones - and the grace window means a position closed outside the
+            # bot's own exit path still ages out on its own.
+            broker_symbols = set(positions.keys())
+            now = time.monotonic()
+            unconfirmed = {
+                symbol
+                for symbol in self._open_symbols - broker_symbols
+                if now - self._entry_recorded_at.get(symbol, 0.0) < ENTRY_CONFIRM_GRACE_SECONDS
+            }
+            if unconfirmed:
+                logger.debug(
+                    f"Broker position list lags {len(unconfirmed)} recent entry/entries "
+                    f"({', '.join(sorted(unconfirmed))}) - counting them as open"
+                )
+
+            self._open_symbols = broker_symbols | unconfirmed
+            self._entry_recorded_at = {
+                s: t for s, t in self._entry_recorded_at.items() if s in self._open_symbols
+            }
+            self._pending_cost = {
+                s: c for s, c in self._pending_cost.items() if s in unconfirmed
+            }
+
+            # Exposure gets the same treatment: the broker can only report a
+            # market value for positions it knows about, so add back the cost
+            # basis of the ones it hasn't caught up to yet.
+            self._total_exposure_usd = sum(
+                abs(float(p.market_value)) for p in positions.values()
+            ) + sum(self._pending_cost.values())
         except Exception as e:
             logger.error(f"Error refreshing account snapshot: {e}")
             # Fail closed: on error, assume zero buying power and max exposure
@@ -84,6 +144,11 @@ class Executor:
             # deliberately zeroed/maxed here.
             self._buying_power = 0.0
             self._total_exposure_usd = float("inf")
+
+    @property
+    def _open_position_count(self):
+        """Number of open positions, derived from the reconciled symbol set."""
+        return len(self._open_symbols)
 
     def pre_entry_check(self, qty, price):
         """
@@ -175,7 +240,9 @@ class Executor:
         if price:
             self._buying_power -= qty * price
             self._total_exposure_usd += qty * price
-        self._open_position_count += 1
+            self._pending_cost[symbol] = qty * price
+        self._open_symbols.add(symbol)
+        self._entry_recorded_at[symbol] = time.monotonic()
 
         logger.info(f"{ANSI_GREEN}Entry order submitted for {symbol}: {qty} shares at {price}{ANSI_RESET}")
         return order
@@ -208,7 +275,9 @@ class Executor:
             self._buying_power += qty * price
             self._total_exposure_usd = max(0.0, self._total_exposure_usd - qty * price)
         if reason not in PARTIAL_EXIT_REASONS:
-            self._open_position_count = max(0, self._open_position_count - 1)
+            self._open_symbols.discard(symbol)
+            self._entry_recorded_at.pop(symbol, None)
+            self._pending_cost.pop(symbol, None)
 
         try:
             entry_price = self.open_entries.get(symbol)
