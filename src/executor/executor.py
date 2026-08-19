@@ -257,10 +257,24 @@ class Executor:
             return self.daily_pnl
 
     def flatten_all_positions(self):
-        """Close all open positions at market"""
+        """
+        Close all open positions at market. Returns the list of symbols that
+        were ACTUALLY successfully flattened (order confirmed) - not just
+        attempted. The Executor has no reference to Strategy and can't update
+        strategy.trades itself, so the caller (run_trading_day, which holds
+        both) MUST use this return value to reconcile strategy.trades after
+        calling this - otherwise a flattened position stays stale in
+        strategy.trades forever (this process reuses the same Strategy
+        object across every trading day), and on a later day the exit-check
+        loop will fire another sell against a position that's already been
+        closed - the exact same phantom-position-becomes-a-real-short
+        failure mode the entry-side fix addressed, via a different path.
+        Only symbols that actually confirmed are included, so a partial
+        failure correctly leaves that one symbol still tracked for retry.
+        """
+        flattened_symbols = []
         try:
             positions = self.broker.get_positions()
-            closed_orders = []
 
             for symbol, position in positions.items():
                 qty = int(abs(float(position.qty)))
@@ -278,12 +292,12 @@ class Executor:
 
                     order = self.submit_exit_order(symbol, qty, "FLATTEN_ALL", price)
                     if order is not None:
-                        closed_orders.append(order)
+                        flattened_symbols.append(symbol)
                         logger.info(f"Flattened {symbol}: {qty} shares at {price}")
                     else:
                         logger.error(f"Failed to flatten {symbol}: {qty} shares - order was not submitted")
 
-            return closed_orders
+            return flattened_symbols
         except Exception as e:
             logger.error(f"Error flattening positions: {e}")
             raise

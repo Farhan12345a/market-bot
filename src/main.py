@@ -269,7 +269,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
 
         if executor.check_daily_loss_limit():
             logger.warning("Daily loss limit hit, flattening all positions")
-            executor.flatten_all_positions()
+            flattened = executor.flatten_all_positions()
+            for symbol in flattened:
+                strategy.trades.pop(symbol, None)
             finish_day("daily_loss_limit")
             return entries_triggered
 
@@ -435,7 +437,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
 
         if now.hour >= time_stop_hour:
             logger.info("Market closing, flattening all positions...")
-            executor.flatten_all_positions()
+            flattened = executor.flatten_all_positions()
+            for symbol in flattened:
+                strategy.trades.pop(symbol, None)
             finish_day("time_stop")
             return entries_triggered
 
