@@ -158,6 +158,74 @@ def select_symbols(config, screener, market_data):
 
     return symbols, rsi_values
 
+def _position_size(config, executor, price):
+    """
+    Shares to buy for one entry. Returns 0 when no position should be taken.
+
+    Sizing used to be a flat `max_position_per_stock_usd / price` - a fixed
+    $10,000 of notional into every name regardless of account size or how many
+    positions were already open. With 10 concurrent slots that is $100,000
+    committed against ~$95,000 of equity, i.e. the sizing rule itself assumed
+    leverage and left max_total_exposure_fraction to arbitrarily reject
+    whichever entry happened to arrive once the book filled up.
+
+    The budget is now the SMALLEST of three independent ceilings, so whichever
+    constraint binds first wins:
+
+      1. Even slot share - equity * max_total_exposure_fraction
+                           / max_concurrent_positions
+         Splits deployable capital evenly across the book, so a full book
+         lands at the exposure cap by construction rather than by rejection.
+         Scales with the account automatically; no re-tuning as it grows.
+
+      2. Risk budget - equity * max_risk_per_trade_fraction
+                       / (final_exit_loss_pct / 100)
+         The largest position whose hard stop costs at most
+         max_risk_per_trade_fraction of equity. This is the one that ties
+         size to the stop: widen final_exit_loss_pct and positions shrink on
+         their own. With a 1% stop it sits well above ceiling 1 and stays
+         dormant, which is intended - it exists to bind when the stop widens.
+
+      3. Hard per-stock cap - max_position_per_stock_usd, unchanged, now a
+         backstop rather than the sizing rule.
+
+    Share COUNT is deliberately not a constraint. 780 shares of a $12 stock
+    and 40 shares of a $240 stock are the same $10,000 of risk; only the
+    dollar figure means anything, and dividing by price is what converts
+    the dollar budget into shares.
+
+    Returns 0 if equity isn't known yet (before the first snapshot refresh),
+    so entries fail closed rather than sizing off a zero/stale account.
+    """
+    trading = config["trading"]
+    if price <= 0:
+        return 0
+
+    equity = executor.equity
+    if equity <= 0:
+        return 0
+
+    budgets = []
+
+    hard_cap = trading.get("max_position_per_stock_usd")
+    if hard_cap:
+        budgets.append(float(hard_cap))
+
+    exposure_fraction = trading.get("max_total_exposure_fraction")
+    max_positions = trading.get("max_concurrent_positions")
+    if exposure_fraction and max_positions:
+        budgets.append(equity * exposure_fraction / max_positions)
+
+    risk_fraction = trading.get("max_risk_per_trade_fraction")
+    stop_pct = abs(trading.get("final_exit_loss_pct", 0)) / 100
+    if risk_fraction and stop_pct > 0:
+        budgets.append(equity * risk_fraction / stop_pct)
+
+    if not budgets:
+        return 0
+
+    return int(min(budgets) / price)
+
 def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi):
     """
     Shared entry path for all three entry signals (three-bar momentum, rapid
@@ -177,7 +245,10 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     was accepted by Alpaca's margin account as opening a real, completely
     untracked short position. 16 of them happened this way in one session.
     """
-    qty = int(config["trading"]["max_position_per_stock_usd"] / price)
+    qty = _position_size(config, executor, price)
+    if qty <= 0:
+        logger.info(f"{symbol}: entry skipped - position size worked out to 0 shares at {price:.2f}")
+        return False
     if not strategy.can_enter(symbol, qty):
         return False
 

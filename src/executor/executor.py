@@ -146,6 +146,12 @@ class Executor:
             self._total_exposure_usd = float("inf")
 
     @property
+    def equity(self):
+        """Account equity as of the last refresh_account_snapshot(). 0.0 before
+        the first refresh, which callers treat as fail-closed."""
+        return self._equity
+
+    @property
     def _open_position_count(self):
         """Number of open positions, derived from the reconciled symbol set."""
         return len(self._open_symbols)

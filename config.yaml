@@ -117,8 +117,26 @@ trading:
   resistance_lookback_samples: 3   # Number of recent price samples checked for the failed-breakout
                                     # pattern (oldest sample = peak, must strictly decline from there)
 
-  # Position sizing
-  max_position_per_stock_usd: 10000  # Max $ per stock
+  # --- Position sizing ---
+  # Each entry's dollar budget is the SMALLEST of three ceilings (see
+  # _position_size in main.py); shares = budget / price, so a cheap stock
+  # simply buys more shares for the same money. Share count is not itself a
+  # risk measure - 780 shares of a $12 stock is the same $10k as 40 shares
+  # of a $240 stock.
+  #
+  #   1. equity * max_total_exposure_fraction / max_concurrent_positions
+  #      (even slot share - at ~$95k equity: 95000 * 0.9 / 10 = $8,550)
+  #   2. equity * max_risk_per_trade_fraction / (final_exit_loss_pct/100)
+  #      (largest position whose stop costs <= that fraction of equity)
+  #   3. max_position_per_stock_usd (flat backstop)
+  #
+  # Sizing was previously just ceiling 3 alone - a flat $10,000 into every
+  # name regardless of account size, which across 10 slots assumed $100,000
+  # committed against ~$95,000 of equity.
+  max_position_per_stock_usd: 10000  # Hard $ ceiling per stock (backstop, not the sizing rule)
+  max_risk_per_trade_fraction: 0.005 # Max fraction of equity a single stop-out may cost (0.005 = 0.5%).
+                                      # Dormant while final_exit_loss_pct is tight (a 1% stop puts this
+                                      # well above ceiling 1); it binds once the stop is widened.
   max_daily_loss_usd: 1000  # Stop trading if daily loss exceeds this
 
   # --- Exposure caps ---
