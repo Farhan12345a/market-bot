@@ -232,6 +232,8 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     use_pullback_entry = config["trading"].get("use_pullback_entry", False)
     use_three_bar_momentum = config["trading"].get("use_three_bar_momentum", False)
     three_bar_require_acceleration = config["trading"].get("three_bar_require_acceleration", True)
+    max_daily_entries = config["trading"].get("max_daily_entries")  # None/0 = unlimited
+    daily_entry_cap_logged = False  # so the "cap reached" line is logged once, not every poll
     use_opening_reversal_entry = config["trading"].get("use_opening_reversal_entry", False)
     opening_reversal_window = timedelta(minutes=config["trading"].get("opening_reversal_window_minutes", 5))
     opening_reversal_drop_bars = config["trading"].get("opening_reversal_drop_bars", 5)
@@ -318,7 +320,28 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 continue
 
         # ---- ENTRY CHECKS: only within the window, only for symbols not already open ----
-        if now < entry_end:
+        # max_daily_entries is a separate limit from max_concurrent_positions
+        # and caps a different thing: the TOTAL number of positions opened over
+        # the whole day, however many are held at once. On 2026-08-19 the
+        # concurrent cap of 10 was respected, yet 54 buys still went through in
+        # ~21 minutes, because positions kept closing and new ones opening in
+        # their place - the concurrent cap has nothing to say about that churn.
+        #
+        # Deliberately gates ONLY this entry block. Exit checks above run every
+        # cycle regardless, so hitting the cap stops the bot opening anything
+        # new but never leaves an already-open position unprotected.
+        #
+        # entries_triggered is local to run_trading_day, so it resets on its own
+        # each trading day rather than accumulating across days in this
+        # long-running process.
+        if max_daily_entries and entries_triggered >= max_daily_entries:
+            if not daily_entry_cap_logged:
+                logger.info(
+                    f"Reached max_daily_entries ({entries_triggered}/{max_daily_entries}) - "
+                    f"no new entries for the rest of the day; exits continue as normal"
+                )
+                daily_entry_cap_logged = True
+        elif now < entry_end:
             for symbol in symbols:
                 if symbol in strategy.get_open_trades():
                     continue

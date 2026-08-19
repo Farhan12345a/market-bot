@@ -129,6 +129,16 @@ trading:
   # leverage across 28 simultaneous positions on 2026-08-18 before anything
   # stopped it - Alpaca's own rejection was the only backstop that existed.
   max_concurrent_positions: 10      # never hold more than this many positions open at once
+
+  # Total positions OPENED over the whole day, regardless of how many are held
+  # at once - a different limit from max_concurrent_positions above. On
+  # 2026-08-19 the concurrent cap of 10 held, yet 54 buys still went through in
+  # ~21 minutes, because positions kept closing and new ones opening in their
+  # place. This caps that churn. Set to 0 (or remove) for unlimited.
+  # Only entries are blocked once the cap is hit - exit monitoring continues,
+  # so open positions are never left unprotected.
+  max_daily_entries: 25
+
   max_total_exposure_fraction: 0.9  # never commit more than this fraction of CURRENT equity, combined,
                                      # across all open positions - a fraction (not a fixed $) so it scales
                                      # automatically with account size instead of needing to be re-tuned
