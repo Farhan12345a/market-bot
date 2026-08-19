@@ -46,7 +46,9 @@ class Executor:
         # summaries. Raw order submissions (entries + exits, with order IDs)
         # are tracked separately in order_history for auditability.
         self.trades_log = []
-        self.daily_pnl = 0.0
+        self.daily_pnl = 0.0  # realized + unrealized, refreshed every poll by refresh_account_snapshot()
+        self._realized_pnl_today = 0.0  # fallback accumulator, reset per-day by _add_realized_pnl
+        self._pnl_date = None
         self.order_history = []
         self.open_entries = {}  # symbol -> entry price, used to compute P&L when the matching exit(s) happen
         self.entry_meta = {}  # symbol -> {method, rsi, entry_time}, for the daily trade report
@@ -134,6 +136,8 @@ class Executor:
             self._total_exposure_usd = sum(
                 abs(float(p.market_value)) for p in positions.values()
             ) + sum(self._pending_cost.values())
+
+            self.daily_pnl = self._compute_daily_pnl(account, positions)
         except Exception as e:
             logger.error(f"Error refreshing account snapshot: {e}")
             # Fail closed: on error, assume zero buying power and max exposure
@@ -142,6 +146,12 @@ class Executor:
             # last-known values since those aren't used to gate "can we buy" -
             # only buying_power and total_exposure_usd are, and both are
             # deliberately zeroed/maxed here.
+            #
+            # daily_pnl is deliberately LEFT AT ITS LAST KNOWN VALUE rather
+            # than zeroed. Zeroing it would clear a breached loss limit on a
+            # transient API error and let trading resume straight into the
+            # loss it had just stopped for - the one direction this must
+            # never fail in.
             self._buying_power = 0.0
             self._total_exposure_usd = float("inf")
 
@@ -311,6 +321,7 @@ class Executor:
                 trade_record["pl"] = 0
                 trade_record["pl_pct"] = 0
             self.trades_log.append(trade_record)
+            self._add_realized_pnl(trade_record["pl"])
 
             self.order_history.append({
                 "timestamp": trade_record["timestamp"],
@@ -338,25 +349,75 @@ class Executor:
 
         return order
 
+    def _add_realized_pnl(self, pl):
+        """
+        Accumulate realized P&L for TODAY only. trades_log is never cleared in
+        this long-running process, so summing it would carry every previous
+        day's losses into today's limit - the same trap _csv_appended_count
+        exists to avoid for the CSV. The date stamp resets the running total
+        on the first exit of a new day.
+        """
+        today = datetime.now().date()
+        if self._pnl_date != today:
+            self._pnl_date = today
+            self._realized_pnl_today = 0.0
+        self._realized_pnl_today += pl or 0.0
+
+    def _compute_daily_pnl(self, account, positions):
+        """
+        Daily P&L including OPEN positions, not just closed ones.
+
+        Preferred source is the broker's own equity vs. last_equity (previous
+        session's closing equity). That is authoritative, already includes
+        unrealized P&L on everything currently held, and rolls over on its own
+        each session, so nothing here has to track when a day starts.
+
+        Falls back to realized-today plus unrealized-on-open-positions if the
+        broker doesn't supply last_equity, so the limit still works rather
+        than silently reverting to never firing.
+        """
+        last_equity = getattr(account, "last_equity", None)
+        if last_equity not in (None, ""):
+            try:
+                return float(account.equity) - float(last_equity)
+            except (TypeError, ValueError):
+                pass
+
+        unrealized = 0.0
+        for p in positions.values():
+            try:
+                unrealized += float(getattr(p, "unrealized_pl", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+        return self._realized_pnl_today + unrealized
+
     def check_daily_loss_limit(self):
-        """Check if we've exceeded max daily loss"""
-        max_loss = self.config["trading"]["max_daily_loss_usd"]
-        if self.daily_pnl <= -max_loss:
-            logger.warning(f"Daily loss limit exceeded: {self.daily_pnl}")
+        """
+        True once the day is down by more than max_daily_loss_usd.
+
+        self.daily_pnl is refreshed every poll by refresh_account_snapshot().
+        It previously was not: daily_pnl was assigned 0.0 in __init__ and
+        reassigned only inside get_daily_pnl(), which had no callers anywhere
+        in the codebase - so it stayed 0.0 for the life of the process and
+        this check could never return True. The limit had never once fired.
+        get_daily_pnl() would not have worked even if called, since it read
+        account.daily_pnl behind a hasattr() guard and Alpaca's account model
+        has no such field, making it a silent no-op.
+        """
+        max_loss = self.config["trading"].get("max_daily_loss_usd")
+        if not max_loss:
+            return False
+        if self.daily_pnl <= -abs(max_loss):
+            logger.warning(
+                f"Daily loss limit exceeded: ${self.daily_pnl:,.2f} "
+                f"(limit ${-abs(max_loss):,.2f}) - flattening and stopping for the day"
+            )
             return True
         return False
 
     def get_daily_pnl(self):
-        """Calculate unrealized + realized daily P&L"""
-        try:
-            account = self.broker.get_account()
-            # Alpaca provides daily_pnl
-            if hasattr(account, "daily_pnl"):
-                self.daily_pnl = float(account.daily_pnl)
-            return self.daily_pnl
-        except Exception as e:
-            logger.error(f"Error fetching daily PnL: {e}")
-            return self.daily_pnl
+        """Daily P&L (realized + unrealized) as of the last snapshot refresh."""
+        return self.daily_pnl
 
     def flatten_all_positions(self):
         """
