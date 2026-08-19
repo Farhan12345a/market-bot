@@ -56,6 +56,16 @@ trading:
   # A/B tested separately.
   use_three_bar_momentum: true
 
+  # Require the thrust to be ACCELERATING, not merely rising: each
+  # close-to-close gap must be strictly bigger than the one before it.
+  #   9.51 -> 9.55 -> 9.56  (gaps +0.04, +0.01)  rejected - move is stalling
+  #   9.51 -> 9.53 -> 9.58  (gaps +0.02, +0.05)  accepted - still gaining speed
+  # Both series rise, so the old "each close higher" test bought either one.
+  # The first shape is a move that has largely already played out, which is
+  # exactly what this fast-path signal should not be buying into.
+  # Set false to go back to plain rising closes.
+  three_bar_require_acceleration: true
+
   # --- Opening reversal (U-shape) entry ---
   # Catches the OPPOSITE pattern from every signal above: a stock that DROPS
   # at the open, bottoms out, then reverses upward - a U or V shaped

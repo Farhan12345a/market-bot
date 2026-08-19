@@ -231,6 +231,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     rsi_max = config["trading"].get("rsi_max_for_entry", 50)
     use_pullback_entry = config["trading"].get("use_pullback_entry", False)
     use_three_bar_momentum = config["trading"].get("use_three_bar_momentum", False)
+    three_bar_require_acceleration = config["trading"].get("three_bar_require_acceleration", True)
     use_opening_reversal_entry = config["trading"].get("use_opening_reversal_entry", False)
     opening_reversal_window = timedelta(minutes=config["trading"].get("opening_reversal_window_minutes", 5))
     opening_reversal_drop_bars = config["trading"].get("opening_reversal_drop_bars", 5)
@@ -346,11 +347,16 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     if use_rsi_filter and (symbol_rsi is None or symbol_rsi >= rsi_max):
                         continue  # doesn't qualify on RSI at all - don't bother tracking it
 
-                    if use_three_bar_momentum and _check_three_bar_momentum(bar_history[symbol]):
+                    if use_three_bar_momentum and _check_three_bar_momentum(
+                        bar_history[symbol], require_acceleration=three_bar_require_acceleration
+                    ):
                         closes = [b.get("close", 0) for b in bar_history[symbol]]
+                        gaps = [closes[1] - closes[0], closes[2] - closes[1]]
                         logger.info(
                             f"{symbol}: THREE-BAR MOMENTUM signal - 3 consecutive green 1min "
-                            f"bars, closes {closes[0]:.2f} -> {closes[1]:.2f} -> {closes[2]:.2f}"
+                            f"bars, closes {closes[0]:.2f} -> {closes[1]:.2f} -> {closes[2]:.2f} "
+                            f"(gaps +{gaps[0]:.2f}, +{gaps[1]:.2f}"
+                            f"{', accelerating' if three_bar_require_acceleration else ''})"
                         )
                         if _attempt_entry(config, strategy, executor, symbol, price, "THREE_BAR_MOMENTUM", symbol_rsi):
                             entries_triggered += 1
@@ -474,18 +480,46 @@ def _write_price_log(symbol_price_log, et):
     except Exception as e:
         logger.error(f"Error writing price log: {e}")
 
-def _check_three_bar_momentum(bars):
+def _check_three_bar_momentum(bars, require_acceleration=True):
     """
-    True if `bars` holds exactly 3 1-minute bars, all green (close > open),
-    with each bar's close strictly higher than the previous bar's close -
-    i.e. a clean 3-bar upward thrust, not just 3 green bars chopping sideways.
+    True if `bars` holds 3 1-minute bars forming a clean upward thrust:
+    all green (close > open), each close strictly higher than the last, and
+    - when require_acceleration is on - each close-to-close gap strictly
+    LARGER than the one before it.
+
+    The acceleration requirement is the whole point of the signal. Without
+    it, "3 rising closes" happily matches a move that is running out of
+    steam, because a decelerating series still rises:
+
+        9.51 -> 9.55 -> 9.56    gaps +0.04, +0.01   rising, but stalling
+        9.51 -> 9.53 -> 9.58    gaps +0.02, +0.05   rising AND accelerating
+
+    Both pass a plain "each close higher" test; only the second is a thrust
+    still gaining speed. This signal exists to buy the second shape, and
+    buying the first means buying into the top of a move that has already
+    largely played out.
+
+    Gaps are compared in absolute dollars rather than percent. Over three
+    consecutive 1-minute bars of a single symbol the denominator barely
+    moves, so the two orderings are equivalent in practice, and absolute
+    keeps the log line directly comparable to the printed closes.
     """
     if len(bars) < 3:
         return False
     bars = list(bars)
     if any(b.get("close", 0) <= b.get("open", 0) for b in bars):
         return False
-    return all(curr.get("close", 0) > prev.get("close", 0) for prev, curr in zip(bars, bars[1:]))
+
+    closes = [b.get("close", 0) for b in bars]
+    gaps = [curr - prev for prev, curr in zip(closes, closes[1:])]
+
+    if any(gap <= 0 for gap in gaps):
+        return False
+
+    if require_acceleration:
+        return all(nxt > cur for cur, nxt in zip(gaps, gaps[1:]))
+
+    return True
 
 def _check_reversal_bar_pattern(bars, count, direction):
     """
