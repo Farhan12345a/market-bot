@@ -1,24 +1,48 @@
 import smtplib
 import json
 import logging
+import glob
+import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 logger = logging.getLogger(__name__)
 
+REPORT_DIR = "logs/reports"
+REPORT_RETENTION_DAYS = 7
+_REPORT_NAME_RE = re.compile(r"^trading-report-(\d{4}-\d{2}-\d{2})\.html$")
+
 
 class EmailNotifier:
-    """Send daily trading summary emails"""
+    """
+    Builds the daily trading report, saves it to disk, and (if configured)
+    emails it.
+
+    Saving to disk is deliberately NOT conditional on the email working, or
+    even on email being enabled at all. Originally the report was generated
+    in memory inside send_daily_summary() purely as the email body, so when
+    the SMTP send failed the report was discarded with it - and SMTP fails
+    100% of the time on the current DigitalOcean droplet, which blocks
+    outbound port 587. The result was that no report from any run had ever
+    been recoverable. The report is now written before the send is even
+    attempted, so a broken (or disabled) mail path can never destroy it.
+    """
 
     def __init__(self, config):
         self.config = config
         self.email_config = config.get("notifications", {}).get("email", {})
         self.enabled = self.email_config.get("enabled", False)
 
+        notif_config = config.get("notifications", {})
+        self.report_dir = notif_config.get("report_dir", REPORT_DIR)
+        self.report_retention_days = notif_config.get(
+            "report_retention_days", REPORT_RETENTION_DAYS
+        )
+
         if not self.enabled:
-            logger.info("Email notifications disabled")
+            logger.info("Email notifications disabled (daily report will still be saved to disk)")
             return
 
         self.sender_email = self.email_config.get("sender_email")
@@ -32,12 +56,14 @@ class EmailNotifier:
             self.enabled = False
 
     def send_daily_summary(self, trades_file="logs/trades.json"):
-        """Send daily trading summary email"""
-        if not self.enabled:
-            return False
+        """
+        Build the daily report, save it to disk, then try to email it.
 
+        Returns True only if the EMAIL was sent. The saved-to-disk report is
+        independent of that return value and of self.enabled - check the log
+        line for the path, or just look in self.report_dir.
+        """
         try:
-            # Load trades
             if not os.path.exists(trades_file):
                 logger.warning(f"No trades file found: {trades_file}")
                 return False
@@ -49,22 +75,82 @@ class EmailNotifier:
                 logger.info("No trades to report")
                 return False
 
-            # Parse trades
             trades = trades_data if isinstance(trades_data, list) else trades_data.get("trades", [])
 
-            # Generate HTML email
             html_content = self._generate_html_summary(trades)
+        except Exception as e:
+            logger.error(f"Error building daily report: {e}")
+            return False
 
-            # Send email
+        # Save FIRST, before the email is attempted - see the class docstring.
+        # Wrapped separately so a disk problem can't stop the email, and an
+        # email problem can't stop the save.
+        try:
+            self._save_report(html_content)
+        except Exception as e:
+            logger.error(f"Could not save daily report to disk: {e}")
+
+        try:
+            self._prune_old_reports()
+        except Exception as e:
+            logger.error(f"Could not prune old reports: {e}")
+
+        if not self.enabled:
+            return False
+
+        try:
             subject = f"Trading Bot Daily Summary - {datetime.now().strftime('%Y-%m-%d')}"
             self._send_email(subject, html_content)
-
             logger.info(f"✓ Daily summary emailed to {self.recipient_email}")
             return True
-
         except Exception as e:
-            logger.error(f"Error sending email: {e}")
+            logger.error(f"Error sending email (report is still saved to disk): {e}")
             return False
+
+    def _save_report(self, html_content):
+        """Write the report to logs/reports/trading-report-YYYY-MM-DD.html."""
+        os.makedirs(self.report_dir, exist_ok=True)
+        filename = f"trading-report-{datetime.now().strftime('%Y-%m-%d')}.html"
+        path = os.path.join(self.report_dir, filename)
+        with open(path, "w") as f:
+            f.write(html_content)
+        logger.info(f"✓ Daily report saved to {os.path.abspath(path)}")
+        return path
+
+    def _prune_old_reports(self):
+        """
+        Delete saved reports older than report_retention_days.
+
+        Dates come from the FILENAME, not the file's mtime: an mtime is easy
+        to bump by accident (a copy, an rsync, a backup restore) which would
+        silently keep stale reports alive forever, whereas the date in the
+        name is the date the report is actually about. Anything in the
+        directory that doesn't match the expected report-name pattern is
+        left strictly alone.
+        """
+        if not os.path.isdir(self.report_dir):
+            return
+
+        cutoff = (datetime.now() - timedelta(days=self.report_retention_days)).date()
+        removed = 0
+
+        for path in glob.glob(os.path.join(self.report_dir, "*.html")):
+            match = _REPORT_NAME_RE.match(os.path.basename(path))
+            if not match:
+                continue
+            try:
+                report_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if report_date < cutoff:
+                os.remove(path)
+                removed += 1
+
+        if removed:
+            logger.info(
+                f"Pruned {removed} report(s) older than {self.report_retention_days} days "
+                f"from {self.report_dir}"
+            )
 
     def _generate_html_summary(self, trades):
         """Generate HTML email with trading summary"""

@@ -94,6 +94,7 @@ def select_symbols(config, screener, market_data):
         timeout_seconds = config["trading"].get("screener_timeout_seconds", 420)
 
         executor = ThreadPoolExecutor(max_workers=1)
+        screener_started = time.monotonic()
         future = executor.submit(
             screener.screen,
             top_n=config["trading"]["num_stocks_to_trade"],
@@ -101,6 +102,10 @@ def select_symbols(config, screener, market_data):
         )
         try:
             symbols = future.result(timeout=timeout_seconds)
+            logger.info(
+                f"Screener finished in {time.monotonic() - screener_started:.1f}s "
+                f"(timeout is {timeout_seconds}s)"
+            )
         except FutureTimeoutError:
             screener_timed_out = True
             logger.warning(
@@ -109,7 +114,9 @@ def select_symbols(config, screener, market_data):
             )
             symbols = []
         except Exception as e:
-            logger.error(f"Screener failed: {e}")
+            logger.error(
+                f"Screener failed after {time.monotonic() - screener_started:.1f}s: {e}"
+            )
             symbols = []
         finally:
             # Don't block waiting for an abandoned/still-running screener thread -
