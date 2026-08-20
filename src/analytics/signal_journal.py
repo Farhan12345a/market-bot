@@ -59,6 +59,7 @@ class SignalJournal:
 
         self._pending = []  # rows still waiting on their forward returns
         self._written = 0
+        self._taken_written = 0
 
     # ---- recording -------------------------------------------------------
 
@@ -129,6 +130,7 @@ class SignalJournal:
                 for entry in self._pending:
                     writer.writerow(entry["row"])
             self._written += len(self._pending)
+            self._taken_written += sum(1 for e in self._pending if e["row"].get("taken"))
             logger.info(
                 f"Wrote {len(self._pending)} signal(s) to {os.path.abspath(self.path)}"
             )
@@ -139,5 +141,15 @@ class SignalJournal:
             return None
 
     def stats(self):
-        taken = sum(1 for e in self._pending if e["row"].get("taken"))
-        return {"pending": len(self._pending), "taken": taken, "written": self._written}
+        """
+        Counts across the whole session, not just what is still buffered.
+        `taken` used to be computed from self._pending, which flush() empties -
+        so end-of-day logging always reported taken=0 even on a day with 20
+        entries (observed 2026-08-20). Written totals are accumulated at flush
+        time instead.
+        """
+        return {
+            "pending": len(self._pending),
+            "taken": self._taken_written + sum(1 for e in self._pending if e["row"].get("taken")),
+            "written": self._written,
+        }

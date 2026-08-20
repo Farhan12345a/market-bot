@@ -1241,11 +1241,24 @@ def main():
 
         # Holds the pre-market screener result until the open consumes it.
         pending_selection = None
+        # Date of the last completed session. run_trading_day RETURNS once every
+        # position is closed ("all_closed"), which on 2026-08-20 happened at
+        # 10:14 ET - and the loop immediately re-screened and started a second
+        # trading day for the same date. Harmless that day only because the
+        # entry window had already passed, but it burned a screener run and
+        # would re-arm entries entirely if a session ever finished early enough.
+        last_session_date = None
 
         while True:
             now = datetime.now(et)
 
             if market_data.is_market_open():
+                if last_session_date == now.date():
+                    # Already traded today - wait for tomorrow rather than
+                    # starting a second session on the same date.
+                    time.sleep(60)
+                    continue
+
                 if pending_selection is None:
                     # No pre-market run happened - the process started late,
                     # or was restarted mid-session. Screen now rather than
@@ -1273,6 +1286,7 @@ def main():
                         config, market_data, strategy, executor, symbols, rsi_values,
                         email_notifier, et, signal_journal,
                     )
+                    last_session_date = datetime.now(et).date()
                 finally:
                     if price_stream is not None:
                         logger.info(f"Price stream for the session: {price_stream.stats()}")

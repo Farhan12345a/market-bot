@@ -1,6 +1,7 @@
 import csv
 import logging
 import json
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -529,11 +530,32 @@ class Executor:
         """
         try:
             Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-            with open(filepath, "w") as f:
-                json.dump(self.trades_log, f, indent=2)
+
+            # Written to a temp file and renamed, NOT straight to filepath.
+            # open(filepath, "w") truncates immediately, so a serialization
+            # failure part-way through left a half-written trades.json behind -
+            # which is what happened on 2026-08-20: an un-serializable UUID in
+            # order_id raised mid-dump, and the daily report then died reading
+            # the truncated file ("Expecting value: line 16 column 17"). One
+            # fault, two failures, and no report for the day. A rename is
+            # atomic, so the previous good file survives any failure here.
+            #
+            # default=str covers the UUID itself: Alpaca returns order.id as a
+            # UUID object, which json cannot encode. Applied broadly rather
+            # than to that one field so any future non-JSON type degrades to
+            # its string form instead of destroying the file.
+            tmp = f"{filepath}.tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.trades_log, f, indent=2, default=str)
+            os.replace(tmp, filepath)
             logger.info(f"Trades log saved to {filepath}")
         except Exception as e:
             logger.error(f"Error saving trades log: {e}")
+            try:
+                if os.path.exists(f"{filepath}.tmp"):
+                    os.remove(f"{filepath}.tmp")
+            except Exception:
+                pass
 
         self._append_trade_history_csv()
 

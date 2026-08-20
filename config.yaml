@@ -33,7 +33,7 @@ trading:
   # target confirmed losses; this one is a latency optimization. Enabling it
   # the same day would make an unexpected result impossible to attribute.
   # Flip to true to turn the stream on - nothing else needs to change.
-  use_websocket_stream: false
+  use_websocket_stream: true
   websocket_feed: "iex"   # iex = free tier. sip requires a paid subscription.
 
   # Subscribe to live TRADES as well as bars, and use the latest tick as the
@@ -54,8 +54,16 @@ trading:
                                       # Kept at 60s (matches the 1-minute bar data we fetch) - polling faster
                                       # than that just re-reads the same bar and burns Alpaca's free-tier
                                       # data-request quota for no benefit.
-  rapid_increase_pct: 0.5            # Minimum % price gain within the lookback window to trigger a buy (e.g. 0.5 = 0.5%)
-  rapid_increase_lookback_minutes: 5 # Rolling window, in minutes, that the % gain above is measured over.
+  # 0.5%/5min -> 0.3%/3min for 2026-08-21, moved TOGETHER and only because the
+  # WebSocket is on. Holding 0.5% while shortening the window would demand a
+  # FASTER move, selecting harder-running names - and the 2026-08-19 data says
+  # that is backwards (signal >= 1.0%: 6 symbols, 1 winner, -$531; signal
+  # < 1.0%: 14 symbols, 4 winners, -$181). 0.5% over 5min is ~0.3% over 3min,
+  # so this holds the implied velocity constant while reacting sooner.
+  # A shorter window is only useful on live data: with REST-delayed prices,
+  # entry timing is dominated by feed lag, not window width.
+  rapid_increase_pct: 0.3            # Minimum % price gain within the lookback window to trigger a buy
+  rapid_increase_lookback_minutes: 3 # Rolling window, in minutes, that the % gain above is measured over.
                                       # Widened from 2min: the free IEX feed lags wall-clock by ~2-3min, and the
                                       # lookback cutoff is computed against wall-clock time, so a window shorter
                                       # than the feed delay could never accumulate 2 in-window samples (see the
