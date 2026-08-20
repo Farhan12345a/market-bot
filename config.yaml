@@ -197,7 +197,15 @@ trading:
   # place. This caps that churn. Set to 0 (or remove) for unlimited.
   # Only entries are blocked once the cap is hit - exit monitoring continues,
   # so open positions are never left unprotected.
-  max_daily_entries: 25
+  # Raised 25 -> 50 for data collection. 2026-08-19 ran UNCAPPED and took 54
+  # entries, so 25 would have collected less than half of a day that was
+  # already considered too small a sample. 50 gives a comparable sample while
+  # still cutting the tail of pure churn.
+  # NOTE: this is very unlikely to be the binding constraint - see
+  # max_daily_loss_usd. The loss limit now actually fires (it never once did
+  # before), and on 2026-08-19 numbers it would have ended the session around
+  # entry 40, before this cap was ever reached.
+  max_daily_entries: 50
 
   max_total_exposure_fraction: 0.9  # never commit more than this fraction of CURRENT equity, combined,
                                      # across all open positions - a fraction (not a fixed $) so it scales
