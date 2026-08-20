@@ -56,6 +56,13 @@ class TradeManager:
         # For momentum and resistance detection
         self.price_history = [entry_price]  # Track prices for momentum calc
         self.highest_since_entry = entry_price  # Track peak for resistance
+        # Excursion tracking, for post-trade analysis rather than any exit
+        # decision. MFE is the best unrealized gain a position ever reached and
+        # MAE the worst drawdown - the pair that answers "was this loser ever
+        # actually winning?". Both were previously computable only by
+        # re-fetching minute bars after the fact, so no log, CSV or report
+        # could show them.
+        self.lowest_since_entry = entry_price
 
         self.orders_log = []
 
@@ -199,6 +206,17 @@ class TradeManager:
         )
         return self.qty_remaining
 
+    def excursions(self):
+        """
+        (mfe_pct, mae_pct) - best and worst unrealized moves seen since entry,
+        as % of entry price. Observational only; nothing gates on these.
+        """
+        if not self.entry_price:
+            return None, None
+        mfe = (self.highest_since_entry - self.entry_price) / self.entry_price * 100
+        mae = (self.lowest_since_entry - self.entry_price) / self.entry_price * 100
+        return round(mfe, 4), round(mae, 4)
+
     def process_exit(self, qty_to_exit, exit_reason):
         """Record a CONFIRMED exit - call only after the broker has actually
         filled the sell order. This is where first_exit_done actually gets
@@ -283,6 +301,8 @@ class Strategy:
         trade.price_history.append(current_price)
         if current_price > trade.highest_since_entry:
             trade.highest_since_entry = current_price
+        if current_price < trade.lowest_since_entry:
+            trade.lowest_since_entry = current_price
 
         checks = [
             ("FINAL_EXIT_-1.0%", trade.check_final_exit),

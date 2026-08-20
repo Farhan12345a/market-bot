@@ -231,6 +231,8 @@ class EmailNotifier:
                             <th>Qty</th>
                             <th>% Change</th>
                             <th>P&L</th>
+                            <th>Peak (MFE)</th>
+                            <th>Trough (MAE)</th>
                             <th>Exit Reason</th>
                             <th>Stop Loss?</th>
                         </tr>
@@ -248,6 +250,9 @@ class EmailNotifier:
             exit_reason = trade.get("exit_reason", "Unknown")
             entry_method = trade.get("entry_method") or "N/A"
             burst_logic = trade.get("burst_logic") or "n/a"
+            mfe, mae = trade.get("mfe_pct"), trade.get("mae_pct")
+            mfe_str = f"{mfe:+.2f}%" if isinstance(mfe, (int, float)) else "N/A"
+            mae_str = f"{mae:+.2f}%" if isinstance(mae, (int, float)) else "N/A"
             entry_rsi = trade.get("entry_rsi")
             exit_rsi = trade.get("exit_rsi")
             entry_rsi_str = f"{entry_rsi:.1f}" if isinstance(entry_rsi, (int, float)) else "N/A"
@@ -269,6 +274,8 @@ class EmailNotifier:
                             <td>{qty}</td>
                             <td class="{pl_class}">{pl_sign}{pl_pct:.2f}%</td>
                             <td class="{pl_class}"><strong>{pl_sign}${pl:,.2f}</strong></td>
+                            <td class="profit">{mfe_str}</td>
+                            <td class="loss">{mae_str}</td>
                             <td><span class="exit-reason">{exit_reason}</span></td>
                             <td>{stop_loss_str}</td>
                         </tr>

@@ -301,7 +301,8 @@ class Executor:
         logger.info(f"{ANSI_GREEN}Entry order submitted for {symbol}: {qty} shares at {price}{ANSI_RESET}")
         return order
 
-    def submit_exit_order(self, symbol, qty, reason="", price=None, exit_rsi=None):
+    def submit_exit_order(self, symbol, qty, reason="", price=None, exit_rsi=None,
+                          mfe_pct=None, mae_pct=None):
         """
         Submit a market order to exit a position and record a documented
         trade row. Returns the order on success, or None on failure (does NOT
@@ -350,6 +351,14 @@ class Executor:
                 "entry_price": entry_price,
                 "entry_method": meta.get("method"),
                 "burst_logic": meta.get("burst_logic") or "n/a",
+                # Max favorable / adverse excursion: the best and worst
+                # unrealized moves this position saw before closing. Purely
+                # observational, but they answer a question the exit reason
+                # alone cannot - whether a loser was ever actually winning.
+                # Until these were recorded, that could only be reconstructed
+                # by re-fetching minute bars after the fact.
+                "mfe_pct": mfe_pct,
+                "mae_pct": mae_pct,
                 "entry_rsi": meta.get("rsi"),
                 "exit_time": now_iso,
                 "exit_price": price,
@@ -540,6 +549,7 @@ class Executor:
 
         fieldnames = [
             "date", "symbol", "entry_time", "entry_price", "entry_method", "burst_logic", "entry_rsi",
+            "mfe_pct", "mae_pct",
             "exit_time", "exit_price", "exit_reason", "stop_loss_used", "exit_rsi",
             "qty", "pl", "pl_pct",
         ]

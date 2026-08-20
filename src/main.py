@@ -565,8 +565,14 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         logger.debug(f"Could not fetch exit RSI for {symbol}: {rsi_err}")
                         exit_rsi = None
 
+                    # Read excursions BEFORE confirm_exit - a full exit deletes
+                    # the TradeManager, taking the peak/trough with it.
+                    trade = strategy.trades.get(symbol)
+                    mfe_pct, mae_pct = trade.excursions() if trade else (None, None)
+
                     order = executor.submit_exit_order(
-                        symbol, exit_info["qty"], exit_info["reason"], exit_info["price"], exit_rsi=exit_rsi
+                        symbol, exit_info["qty"], exit_info["reason"], exit_info["price"],
+                        exit_rsi=exit_rsi, mfe_pct=mfe_pct, mae_pct=mae_pct,
                     )
                     if order is not None:
                         strategy.confirm_exit(symbol, exit_info["qty"], exit_info["reason"], exit_info["price"])
