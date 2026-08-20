@@ -36,6 +36,20 @@ trading:
   use_websocket_stream: false
   websocket_feed: "iex"   # iex = free tier. sip requires a paid subscription.
 
+  # Subscribe to live TRADES as well as bars, and use the latest tick as the
+  # price for ENTRY DETECTION. Exits keep reading 1-minute bar closes.
+  # The split is deliberate. Entries want speed: on 2026-08-20 losing entries
+  # landed at the 87th percentile of the surrounding half-hour while winners
+  # landed at the 43rd - losers were systematically buying the local top, which
+  # is what acting on delayed prices looks like. Exits want stability:
+  # RESISTANCE fired 14 times that day on moves as small as 0.08%, so putting
+  # ticks into the exit path would undo that fix.
+  # Consequence: a bad print can only cause a missed or slightly-early ENTRY.
+  # It can never stop out a good position.
+  # Requires use_websocket_stream; ignored otherwise, and falls back to the bar
+  # close whenever no trade has arrived in the last 30s.
+  use_trade_ticks_for_entry: true
+
   entry_check_interval_seconds: 60   # How often to re-check prices during the entry window, in seconds.
                                       # Kept at 60s (matches the 1-minute bar data we fetch) - polling faster
                                       # than that just re-reads the same bar and burns Alpaca's free-tier

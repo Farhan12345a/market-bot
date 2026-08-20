@@ -662,7 +662,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     if not bar:
                         continue
 
-                    price = bar.get("close", 0)
+                    # ENTRY price only. The exit loop above keeps using the
+                    # bar close it already reads - see get_entry_price.
+                    price = market_data.get_entry_price(symbol, bar)
                     ts = bar.get("timestamp", now)
                     history = price_history[symbol]
                     history.append((ts, price))
@@ -1203,6 +1205,7 @@ def main():
                 broker.api_key,
                 broker.api_secret,
                 feed=config["trading"].get("websocket_feed", "iex"),
+                subscribe_trades=config["trading"].get("use_trade_ticks_for_entry", True),
             )
 
         # Initialize components

@@ -53,6 +53,12 @@ logger = logging.getLogger(__name__)
 # is exactly the case where falling back to REST is the right answer.
 BAR_STALE_AFTER_SECONDS = 180
 
+# A streamed trade older than this is treated as absent, so entry detection
+# falls back to the bar close. Much tighter than the bar window because the
+# entire point of consuming trades is freshness - a 30-second-old tick is no
+# better than the bar it would be replacing.
+TRADE_STALE_AFTER_SECONDS = 30
+
 # How long to wait between reconnect attempts after the stream drops.
 RECONNECT_DELAY_SECONDS = 5
 
@@ -79,13 +85,20 @@ class PriceStream:
     symbol. Thread-safe: the websocket thread writes, the trading loop reads.
     """
 
-    def __init__(self, api_key, api_secret, feed="iex"):
+    def __init__(self, api_key, api_secret, feed="iex", subscribe_trades=False):
         self._api_key = api_key
         self._api_secret = api_secret
         self._feed = feed
+        self._subscribe_trades = subscribe_trades
 
         self._bars = {}  # symbol -> {open, high, low, close, volume, timestamp}
         self._received_at = {}  # symbol -> time.monotonic() when the bar landed
+
+        # Last trade price per symbol, consumed ONLY by entry detection.
+        # Deliberately never reaches the exit path - see get_last_trade_price.
+        self._last_trade = {}  # symbol -> price
+        self._trade_received_at = {}  # symbol -> time.monotonic() when the tick landed
+        self._trades_received = 0
         self._lock = threading.Lock()
 
         self._stream = None
@@ -194,6 +207,8 @@ class PriceStream:
                     self._api_key, self._api_secret, feed=feed
                 )
                 self._stream.subscribe_bars(self._on_bar, *self._symbols)
+                if self._subscribe_trades:
+                    self._stream.subscribe_trades(self._on_trade, *self._symbols)
                 self._connected = True
                 logger.info(f"PriceStream connected, subscribed to {len(self._symbols)} symbols")
                 self._stream.run()  # blocks until the connection drops
@@ -234,6 +249,46 @@ class PriceStream:
             # Never let a malformed bar kill the socket - one bad message
             # would otherwise take down the feed for every symbol.
             logger.error(f"PriceStream error handling bar for {getattr(bar, 'symbol', '?')}: {e}")
+
+    async def _on_trade(self, trade):
+        """Handler for each incoming trade tick. Kept trivial - this fires
+        far more often than _on_bar and must never become a bottleneck."""
+        try:
+            price = float(trade.price)
+            if price <= 0:
+                return
+            with self._lock:
+                self._last_trade[trade.symbol] = price
+                self._trade_received_at[trade.symbol] = time.monotonic()
+                self._trades_received += 1
+        except Exception as e:
+            logger.debug(f"PriceStream error handling trade for {getattr(trade,'symbol','?')}: {e}")
+
+    def get_last_trade_price(self, symbol):
+        """
+        Most recent trade price, or None if there is no fresh one.
+
+        ENTRY DETECTION ONLY. Exits deliberately keep reading 1-minute bar
+        closes via get_bar(), because the two paths want opposite things:
+        entries want speed (2026-08-20 measurement: losing entries landed at
+        the 87th percentile of the surrounding half-hour, i.e. systematically
+        buying the local top, consistent with acting on delayed prices), while
+        exits want stability (RESISTANCE fired 14 times that day on moves as
+        small as 0.08%, so making the exit path tick-sensitive would re-create
+        a problem just fixed).
+
+        Consequence of a bad print or a momentary spread blip is therefore
+        bounded: it can cause a missed or slightly early ENTRY, and can never
+        stop out a good position.
+        """
+        with self._lock:
+            price = self._last_trade.get(symbol)
+            at = self._trade_received_at.get(symbol)
+        if price is None or at is None:
+            return None
+        if time.monotonic() - at > TRADE_STALE_AFTER_SECONDS:
+            return None
+        return price
 
     def get_bar(self, symbol):
         """
@@ -300,4 +355,5 @@ class PriceStream:
             "symbols_seen": total_symbols,
             "subscribed": len(self._symbols),
             "bars_received": received,
+            "trades_received": self._trades_received,
         }

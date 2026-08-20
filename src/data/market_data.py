@@ -19,6 +19,8 @@ class MarketDataManager:
         self.stream = stream
         self._stream_hits = 0
         self._rest_fallbacks = 0
+        self._tick_entries = 0   # entry prices taken from a live trade
+        self._bar_entries = 0    # entry prices that fell back to the bar close
 
     def get_20day_avg_volume(self, symbol):
         """Get 20-day average volume"""
@@ -143,6 +145,32 @@ class MarketDataManager:
             logger.error(f"Error fetching latest bar for {symbol}: {e}")
             return None
 
+    def get_entry_price(self, symbol, bar):
+        """
+        Price to use for ENTRY DETECTION: the freshest live trade if the stream
+        has one, otherwise the bar's close.
+
+        Exits deliberately do NOT call this - they keep reading bar closes via
+        get_latest_bar(). The two paths want opposite things. Entries want
+        speed: on 2026-08-20, losing entries landed at the 87th percentile of
+        the surrounding half-hour while winners landed at the 43rd, i.e. losers
+        were systematically buying the local top, which is what acting on stale
+        prices looks like. Exits want stability: RESISTANCE fired 14 times that
+        day on moves as small as 0.08%, so feeding ticks into the exit path
+        would re-create a problem that was just fixed.
+
+        Because of that split, a bad print or a momentary spread blip can only
+        cause a missed or slightly-early ENTRY. It can never stop out a good
+        position.
+        """
+        if self.stream is not None:
+            tick = self.stream.get_last_trade_price(symbol)
+            if tick:
+                self._tick_entries += 1
+                return tick
+        self._bar_entries += 1
+        return (bar or {}).get("close", 0)
+
     def data_source_stats(self):
         """Counts of stream-served vs REST-served bar reads, for logging."""
         total = self._stream_hits + self._rest_fallbacks
@@ -150,6 +178,8 @@ class MarketDataManager:
             "stream_hits": self._stream_hits,
             "rest_fallbacks": self._rest_fallbacks,
             "stream_pct": (100.0 * self._stream_hits / total) if total else 0.0,
+            "entry_prices_from_ticks": self._tick_entries,
+            "entry_prices_from_bars": self._bar_entries,
         }
 
     def is_trading_day(self, now=None):
