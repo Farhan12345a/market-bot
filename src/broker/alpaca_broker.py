@@ -149,6 +149,27 @@ class AlpacaBroker:
             logger.error(f"Error fetching historical bars: {e}")
             return {}
 
+    def get_latest_quote(self, symbol):
+        """
+        Latest bid/ask for one symbol, or None. Used only to record the
+        bid-ask spread in the signal journal - never in an entry decision, so
+        a failure here can never block or delay a trade.
+        """
+        try:
+            from alpaca.data.requests import StockLatestQuoteRequest
+
+            q = self.data_client.get_stock_latest_quote(
+                StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=DataFeed.IEX)
+            )
+            quote = q.get(symbol) if isinstance(q, dict) else q
+            bid, ask = float(quote.bid_price), float(quote.ask_price)
+            if bid <= 0 or ask <= 0:
+                return None
+            return {"bid": bid, "ask": ask, "spread": ask - bid}
+        except Exception as e:
+            logger.debug(f"Could not fetch quote for {symbol}: {e}")
+            return None
+
     def get_latest_bars(self, symbols, timeframe="1Min"):
         """Get the latest bar for symbols (useful for real-time checks)"""
         try:

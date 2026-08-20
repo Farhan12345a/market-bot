@@ -33,6 +33,7 @@ from src.data.stream import PriceStream
 from src.executor.executor import Executor
 from src.screener.stock_screener import StockScreener
 from src.notifications.email_notifier import EmailNotifier
+from src.analytics.signal_journal import SignalJournal
 
 # Setup logging
 logging.basicConfig(
@@ -227,7 +228,117 @@ def _position_size(config, executor, price):
 
     return int(min(budgets) / price)
 
-def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi):
+def _summarise_burst_notes(config, notes):
+    """
+    One precise sentence describing what burst logic actually ran today, for
+    the daily report. Reports the settings AND how often the throttle really
+    engaged, so a day where it never triggered is distinguishable from a day
+    where it shaped every entry.
+    """
+    trading = config["trading"]
+    if not trading.get("use_burst_throttle", False):
+        return "Burst throttle disabled - every qualifying signal sized normally."
+    threshold = trading.get("burst_width_threshold", 5)
+    max_entries = trading.get("burst_max_entries", 3)
+    multiplier = trading.get("burst_size_multiplier", 0.5)
+    throttled = sum(1 for n in notes if n and n.startswith("THROTTLED"))
+    polls = len(notes)
+    return (
+        f"Burst throttle ON (>= {threshold} simultaneous signals -> take at most "
+        f"{max_entries} at {multiplier:g}x size). Engaged on {throttled} of {polls} "
+        f"entry-window polls."
+    )
+
+
+def _window_pct_change(history):
+    """% change from the oldest to newest sample in a lookback deque, or None."""
+    if not history or len(history) < 2:
+        return None
+    first, last = history[0][1], history[-1][1]
+    if not first:
+        return None
+    return round((last - first) / first * 100, 3)
+
+
+def _spread_pct(market_data, symbol, price):
+    """
+    Bid-ask spread as a % of price, for the signal journal only.
+
+    This is the quantity min_stock_price only approximates: a one-cent spread
+    is a fixed dollar cost, so as a percentage it explodes at low prices -
+    PLUG at $2.19 quotes ~0.45%, against a first exit that triggers at -0.5%.
+    Measuring it directly is what would eventually allow keeping a cheap stock
+    that happens to be tight while rejecting an expensive one that is wide.
+
+    Fully guarded: journal-only, called after the entry decision, never gates
+    a trade, and returns None on any failure.
+    """
+    try:
+        quote = market_data.broker.get_latest_quote(symbol)
+        if not quote or not price:
+            return None
+        return round(quote["spread"] / price * 100, 4)
+    except Exception:
+        return None
+
+
+def _burst_policy(config, burst_width):
+    """
+    Decide how many of this poll's simultaneous signals to act on, and at what
+    size. Returns (max_entries, size_multiplier, description).
+
+    When many symbols fire in the same poll they are almost never independent
+    ideas - they are one market move showing up in many tickers at once. On
+    2026-08-19 twenty names triggered inside nine seconds; the book was not
+    twenty bets, it was one bet held twenty times, and when the move went the
+    wrong way every position lost together (1 winner out of 23, -$1,307).
+
+    Note what this does and does not fix. Taking the first N of a burst is NOT
+    diversification - it is the same bet held N times instead of twenty, which
+    reduces the size of the loss without changing its nature. Ranking (buying
+    the "best" of a burst) is a separate improvement and needs the evidence
+    the signal journal is being built to collect; this only controls how much
+    is committed to a single market move.
+
+    Below burst_width_threshold nothing changes: a couple of signals in one
+    poll is normal, uncorrelated behavior and gets full size.
+    """
+    trading = config["trading"]
+    if not trading.get("use_burst_throttle", False):
+        return None, 1.0, f"disabled (burst={burst_width})"
+
+    threshold = trading.get("burst_width_threshold", 5)
+    if burst_width < threshold:
+        return None, 1.0, f"normal: burst={burst_width} < threshold {threshold}, full size"
+
+    max_entries = trading.get("burst_max_entries", 3)
+    size_multiplier = trading.get("burst_size_multiplier", 0.5)
+    return (
+        max_entries,
+        size_multiplier,
+        f"THROTTLED: burst={burst_width} >= {threshold}, took <= {max_entries} at {size_multiplier:g}x size",
+    )
+
+
+def _compute_rvol(bar, volume_history):
+    """
+    This bar's volume against the average of this symbol's own recent bars.
+    Returns None until there is enough history to compare against. Journal
+    only - never gates an entry.
+    """
+    try:
+        vol = float(bar.get("volume") or 0)
+        prior = [v for v in volume_history if v > 0]
+        if vol <= 0 or len(prior) < 3:
+            return None
+        avg = sum(prior) / len(prior)
+        return round(vol / avg, 3) if avg > 0 else None
+    except Exception:
+        return None
+
+
+def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi,
+                   size_multiplier=1.0, burst_note=None):
     """
     Shared entry path for all three entry signals (three-bar momentum, rapid
     increase immediate, pullback resumption). Returns True if a position was
@@ -246,7 +357,7 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     was accepted by Alpaca's margin account as opening a real, completely
     untracked short position. 16 of them happened this way in one session.
     """
-    qty = _position_size(config, executor, price)
+    qty = int(_position_size(config, executor, price) * size_multiplier)
     if qty <= 0:
         logger.info(f"{symbol}: entry skipped - position size worked out to 0 shares at {price:.2f}")
         return False
@@ -271,11 +382,16 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
         return False  # broker rejected/failed - already logged by submit_entry_order, nothing committed
 
     strategy.confirm_entry(symbol, price, qty)
+    if burst_note:
+        executor.entry_meta.setdefault(symbol, {})["burst_logic"] = burst_note
     rsi_note = f", RSI={symbol_rsi:.1f}" if symbol_rsi is not None else ""
-    logger.info(f"{symbol}: {entry_method} entry confirmed - {qty} shares @ {price:.2f}{rsi_note}")
+    size_note = f", {size_multiplier:g}x size" if size_multiplier != 1.0 else ""
+    logger.info(
+        f"{symbol}: {entry_method} entry confirmed - {qty} shares @ {price:.2f}{rsi_note}{size_note}"
+    )
     return True
 
-def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values, email_notifier, et):
+def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values, email_notifier, et, signal_journal=None):
     """
     Runs the entire trading day as ONE continuous loop, from entry_window_start
     until either all positions have closed after the entry window ends, or the
@@ -347,13 +463,22 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         logger.debug(f"Could not read starting cash for daily summary: {e}")
 
     def finish_day(reason):
+        signal_journal.flush()
         executor.save_trades_log()
-        email_notifier.send_daily_summary()
+        email_notifier.send_daily_summary(burst_summary=executor.day_burst_summary)
         _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et)
         _write_price_log(symbol_price_log, et)
+        executor.day_burst_summary = _summarise_burst_notes(config, day_burst_notes)
+        logger.info(f"Burst logic for the day: {executor.day_burst_summary}")
+        logger.info(f"Signal journal: {signal_journal.stats()}")
         logger.info(f"Daily session complete: entries_triggered={entries_triggered}, reason={reason}")
 
+    if signal_journal is None:
+        signal_journal = SignalJournal(config)
     stream_warned = False
+    volume_history = {symbol: deque(maxlen=20) for symbol in symbols}  # for intraday RVOL
+    spy_history = deque()          # SPY samples, for excess-return-vs-market
+    day_burst_notes = []           # one note per poll, summarised into the daily report
 
     while True:
         now = datetime.now(et)
@@ -365,6 +490,13 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         # connected stream. Warn once per session rather than let that pass
         # unnoticed. Trading is unaffected either way - the fallback is what
         # keeps prices flowing - so this is a heads-up, not a halt.
+        # Fill in forward returns for journalled signals whose horizon has
+        # elapsed. Uses the price source already in use, so no extra API cost
+        # for symbols already being watched.
+        signal_journal.update_forward_returns(
+            lambda sym: (market_data.get_latest_bar(sym, "1Min") or {}).get("close")
+        )
+
         stream = getattr(market_data, "stream", None)
         if stream is not None and not stream_warned:
             stats = stream.stats()
@@ -442,6 +574,33 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 )
                 daily_entry_cap_logged = True
         elif now < entry_end:
+            # SPY is tracked purely as a market benchmark - never traded. It is
+            # what separates "this stock is strong" from "the market went up":
+            # during a burst every name's raw move looks alike, but excess
+            # return over the index collapses toward zero for the ones that are
+            # only beta.
+            try:
+                spy_bar = market_data.get_latest_bar("SPY", "1Min")
+                if spy_bar:
+                    spy_ts = spy_bar.get("timestamp", now)
+                    spy_history.append((spy_ts, spy_bar.get("close", 0)))
+                    spy_cutoff = spy_ts - lookback
+                    while spy_history and spy_history[0][0] < spy_cutoff:
+                        spy_history.popleft()
+            except Exception as e:
+                logger.debug(f"SPY benchmark unavailable this poll: {e}")
+
+            # PASS 1 - detect only. Signals are collected, not acted on, so
+            # the number firing in THIS poll is known before any order is
+            # placed. That count (the burst width) is what _burst_policy needs
+            # in order to distinguish a couple of independent ideas from one
+            # market move showing up in twenty tickers at once.
+            #
+            # Only the two live entry paths are deferred this way. The
+            # pullback and opening-reversal state machines are both toggled
+            # off and keep their existing immediate behavior rather than being
+            # restructured while unproven.
+            burst_candidates = []
             for symbol in symbols:
                 # Re-checked per SYMBOL, not just once per poll. The outer
                 # check above only runs at the top of a cycle, and this inner
@@ -473,6 +632,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     history.append((ts, price))
                     bar_history[symbol].append(bar)
                     symbol_price_log[symbol].append((ts, price))
+                    volume_history[symbol].append(float(bar.get("volume") or 0))
 
                     # Drop samples older than the lookback window, measured from the latest
                     # BAR's own timestamp (not wall-clock `now`) - the feed can lag wall-clock
@@ -497,10 +657,10 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                             f"(gaps +{gaps[0]:.2f}, +{gaps[1]:.2f}"
                             f"{', accelerating' if three_bar_require_acceleration else ''})"
                         )
-                        if _attempt_entry(config, strategy, executor, symbol, price, "THREE_BAR_MOMENTUM", symbol_rsi):
-                            entries_triggered += 1
-                            had_any_trades = True
-                            pending_pullbacks.pop(symbol, None)
+                        burst_candidates.append({
+                            "symbol": symbol, "price": price, "method": "THREE_BAR_MOMENTUM",
+                            "rsi": symbol_rsi, "signal_pct": None, "bar": bar,
+                        })
                         continue
 
                     if use_pullback_entry and symbol in pending_pullbacks:
@@ -572,13 +732,63 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                             f"{lookback.total_seconds()/60:.0f}min (threshold "
                             f"{config['trading']['rapid_increase_pct']}%)"
                         )
-                        if _attempt_entry(config, strategy, executor, symbol, price, "RAPID_INCREASE_IMMEDIATE", symbol_rsi):
-                            entries_triggered += 1
-                            had_any_trades = True
+                        burst_candidates.append({
+                            "symbol": symbol, "price": price, "method": "RAPID_INCREASE_IMMEDIATE",
+                            "rsi": symbol_rsi, "signal_pct": round(pct_change, 3), "bar": bar,
+                        })
 
                 except Exception as e:
                     logger.error(f"Error checking entry for {symbol}: {e}")
                     continue
+
+            # PASS 2 - act. Burst width is now known for the whole poll.
+            burst_width = len(burst_candidates)
+            burst_max, burst_size, burst_note = _burst_policy(config, burst_width)
+            if burst_max is not None and burst_width >= config["trading"].get("burst_width_threshold", 5):
+                logger.warning(
+                    f"BURST DETECTED: {burst_width} symbols signalled in one poll "
+                    f"({', '.join(c['symbol'] for c in burst_candidates)}) - {burst_note}"
+                )
+            day_burst_notes.append(burst_note)
+
+            spy_pct = _window_pct_change(spy_history)
+
+            for index, cand in enumerate(burst_candidates):
+                symbol, price = cand["symbol"], cand["price"]
+                taken, skip_reason = False, None
+
+                if max_daily_entries and entries_triggered >= max_daily_entries:
+                    skip_reason = "max_daily_entries"
+                elif burst_max is not None and index >= burst_max:
+                    skip_reason = "burst_throttle"
+                else:
+                    taken = _attempt_entry(
+                        config, strategy, executor, symbol, price, cand["method"], cand["rsi"],
+                        size_multiplier=burst_size, burst_note=burst_note,
+                    )
+                    if taken:
+                        entries_triggered += 1
+                        had_any_trades = True
+                        pending_pullbacks.pop(symbol, None)
+                    else:
+                        skip_reason = "rejected_by_pre_entry_checks"
+
+                # Journal EVERY signal, taken or not - the refused ones are
+                # the control group any future ranking has to be judged
+                # against. Recorded after the decision so it cannot affect it.
+                sig_pct = cand["signal_pct"]
+                signal_journal.record(
+                    symbol=symbol, entry_method=cand["method"], price=price,
+                    signal_pct=sig_pct,
+                    spy_pct=spy_pct,
+                    excess_vs_spy_pct=(round(sig_pct - spy_pct, 3)
+                                       if sig_pct is not None and spy_pct is not None else None),
+                    rvol=_compute_rvol(cand["bar"], volume_history[symbol]),
+                    spread_pct=_spread_pct(market_data, symbol, price),
+                    burst_width=burst_width,
+                    taken=taken, skip_reason=skip_reason,
+                    qty=None, size_multiplier=burst_size,
+                )
 
         # ---- day-completion checks ----
         open_trades = strategy.get_open_trades()
@@ -965,6 +1175,7 @@ def main():
         executor = Executor(broker, config)
         reconcile_existing_positions(broker, strategy, executor)
         email_notifier = EmailNotifier(config)
+        signal_journal = SignalJournal(config)
 
         logger.info("Paper trading bot started")
         logger.info(f"Trading hours: 9:30 AM - {config['trading']['time_stop_hour']}:00 ET")
@@ -1021,7 +1232,7 @@ def main():
                 try:
                     run_trading_day(
                         config, market_data, strategy, executor, symbols, rsi_values,
-                        email_notifier, et,
+                        email_notifier, et, signal_journal,
                     )
                 finally:
                     if price_stream is not None:

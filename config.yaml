@@ -193,6 +193,29 @@ trading:
                              # test session run further before halting - at 1000 the limit would have
                              # ended 2026-08-19 at exit 17 of 71, collecting little data.
 
+  # --- Burst throttle ---
+  # When many symbols signal in the SAME poll they are rarely independent
+  # ideas - it is one market move surfacing in many tickers at once. On
+  # 2026-08-19 twenty names fired inside nine seconds; that book was not
+  # twenty bets but one bet held twenty times, and it went 1 winner / 23
+  # exits / -$1,307. Above the threshold the bot takes fewer of them AND
+  # sizes each smaller.
+  # This limits how much is committed to a single market move. It is NOT
+  # diversification and NOT ranking - picking the "best" of a burst needs
+  # evidence, which is what the signal journal below is collecting.
+  #
+  # The cap is PER POLL, not per day, so a burst that keeps signalling still
+  # fills the book over successive minutes rather than being blocked outright.
+  # Measured against a simulated 20-symbol burst under production caps, the
+  # net effect is: the same 10 positions (max_concurrent_positions binds
+  # either way) but roughly HALF the capital committed, entered across five
+  # polls instead of nine seconds. Staggering is itself worth something -
+  # each later poll is a fresh look at whether the move is still intact.
+  use_burst_throttle: true
+  burst_width_threshold: 5    # this many simultaneous signals counts as a burst
+  burst_max_entries: 3        # take at most this many of them
+  burst_size_multiplier: 0.5  # and size each at this fraction of normal
+
   # --- Exposure caps ---
   # Checked BEFORE every entry attempt (see Executor.pre_entry_check) - the
   # bot will never even try to submit an order that would breach either of
@@ -333,3 +356,13 @@ notifications:
 # 4. Copy password here (replace "YOUR_APP_PASSWORD_HERE")
 # 5. Save config.yaml
 # 6. You're done! Bot will email summary after each trading day
+
+analytics:
+  # Records EVERY entry signal that fires - taken or not - with the features
+  # available at that moment, then follows each forward to see what the symbol
+  # actually did. The skipped signals are the control group: without them,
+  # "buy the best 3 of the 20 that fired" is an untestable claim.
+  # Purely observational - written after the entry decision, never gates one.
+  log_signals: true
+  signal_log_file: "logs/signal_journal.csv"
+  forward_return_minutes: [15, 30]

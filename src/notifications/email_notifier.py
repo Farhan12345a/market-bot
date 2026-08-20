@@ -55,7 +55,7 @@ class EmailNotifier:
             logger.warning("Email notifications enabled but credentials missing")
             self.enabled = False
 
-    def send_daily_summary(self, trades_file="logs/trades.json"):
+    def send_daily_summary(self, trades_file="logs/trades.json", burst_summary=""):
         """
         Build the daily report, save it to disk, then try to email it.
 
@@ -77,7 +77,7 @@ class EmailNotifier:
 
             trades = trades_data if isinstance(trades_data, list) else trades_data.get("trades", [])
 
-            html_content = self._generate_html_summary(trades)
+            html_content = self._generate_html_summary(trades, burst_summary=burst_summary)
         except Exception as e:
             logger.error(f"Error building daily report: {e}")
             return False
@@ -152,7 +152,7 @@ class EmailNotifier:
                 f"from {self.report_dir}"
             )
 
-    def _generate_html_summary(self, trades):
+    def _generate_html_summary(self, trades, burst_summary=""):
         """Generate HTML email with trading summary"""
         total_pl = sum(t.get("pl", 0) for t in trades)
         winning_trades = [t for t in trades if t.get("pl", 0) > 0]
@@ -212,6 +212,11 @@ class EmailNotifier:
                     </div>
                 </div>
 
+                <div style="background:#f5f7fa;border-left:4px solid #6366f1;padding:12px 15px;border-radius:8px;margin-bottom:20px;">
+                    <h3 style="margin:0 0 4px 0;font-size:13px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;">Bursting Logic</h3>
+                    <div style="font-size:14px;">{burst_summary or 'Not recorded for this session.'}</div>
+                </div>
+
                 <h2 style="margin-top: 30px; border-bottom: 2px solid #3b82f6; padding-bottom: 10px;">Trade Details</h2>
                 <table class="trades-table">
                     <thead>
@@ -219,6 +224,7 @@ class EmailNotifier:
                             <th>Symbol</th>
                             <th>Entry</th>
                             <th>Entry Method</th>
+                            <th>Bursting Logic</th>
                             <th>Entry RSI</th>
                             <th>Exit</th>
                             <th>Exit RSI</th>
@@ -241,6 +247,7 @@ class EmailNotifier:
             pl_pct = trade.get("pl_pct", 0)
             exit_reason = trade.get("exit_reason", "Unknown")
             entry_method = trade.get("entry_method") or "N/A"
+            burst_logic = trade.get("burst_logic") or "n/a"
             entry_rsi = trade.get("entry_rsi")
             exit_rsi = trade.get("exit_rsi")
             entry_rsi_str = f"{entry_rsi:.1f}" if isinstance(entry_rsi, (int, float)) else "N/A"
@@ -255,6 +262,7 @@ class EmailNotifier:
                             <td class="symbol">{symbol}</td>
                             <td>${entry_price:.2f}</td>
                             <td><span class="exit-reason">{entry_method}</span></td>
+                            <td><span class="exit-reason">{burst_logic}</span></td>
                             <td>{entry_rsi_str}</td>
                             <td>${exit_price:.2f}</td>
                             <td>{exit_rsi_str}</td>

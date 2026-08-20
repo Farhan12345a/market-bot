@@ -51,7 +51,8 @@ class Executor:
         self._pnl_date = None
         self.order_history = []
         self.open_entries = {}  # symbol -> entry price, used to compute P&L when the matching exit(s) happen
-        self.entry_meta = {}  # symbol -> {method, rsi, entry_time}, for the daily trade report
+        self.entry_meta = {}  # symbol -> {method, rsi, entry_time, burst_logic}, for the daily trade report
+        self.day_burst_summary = ""  # one-line description of the burst logic actually used today
         self._csv_appended_count = 0  # how many trades_log rows have already been written to trade_history.csv -
         # trades_log is never cleared across days in a long-running process, so without this cursor,
         # calling save_trades_log() on day 2 would re-append day 1's trades to the CSV a second time.
@@ -348,6 +349,7 @@ class Executor:
                 "entry_time": meta.get("entry_time"),
                 "entry_price": entry_price,
                 "entry_method": meta.get("method"),
+                "burst_logic": meta.get("burst_logic") or "n/a",
                 "entry_rsi": meta.get("rsi"),
                 "exit_time": now_iso,
                 "exit_price": price,
@@ -537,7 +539,7 @@ class Executor:
             return
 
         fieldnames = [
-            "date", "symbol", "entry_time", "entry_price", "entry_method", "entry_rsi",
+            "date", "symbol", "entry_time", "entry_price", "entry_method", "burst_logic", "entry_rsi",
             "exit_time", "exit_price", "exit_reason", "stop_loss_used", "exit_rsi",
             "qty", "pl", "pl_pct",
         ]
