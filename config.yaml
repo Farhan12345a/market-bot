@@ -4,7 +4,12 @@ trading:
   # the entry window below (not at one single instant anymore). If a symbol's
   # price rises by at least `rapid_increase_pct` within any trailing
   # `rapid_increase_lookback_minutes` window, it is bought.
-  entry_window_start: "09:30"        # Start watching candidates for a rapid price rise (HH:MM ET)
+  # Raised 09:30 -> 09:35. On 2026-08-19 entries in the 9:34 and 9:46 bursts
+  # went 1 win / 30 trades for -$1,884, while entries from 9:51 onward went
+  # 6 wins / 12 trades for +$356. In the opening minutes nearly every
+  # high-beta name clears rapid_increase_pct at once, so the signal selects
+  # "the market opened" rather than any individual stock's strength.
+  entry_window_start: "09:35"        # Start watching candidates for a rapid price rise (HH:MM ET)
   entry_window_end: "09:55"          # Stop looking for NEW entries after this time (HH:MM ET). Widened from 09:45.
   # --- Real-time price stream ---
   # Alpaca's free tier delays the REST historical endpoint by ~15 minutes but
@@ -134,7 +139,12 @@ trading:
   momentum_fade_window_samples: 5        # Number of recent price samples used in the trend calc.
                                           # One sample is taken per exit-check pass (~once per minute
                                           # live), so 5 samples ~= the trend over the last ~4-5 minutes.
-  momentum_fade_slope_threshold: 0.0001  # Trend is considered "faded" (and the position is closed)
+  # Loosened 0.0001 -> -0.05. At 0.0001 anything not strictly RISING counted as
+  # fading: GRAB exited on a logged slope of exactly -0.000000, and NU - the
+  # best trade of 2026-08-19 - was closed at +2.43% on a slope of -0.002.
+  # At -0.05 a $50 stock must shed roughly a nickel a minute across the whole
+  # sample window before this fires, i.e. an actual downtrend.
+  momentum_fade_slope_threshold: -0.05   # Trend is considered "faded" (and the position is closed)
                                           # when the regression slope ($ per sample) drops to or below this.
 
   # Resistance rejection: a "high, then two lower closes" pattern right at the
@@ -286,7 +296,15 @@ trading:
     - "NU"    # fintech
     - "FUBO"  # streaming
 
-  min_stock_price: 5
+  # Raised 5 -> 10. A one-cent spread is a fixed dollar cost, so as a PERCENT
+  # it explodes at low prices - and every stop here is a percent. At PLUG's
+  # $2.19 a penny is 0.46%, which eats 92% of the distance to the -0.5% first
+  # exit, so the position sits at its stop the moment it fills. Sub-$10 names
+  # went 16 trades / 1 winner / -$623 on 2026-08-19, 36% of the day's loss
+  # from 23% of its trades. Deliberately 10 rather than 15: NU at $14.38 was
+  # the day's best trade (+$279), and a threshold tuned finely enough to
+  # exclude it is fitting noise on a 71-trade sample.
+  min_stock_price: 10
   max_stock_price: 300
   min_avg_volume: 1000000  # Minimum average daily volume
 
