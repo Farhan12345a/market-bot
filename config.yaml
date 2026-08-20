@@ -18,7 +18,17 @@ trading:
   # If the stream drops or has no fresh bar for a symbol, that read falls back
   # to REST automatically, so turning this off (or a stream failure) simply
   # restores the previous behavior.
-  use_websocket_stream: true
+  # OFF for 2026-08-20. The stream is built, tested (87 cases) and safe to
+  # enable - it falls back to REST per symbol and a watchdog abandons it
+  # entirely after 120s of silence - but its live connection has never been
+  # verified against Alpaca from the production host, and this session is
+  # already carrying the ET/UTC clock fix, the position-set reconciliation,
+  # the daily entry cap, equity-based sizing, the resistance floor, the
+  # re-entry cooldown and a daily-loss limit that now actually fires. Those
+  # target confirmed losses; this one is a latency optimization. Enabling it
+  # the same day would make an unexpected result impossible to attribute.
+  # Flip to true to turn the stream on - nothing else needs to change.
+  use_websocket_stream: false
   websocket_feed: "iex"   # iex = free tier. sip requires a paid subscription.
 
   entry_check_interval_seconds: 60   # How often to re-check prices during the entry window, in seconds.
