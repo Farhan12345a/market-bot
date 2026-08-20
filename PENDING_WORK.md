@@ -44,6 +44,82 @@ these thresholds. Check the signal journal before weighting it more heavily.
 
 ---
 
+## 1b. Record max favorable excursion (MFE) — do this BEFORE the breakeven stop
+
+**Why first:** there is currently no way to measure how much unrealized profit
+gets round-tripped. `TradeManager` tracks `highest_since_entry` in memory and
+throws it away at exit, so "this trade was up 0.8% before it stopped out at -1%"
+is invisible in every log, CSV and report. Any breakeven-stop threshold picked
+today would be guesswork.
+
+**Fix:** persist peak-since-entry onto the trade row in
+`Executor.submit_exit_order`, as both a price and a % of entry:
+
+- `mfe_pct` — max favorable excursion, the best unrealized gain reached
+- `mae_pct` — max adverse excursion, the worst drawdown reached (`TradeManager`
+  would need to start tracking a `lowest_since_entry` alongside the existing high)
+
+Add both to `trade_history.csv` and the HTML report. Then the question becomes
+answerable directly: of the 52 losing trades on a day like 2026-08-19, how many
+were up more than 0.5% at some point first? That number sets the breakeven
+threshold instead of intuition setting it.
+
+---
+
+## 1c. Breakeven stop — once a position is up X%, never let it become a loser
+
+**The gap, precisely.** `trailing_stop_pct: 0.75` exits at `peak x 0.9925`. For
+that level to sit at or above entry, the peak must first reach **+0.76%**:
+
+| Peak   | Trailing stop exits at |
+|--------|------------------------|
+| +0.30% | **-0.45%**             |
+| +0.50% | **-0.25%**             |
+| +0.76% | 0.00%                  |
+| +1.00% | +0.24%                 |
+| +2.00% | +1.24%                 |
+
+Below +0.76% the trailing stop sits BEHIND the entry price and can never fire
+before `final_exit_loss_pct` (-1.0%) does. The average winner on 2026-08-19 was
+**+0.74%** — below that threshold. The trailing stop is therefore inert across
+the band where most trades actually live. It is not broken; the leash (0.75%) is
+simply longer than the typical move (0.74%).
+
+**Fix:** a breakeven floor, composed with the existing trail rather than
+replacing it. Effective stop becomes `max(trailing_level, breakeven_floor)`.
+
+```yaml
+breakeven_trigger_pct: 0.5   # once up this much...
+breakeven_floor_pct: 0.0     # ...the stop never goes below this (0 = entry price)
+                             # a small positive value covers the spread on exit
+```
+
+Keeping the 0.75% trail matters: tightening it to 0.4% would also close the dead
+zone but would strangle the runners, cutting a trade like NU (peaked ~+2.8%) far
+earlier. The floor fixes the low end without touching the high end.
+
+**Set breakeven_trigger_pct from the MFE data, not from this document.**
+
+---
+
+## 1d. Entry quality is the larger problem — do not let exits distract from it
+
+| Metric        | 2026-08-19 |
+|---------------|------------|
+| Avg win       | +$73.60 (+0.74%) |
+| Avg loss      | -$55.49 (-0.85%) |
+| Payoff ratio  | **1.33x**  |
+| Win rate      | **23%**    |
+
+Winners are already 1.33x losers, so the exit logic is not what is bleeding the
+account. At a 1.33x payoff the breakeven win rate is **43%**; the strategy is at
+23%. Better profit capture on a 23%-hit-rate entry signal still loses money.
+
+Fix the exits because they are cheap and correct to fix — but the entry signal is
+where the actual expectancy gap is.
+
+---
+
 ## 2. Turn on the WebSocket stream, and pair it with a shorter lookback
 
 Currently `use_websocket_stream: false` — shipped off deliberately so its first
