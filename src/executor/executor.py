@@ -140,6 +140,36 @@ class Executor:
                 abs(float(p.market_value)) for p in positions.values()
             ) + sum(self._pending_cost.values())
 
+            # Reconcile entry prices against what was ACTUALLY paid.
+            #
+            # submit_entry_order records the price the SIGNAL fired at, because
+            # a market order's fill price is not known at submission time. Those
+            # differ, and on 2026-08-20 they differed a lot: 11 of 20 entries
+            # filled worse than the decision price, for $115.94 of slippage on a
+            # -$239.00 day. HUT decided at 84.30, filled at 84.91 (+0.72%) and
+            # was reported as +$101.00 when it actually lost $15.69.
+            #
+            # Every downstream number was therefore computed off a price the bot
+            # never paid: trade P&L, the CSV, the report, and MFE/MAE. The
+            # broker's avg_entry_price is the truth, and it costs nothing extra
+            # here since positions are already fetched.
+            for symbol, position in positions.items():
+                actual = getattr(position, "avg_entry_price", None)
+                if not actual:
+                    continue
+                try:
+                    actual = float(actual)
+                except (TypeError, ValueError):
+                    continue
+                recorded = self.open_entries.get(symbol)
+                if recorded and abs(actual - recorded) > 1e-6:
+                    slip_pct = (actual - recorded) / recorded * 100
+                    logger.info(
+                        f"{symbol}: entry price corrected {recorded:.4f} -> {actual:.4f} "
+                        f"({slip_pct:+.2f}% slippage vs the signal price)"
+                    )
+                    self.open_entries[symbol] = actual
+
             self.daily_pnl = self._compute_daily_pnl(account, positions)
         except Exception as e:
             logger.error(f"Error refreshing account snapshot: {e}")
