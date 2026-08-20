@@ -364,6 +364,36 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     if not strategy.can_enter(symbol, qty):
         return False
 
+    # min_stock_price / max_stock_price were dead config until 2026-08-20 -
+    # declared, documented, and read by nothing. stock_screener.score_stock even
+    # carries a "# Price check (filter only)" comment above code that records
+    # the price and never filters on it. So the whole cheap-stock cohort stayed
+    # tradeable: PLUG, BMBL, OPEN, GRAB, NIO, LCID and SOUN all sit in the
+    # static stock_universe and were watched every day regardless of the setting.
+    #
+    # That matters because a one-cent spread is a fixed dollar cost, so as a
+    # PERCENT it explodes at low prices while every stop here is a percent. PLUG
+    # at $2.19 quotes ~0.45% (measured live), against a first exit that fires at
+    # -0.5% - the position is at its stop the moment it fills. Sub-$10 names went
+    # 16 trades / 1 winner / -$623 on 2026-08-19, 36% of the day's loss from 23%
+    # of its trades.
+    #
+    # Enforced here rather than by pruning the watchlist at selection time: this
+    # is the price actually being paid at the moment of entry, and it costs no
+    # extra API calls.
+    min_price = config["trading"].get("min_stock_price")
+    max_price = config["trading"].get("max_stock_price")
+    if min_price and price < min_price:
+        logger.info(
+            f"{symbol}: entry skipped - price ${price:.2f} below min_stock_price ${min_price}"
+        )
+        return False
+    if max_price and price > max_price:
+        logger.info(
+            f"{symbol}: entry skipped - price ${price:.2f} above max_stock_price ${max_price}"
+        )
+        return False
+
     cooldown_left = executor.reentry_cooldown_remaining(symbol)
     if cooldown_left > 0:
         logger.info(
