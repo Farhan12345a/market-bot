@@ -8,10 +8,17 @@ logger = logging.getLogger(__name__)
 class MarketDataManager:
     """Manages market data fetching and calculations"""
 
-    def __init__(self, broker):
+    def __init__(self, broker, stream=None):
         self.broker = broker
         self.cache = {}  # Cache for volume averages and historical data
         self.et = pytz.timezone("America/New_York")
+
+        # Optional real-time WebSocket source (see src/data/stream.py). When
+        # present it serves get_latest_bar; REST remains the fallback for any
+        # symbol the stream hasn't delivered a fresh bar for.
+        self.stream = stream
+        self._stream_hits = 0
+        self._rest_fallbacks = 0
 
     def get_20day_avg_volume(self, symbol):
         """Get 20-day average volume"""
@@ -105,7 +112,28 @@ class MarketDataManager:
             return None
 
     def get_latest_bar(self, symbol, timeframe="1Min"):
-        """Get the latest bar for a symbol"""
+        """
+        Latest bar for a symbol, preferring the real-time WebSocket stream and
+        falling back to REST.
+
+        The preference matters: Alpaca's free tier delays the REST historical
+        endpoint by ~15 minutes, while the WebSocket carries the same IEX data
+        live. Every entry and exit decision reads prices through here, so a
+        REST-only path meant acting on prices that could be minutes old.
+
+        The fallback is what keeps this safe. The stream returns None for any
+        symbol it hasn't delivered a fresh bar for - not yet connected, no
+        trades in the last few minutes, or the socket dropped - and the REST
+        path then serves the request exactly as before. A dead stream degrades
+        the bot to its previous behavior instead of freezing prices.
+        """
+        if self.stream is not None and timeframe == "1Min":
+            bar = self.stream.get_bar(symbol)
+            if bar is not None:
+                self._stream_hits += 1
+                return bar
+            self._rest_fallbacks += 1
+
         try:
             bars = self.broker.get_latest_bars(symbol, timeframe)
             if symbol in bars:
@@ -114,6 +142,15 @@ class MarketDataManager:
         except Exception as e:
             logger.error(f"Error fetching latest bar for {symbol}: {e}")
             return None
+
+    def data_source_stats(self):
+        """Counts of stream-served vs REST-served bar reads, for logging."""
+        total = self._stream_hits + self._rest_fallbacks
+        return {
+            "stream_hits": self._stream_hits,
+            "rest_fallbacks": self._rest_fallbacks,
+            "stream_pct": (100.0 * self._stream_hits / total) if total else 0.0,
+        }
 
     def is_trading_day(self, now=None):
         """

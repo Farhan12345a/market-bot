@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.broker.alpaca_broker import AlpacaBroker
 from src.strategy.strategy import Strategy, TradeManager
 from src.data.market_data import MarketDataManager
+from src.data.stream import PriceStream
 from src.executor.executor import Executor
 from src.screener.stock_screener import StockScreener
 from src.notifications.email_notifier import EmailNotifier
@@ -352,9 +353,29 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         _write_price_log(symbol_price_log, et)
         logger.info(f"Daily session complete: entries_triggered={entries_triggered}, reason={reason}")
 
+    stream_warned = False
+
     while True:
         now = datetime.now(et)
         executor.refresh_account_snapshot()
+
+        # A stream that is nominally connected but delivering no bars is the
+        # dangerous case: every read silently falls back to REST, so the bot
+        # keeps trading on ~15-minute-delayed prices while the logs show a
+        # connected stream. Warn once per session rather than let that pass
+        # unnoticed. Trading is unaffected either way - the fallback is what
+        # keeps prices flowing - so this is a heads-up, not a halt.
+        stream = getattr(market_data, "stream", None)
+        if stream is not None and not stream_warned:
+            stats = stream.stats()
+            if stats["connected"] and not stats["healthy"] and stats["bars_received"] == 0:
+                logger.warning(
+                    "Price stream is connected but has delivered ZERO bars - "
+                    "every price read is falling back to REST (~15 min delayed). "
+                    "Check for an Alpaca stream connection limit (only one data "
+                    "websocket per account) or a network the stream endpoint refuses."
+                )
+                stream_warned = True
 
         if executor.check_daily_loss_limit():
             logger.warning("Daily loss limit hit, flattening all positions")
@@ -422,6 +443,22 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 daily_entry_cap_logged = True
         elif now < entry_end:
             for symbol in symbols:
+                # Re-checked per SYMBOL, not just once per poll. The outer
+                # check above only runs at the top of a cycle, and this inner
+                # loop can open many positions within that one cycle - on
+                # 2026-08-19 twenty entries landed inside a single 9-second
+                # pass - so a per-poll-only check would let an entire burst
+                # through before the cap was ever consulted again. Same
+                # failure shape as the exposure-cache race.
+                if max_daily_entries and entries_triggered >= max_daily_entries:
+                    if not daily_entry_cap_logged:
+                        logger.info(
+                            f"Reached max_daily_entries ({entries_triggered}/{max_daily_entries}) - "
+                            f"no new entries for the rest of the day; exits continue as normal"
+                        )
+                        daily_entry_cap_logged = True
+                    break
+
                 if symbol in strategy.get_open_trades():
                     continue
 
@@ -908,8 +945,22 @@ def main():
         account = broker.get_account()
         logger.info(f"Connected to broker. Cash: ${account.cash}")
 
+        # Real-time price stream. Alpaca's free tier delays the REST
+        # historical endpoint ~15 minutes but carries live IEX data over the
+        # WebSocket, so this is purely a delivery-mechanism change - no plan
+        # upgrade involved. MarketDataManager falls back to REST per-symbol
+        # whenever the stream has no fresh bar, so a failure here costs
+        # freshness, never availability.
+        price_stream = None
+        if config["trading"].get("use_websocket_stream", True):
+            price_stream = PriceStream(
+                broker.api_key,
+                broker.api_secret,
+                feed=config["trading"].get("websocket_feed", "iex"),
+            )
+
         # Initialize components
-        market_data = MarketDataManager(broker)
+        market_data = MarketDataManager(broker, stream=price_stream)
         strategy = Strategy(config)
         executor = Executor(broker, config)
         reconcile_existing_positions(broker, strategy, executor)
@@ -960,10 +1011,23 @@ def main():
                 symbols, rsi_values = pending_selection
                 pending_selection = None
 
+                # Subscribe only once the day's symbol list is known. Started
+                # here rather than at construction because the watchlist isn't
+                # decided until the screener has run.
+                if price_stream is not None:
+                    price_stream.start(symbols)
+
                 logger.info("Market is open, monitoring for signals...")
-                run_trading_day(
-                    config, market_data, strategy, executor, symbols, rsi_values, email_notifier, et
-                )
+                try:
+                    run_trading_day(
+                        config, market_data, strategy, executor, symbols, rsi_values,
+                        email_notifier, et,
+                    )
+                finally:
+                    if price_stream is not None:
+                        logger.info(f"Price stream for the session: {price_stream.stats()}")
+                        logger.info(f"Bar reads by source: {market_data.data_source_stats()}")
+                        price_stream.stop()
                 continue
 
             # Market closed. Run the screener once, inside the pre-market

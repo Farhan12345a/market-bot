@@ -6,6 +6,21 @@ trading:
   # `rapid_increase_lookback_minutes` window, it is bought.
   entry_window_start: "09:30"        # Start watching candidates for a rapid price rise (HH:MM ET)
   entry_window_end: "09:55"          # Stop looking for NEW entries after this time (HH:MM ET). Widened from 09:45.
+  # --- Real-time price stream ---
+  # Alpaca's free tier delays the REST historical endpoint by ~15 minutes but
+  # carries the same IEX data LIVE over the WebSocket - a delivery-mechanism
+  # difference, not a data-tier one, so this needs no plan upgrade. Every
+  # entry/exit decision used to read REST-delayed prices, which is why
+  # rapid_increase_lookback_minutes had to be widened from 2 to 5 (a window
+  # shorter than the feed lag can never accumulate two in-window samples).
+  # It also removes one REST call per symbol per poll - 57 round-trips a cycle
+  # on a 57-symbol watchlist.
+  # If the stream drops or has no fresh bar for a symbol, that read falls back
+  # to REST automatically, so turning this off (or a stream failure) simply
+  # restores the previous behavior.
+  use_websocket_stream: true
+  websocket_feed: "iex"   # iex = free tier. sip requires a paid subscription.
+
   entry_check_interval_seconds: 60   # How often to re-check prices during the entry window, in seconds.
                                       # Kept at 60s (matches the 1-minute bar data we fetch) - polling faster
                                       # than that just re-reads the same bar and burns Alpaca's free-tier
