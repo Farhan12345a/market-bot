@@ -252,6 +252,14 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     if not strategy.can_enter(symbol, qty):
         return False
 
+    cooldown_left = executor.reentry_cooldown_remaining(symbol)
+    if cooldown_left > 0:
+        logger.info(
+            f"{symbol}: entry skipped - re-entry cooldown, {cooldown_left / 60:.1f} min left "
+            f"since it was last stopped out"
+        )
+        return False
+
     ok, reason = executor.pre_entry_check(qty, price)
     if not ok:
         logger.info(f"{symbol}: entry skipped - {reason}")

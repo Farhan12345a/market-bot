@@ -83,6 +83,7 @@ class Executor:
         # longer erase a position the bot knows it just opened.
         self._open_symbols = set()
         self._entry_recorded_at = {}  # symbol -> time.monotonic() when we recorded the entry
+        self._last_close_at = {}  # symbol -> (time.monotonic() at full close, closed_at_loss) for the re-entry cooldown
         self._pending_cost = {}  # symbol -> cost basis, for exposure while the broker lags
 
     def refresh_account_snapshot(self):
@@ -154,6 +155,42 @@ class Executor:
             # never fail in.
             self._buying_power = 0.0
             self._total_exposure_usd = float("inf")
+
+    def _note_position_closed(self, symbol, closed_at_loss):
+        """Record when a position fully closed, to enforce the re-entry cooldown."""
+        self._last_close_at[symbol] = (time.monotonic(), closed_at_loss)
+
+    def reentry_cooldown_remaining(self, symbol):
+        """
+        Seconds left before `symbol` may be bought again, or 0.0 if it's free.
+
+        On 2026-08-19 the bot stopped out of a name and then bought it back
+        minutes later off a fresh signal, repeatedly, on names that were
+        simply trending down all morning: RGTI -$340 over 4 exits, MRVL -$328
+        over 3, CLSK -$238 over 4, PLUG -$137, UPST -$134. Every one of those
+        was entered, stopped out, and re-entered into the same decline.
+
+        The cooldown only starts after a LOSING exit when
+        reentry_cooldown_after_loss_only is set (the default). Re-entering a
+        name that just paid out is a different situation and was profitable
+        that day - UBER +$190 over 2 entries, CHWY +$159 over 4, CMG +$109
+        over 2 - so blocking every re-entry indiscriminately would have cost
+        more than it saved.
+        """
+        minutes = self.config["trading"].get("reentry_cooldown_minutes", 0)
+        if not minutes:
+            return 0.0
+
+        entry = self._last_close_at.get(symbol)
+        if entry is None:
+            return 0.0
+
+        closed_at, closed_at_loss = entry
+        if self.config["trading"].get("reentry_cooldown_after_loss_only", True) and not closed_at_loss:
+            return 0.0
+
+        elapsed = time.monotonic() - closed_at
+        return max(0.0, minutes * 60 - elapsed)
 
     @property
     def equity(self):
@@ -294,6 +331,12 @@ class Executor:
             self._open_symbols.discard(symbol)
             self._entry_recorded_at.pop(symbol, None)
             self._pending_cost.pop(symbol, None)
+            # Computed here rather than from trade_record below, because the
+            # record-keeping block is wrapped in its own try/except and must
+            # never be what decides whether a cooldown gets applied.
+            entry_px = self.open_entries.get(symbol)
+            closed_at_loss = bool(entry_px and price is not None and price < entry_px)
+            self._note_position_closed(symbol, closed_at_loss)
 
         try:
             entry_price = self.open_entries.get(symbol)

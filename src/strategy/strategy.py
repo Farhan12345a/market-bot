@@ -155,11 +155,27 @@ class TradeManager:
         return 0
 
     def check_resistance(self, current_price):
-        """Check if price hit resistance and bounced back (configurable lookback)"""
-        # Resistance is when price approaches the high but can't break through
-        # and then pulls back: the oldest sample in the lookback is the peak,
-        # and every sample since has been strictly lower (failed breakout).
+        """
+        Failed-breakout exit: the oldest sample in the lookback is the peak,
+        every sample since has been strictly lower, AND the total decline off
+        that peak exceeds resistance_min_decline_pct.
 
+        That last condition is the fix for this rule's real defect. The
+        decline test is `recent[i] < recent[i-1]`, which a single cent
+        satisfies, so with no magnitude floor the rule fired on pure noise -
+        on 2026-08-19 it exited NFLX on a 0.08% drop, UBER on 0.11% and ASTS
+        on 0.14%, all inside the bid-ask spread. It was the second most
+        common exit reason that day (14 of 71) and closed several positions
+        at a profit of a tenth of a percent.
+
+        It fires so readily because price_history is SEEDED with the entry
+        price, so `recent[0] == highest_since_entry` is satisfied by default
+        for any position that never traded above its fill - and this strategy
+        buys thrusts, which frequently means buying the local top. Two
+        down-ticks after entry were therefore enough to trigger a full exit
+        two minutes in. Requiring a real decline is what separates "the
+        breakout failed" from "the price wobbled".
+        """
         lookback = self.config["trading"].get("resistance_lookback_samples", 3)
         if len(self.price_history) < lookback:
             return 0
@@ -167,14 +183,21 @@ class TradeManager:
         recent = self.price_history[-lookback:]
         monotonic_decline = all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
 
-        if monotonic_decline and recent[0] == self.highest_since_entry:
-            logger.info(
-                f"{self.symbol}: Resistance detected (high: {recent[0]:.2f}, "
-                f"now: {current_price:.2f}), exiting"
-            )
-            return self.qty_remaining
+        if not (monotonic_decline and recent[0] == self.highest_since_entry):
+            return 0
 
-        return 0
+        peak = recent[0]
+        min_decline = self.config["trading"].get("resistance_min_decline_pct", 0.0)
+        decline_pct = (peak - current_price) / peak * 100 if peak > 0 else 0.0
+
+        if decline_pct < min_decline:
+            return 0
+
+        logger.info(
+            f"{self.symbol}: Resistance detected (high: {peak:.2f}, "
+            f"now: {current_price:.2f}, -{decline_pct:.2f}%), exiting"
+        )
+        return self.qty_remaining
 
     def process_exit(self, qty_to_exit, exit_reason):
         """Record a CONFIRMED exit - call only after the broker has actually

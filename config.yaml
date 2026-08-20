@@ -116,6 +116,23 @@ trading:
   # trade's peak is treated as a failed breakout and exits.
   resistance_lookback_samples: 3   # Number of recent price samples checked for the failed-breakout
                                     # pattern (oldest sample = peak, must strictly decline from there)
+  resistance_min_decline_pct: 0.3  # ...AND the drop off that peak must exceed this %. Without a floor
+                                    # the "strictly declining" test is met by a single cent, so the rule
+                                    # fired on noise inside the spread - it exited NFLX on -0.08%,
+                                    # UBER on -0.11% and ASTS on -0.14% on 2026-08-19, 14 times in all.
+                                    # Set 0 to restore the old no-floor behavior.
+
+  # --- Re-entry cooldown ---
+  # After a position closes AT A LOSS, refuse to buy that symbol again for
+  # this many minutes. On 2026-08-19 the bot repeatedly stopped out and then
+  # bought straight back into the same decline: RGTI -$340 over 4 exits,
+  # MRVL -$328 over 3, CLSK -$238 over 4, PLUG -$137, UPST -$134.
+  # Set 0 to disable.
+  reentry_cooldown_minutes: 20
+  reentry_cooldown_after_loss_only: true  # false = cool down after ANY exit. Left true because
+                                           # re-entering a name that just PAID was profitable that
+                                           # day (UBER +$190 over 2, CHWY +$159 over 4, CMG +$109
+                                           # over 2) - only the losing re-entries were the problem.
 
   # --- Position sizing ---
   # Each entry's dollar budget is the SMALLEST of three ceilings (see
