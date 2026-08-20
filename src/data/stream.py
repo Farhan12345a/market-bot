@@ -56,6 +56,22 @@ BAR_STALE_AFTER_SECONDS = 180
 # How long to wait between reconnect attempts after the stream drops.
 RECONNECT_DELAY_SECONDS = 5
 
+# If the stream has been running this long during market hours without a
+# single bar, stop trying for the rest of the session.
+#
+# This exists because alpaca-py reconnects INTERNALLY inside run(): when the
+# endpoint refuses the handshake (HTTP 403 from a network it won't serve, or
+# a second data connection on an account limited to one), run() never returns,
+# so the supervisor's own backoff below never gets a chance to engage and
+# alpaca-py retries in a tight loop. Left alone that is thousands of rejected
+# handshakes over a session - the kind of traffic that earns an IP or account
+# a throttle, and a throttle could reach the REST calls the bot actually
+# depends on. Better to give up cleanly, log it loudly and run on REST.
+#
+# Two minutes with zero bars across a full watchlist during market hours is
+# unambiguous: even one liquid symbol prints most minutes.
+NO_DATA_GIVE_UP_SECONDS = 120
+
 
 class PriceStream:
     """
@@ -78,6 +94,9 @@ class PriceStream:
         self._stop_requested = threading.Event()
         self._connected = False
         self._bars_received = 0
+        self._started_at = None
+        self._gave_up = False
+        self._watchdog = None
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -89,13 +108,46 @@ class PriceStream:
 
         self._symbols = list(symbols)
         self._stop_requested.clear()
+        self._gave_up = False
+        self._started_at = time.monotonic()
         self._thread = threading.Thread(
             target=self._run_forever, name="price-stream", daemon=True
         )
         self._thread.start()
+        self._watchdog = threading.Thread(
+            target=self._watch_for_silence, name="price-stream-watchdog", daemon=True
+        )
+        self._watchdog.start()
         logger.info(
             f"PriceStream starting for {len(self._symbols)} symbols on the {self._feed} feed"
         )
+
+    def _watch_for_silence(self):
+        """
+        Shut the stream down if it never delivers anything. See
+        NO_DATA_GIVE_UP_SECONDS - the point is to stop alpaca-py's internal
+        retry loop from hammering an endpoint that is refusing us, since the
+        supervisor below cannot see that happening from outside run().
+        """
+        while not self._stop_requested.wait(10):
+            with self._lock:
+                received = self._bars_received
+            if received:
+                return  # data is flowing; nothing to police
+            if time.monotonic() - self._started_at < NO_DATA_GIVE_UP_SECONDS:
+                continue
+
+            logger.error(
+                f"PriceStream received ZERO bars in "
+                f"{NO_DATA_GIVE_UP_SECONDS}s across {len(self._symbols)} symbols - "
+                f"giving up on the stream for this session and running on REST "
+                f"(~15 min delayed) instead. Likely an Alpaca connection limit "
+                f"(one data websocket per account) or a network its stream "
+                f"endpoint refuses. Trading continues normally on the fallback."
+            )
+            self._gave_up = True
+            self.stop()
+            return
 
     def stop(self):
         """Signal the background thread to stop and close the connection."""
@@ -243,6 +295,7 @@ class PriceStream:
         return {
             "connected": self._connected,
             "healthy": self.is_healthy(),
+            "gave_up": self._gave_up,
             "symbols_with_fresh_bars": fresh,
             "symbols_seen": total_symbols,
             "subscribed": len(self._symbols),
