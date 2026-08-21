@@ -195,6 +195,139 @@ def _augment_selection(config, screener, market_data, selection):
     return full, rsi_values
 
 
+# Scheduled report sends. Shared across the session so a report fired by
+# finish_day and one fired by the clock can't double-send the same slot.
+report_state = {"sent": set(), "seeded": False}
+
+
+def _slot_for_finish(et):
+    """
+    The scheduled slot a finish_day report should count as having covered.
+
+    Only the close matters here: if the session ends at 16:00 by time-stop, the
+    16:00 scheduled send is redundant. An all-closed report at 10:14 must NOT
+    suppress the 10:35 status, because half an hour of tape happens in between.
+    """
+    now = datetime.now(et)
+    return "16:00" if now.hour >= 16 else None
+
+
+def _open_position_rows(strategy, market_data, et):
+    """
+    Snapshot every still-open position for a mid-session report.
+
+    Prices come from the same market_data path the exit logic uses, so the
+    report agrees with what the bot is acting on. A symbol that can't be priced
+    is still listed - showing it with a stale price is far better than silently
+    dropping a live position from a status report.
+    """
+    rows = []
+    for symbol, trade in strategy.get_open_trades().items():
+        current = None
+        try:
+            bar = market_data.get_latest_bar(symbol)
+            if bar:
+                current = bar.get("close")
+        except Exception as e:
+            logger.debug(f"Could not price {symbol} for the status report: {e}")
+        if not current:
+            current = trade.price_history[-1] if trade.price_history else trade.entry_price
+
+        qty = trade.qty_remaining
+        pl = (current - trade.entry_price) * qty
+        pl_pct = ((current - trade.entry_price) / trade.entry_price * 100) if trade.entry_price else 0
+
+        try:
+            mfe, mae = trade.excursions()
+        except Exception:
+            mfe = mae = None
+
+        held = ""
+        try:
+            mins = (datetime.now(et) - trade.entry_time).total_seconds() / 60
+            held = f"{int(mins)} min"
+        except Exception:
+            pass
+
+        rows.append({
+            "symbol": symbol,
+            "entry_price": trade.entry_price,
+            "current_price": current,
+            "qty_remaining": qty,
+            "entry_qty": trade.entry_qty,
+            "unrealized_pl": pl,
+            "unrealized_pl_pct": pl_pct,
+            "mfe_pct": mfe,
+            "mae_pct": mae,
+            "entry_method": getattr(trade, "entry_method", None),
+            "held_for": held,
+        })
+    return rows
+
+
+def _maybe_send_scheduled_reports(config, email_notifier, strategy, executor, market_data, et):
+    """
+    Send the report at each configured wall-clock time.
+
+    Called from BOTH the trading loop and the outer idle loop, because the
+    session can finish early - on 2026-08-20 the last position closed at 10:14 -
+    and a 16:00 report that only fires while trades are still running would
+    simply never arrive on the days it ended before lunch.
+
+    On startup, any slot already more than report_catchup_minutes past is marked
+    as sent rather than fired, so restarting the bot at 15:00 does not blast out
+    a "midday status" five hours late. A restart shortly after a slot still
+    sends it.
+    """
+    notif = config.get("notifications", {})
+    times = notif.get("report_times", []) or []
+    if not times:
+        return
+
+    grace = timedelta(minutes=notif.get("report_catchup_minutes", 30))
+    now = datetime.now(et)
+    today = now.date()
+
+    for slot in times:
+        try:
+            hh, mm = (int(x) for x in str(slot).split(":"))
+        except Exception:
+            logger.warning(f"Ignoring malformed notifications.report_times entry: {slot!r}")
+            continue
+
+        key = (today, slot)
+        if key in report_state["sent"]:
+            continue
+
+        due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if now < due:
+            continue
+
+        if not report_state["seeded"] and now > due + grace:
+            # Missed while the process was down. Record it, don't send it.
+            report_state["sent"].add(key)
+            logger.info(f"Scheduled report for {slot} ET already {int((now-due).total_seconds()/60)} min past at startup - skipping")
+            continue
+
+        open_rows = _open_position_rows(strategy, market_data, et)
+        label = "Midday Status" if hh < 16 else "Closing Report"
+        logger.info(
+            f"===== SCHEDULED REPORT ({slot} ET): {label}, "
+            f"{len(open_rows)} position(s) open ====="
+        )
+        try:
+            email_notifier.send_report(
+                burst_summary=executor.day_burst_summary,
+                label=label,
+                open_positions=open_rows,
+            )
+        except Exception as e:
+            logger.error(f"Scheduled report for {slot} failed: {e}", exc_info=True)
+        report_state["sent"].add(key)
+
+    report_state["seeded"] = True
+
+
 def _position_size(config, executor, price):
     """
     Shares to buy for one entry. Returns 0 when no position should be taken.
@@ -530,10 +663,15 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     def finish_day(reason):
         signal_journal.flush()
         executor.save_trades_log()
+        # Compute the burst summary BEFORE the report that displays it. This
+        # used to run three lines lower, so every report ever sent carried the
+        # PREVIOUS value of day_burst_summary - on the first session of a
+        # process, the empty default.
+        executor.day_burst_summary = _summarise_burst_notes(config, day_burst_notes)
         email_notifier.send_daily_summary(burst_summary=executor.day_burst_summary)
+        report_state["sent"].add((datetime.now(et).date(), _slot_for_finish(et)))
         _write_daily_summary_csv(config, executor, symbols, entries_triggered, starting_cash, market_data, et)
         _write_price_log(symbol_price_log, et)
-        executor.day_burst_summary = _summarise_burst_notes(config, day_burst_notes)
         logger.info(f"Burst logic for the day: {executor.day_burst_summary}")
         logger.info(f"Signal journal: {signal_journal.stats()}")
         logger.info(f"Daily session complete: entries_triggered={entries_triggered}, reason={reason}")
@@ -862,6 +1000,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     taken=taken, skip_reason=skip_reason,
                     qty=None, size_multiplier=burst_size,
                 )
+
+        # ---- scheduled reports (10:35 status, 16:00 close) ----
+        _maybe_send_scheduled_reports(config, email_notifier, strategy, executor, market_data, et)
 
         # ---- day-completion checks ----
         open_trades = strategy.get_open_trades()
@@ -1297,7 +1438,12 @@ def main():
             if market_data.is_market_open():
                 if last_session_date == now.date():
                     # Already traded today - wait for tomorrow rather than
-                    # starting a second session on the same date.
+                    # starting a second session on the same date. Scheduled
+                    # reports still fire: the session finishing at 10:14 is
+                    # exactly when a 16:00 report is easiest to lose.
+                    _maybe_send_scheduled_reports(
+                        config, email_notifier, strategy, executor, market_data, et
+                    )
                     time.sleep(60)
                     continue
 

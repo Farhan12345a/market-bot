@@ -70,30 +70,46 @@ class EmailNotifier:
             self.enabled = False
 
     def send_daily_summary(self, trades_file="logs/trades.json", burst_summary=""):
-        """
-        Build the daily report, save it to disk, then try to email it.
+        """The end-of-session report. See send_report."""
+        return self.send_report(trades_file, burst_summary=burst_summary, label="Daily Summary")
 
-        Returns True only if the EMAIL was sent. The saved-to-disk report is
-        independent of that return value and of self.enabled - check the log
-        line for the path, or just look in self.report_dir.
+    def send_report(self, trades_file="logs/trades.json", burst_summary="",
+                    label="Daily Summary", open_positions=None):
         """
+        Build the report, save it to disk, then deliver it.
+
+        `label` distinguishes the several sends a single day now makes (a
+        midday status at 10:35, one the moment the last position closes, one
+        at the close) so an inbox with three of them is readable at a glance.
+
+        `open_positions` is a list of still-open position rows. A midday
+        report showing only CLOSED trades would be actively misleading - on a
+        morning holding eight positions it would report an empty day.
+
+        Returns True only if at least one channel delivered. The saved-to-disk
+        report is independent of that and of self.enabled.
+        """
+        open_positions = open_positions or []
         try:
-            if not os.path.exists(trades_file):
+            trades = []
+            if os.path.exists(trades_file):
+                with open(trades_file) as f:
+                    trades_data = json.load(f)
+                trades = (trades_data if isinstance(trades_data, list)
+                          else trades_data.get("trades", []))
+            else:
                 logger.warning(f"No trades file found: {trades_file}")
+
+            if not trades and not open_positions:
+                logger.info(f"Nothing to report for '{label}' - no closed trades, no open positions")
                 return False
 
-            with open(trades_file) as f:
-                trades_data = json.load(f)
-
-            if not trades_data:
-                logger.info("No trades to report")
-                return False
-
-            trades = trades_data if isinstance(trades_data, list) else trades_data.get("trades", [])
-
-            html_content = self._generate_html_summary(trades, burst_summary=burst_summary)
+            html_content = self._generate_html_summary(
+                trades, burst_summary=burst_summary, label=label,
+                open_positions=open_positions,
+            )
         except Exception as e:
-            logger.error(f"Error building daily report: {e}")
+            logger.error(f"Error building report '{label}': {e}")
             return False
 
         # Save FIRST, before the email is attempted - see the class docstring.
@@ -109,13 +125,14 @@ class EmailNotifier:
         except Exception as e:
             logger.error(f"Could not prune old reports: {e}")
 
-        subject = f"Trading Bot Daily Summary - {datetime.now().strftime('%Y-%m-%d')}"
+        subject = f"Trading Bot {label} - {datetime.now().strftime('%Y-%m-%d')}"
         delivered = False
 
         # HTTPS channels first: on this host they are the ones that can work.
         if self.senders:
             delivered = notify(
-                self.senders, subject, self._plain_text_summary(trades), html_content
+                self.senders, subject,
+                self._plain_text_summary(trades, open_positions), html_content,
             )
 
         if self.enabled:
@@ -128,12 +145,12 @@ class EmailNotifier:
 
         if not delivered:
             logger.warning(
-                "Daily report was NOT delivered by any channel - it is saved at "
+                f"Report '{label}' was NOT delivered by any channel - it is saved at "
                 f"{self.report_dir}/"
             )
         return delivered
 
-    def _plain_text_summary(self, trades):
+    def _plain_text_summary(self, trades, open_positions=None):
         """
         The report condensed to something that fits in a push notification.
 
@@ -159,6 +176,10 @@ class EmailNotifier:
             tp = sum(1 for t in closed if t.get("exit_reason") == "TAKE_PROFIT")
             if tp:
                 lines.append(f"{tp} take-profit scale-out(s) fired")
+
+            if open_positions:
+                unreal = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
+                lines.append(f"{len(open_positions)} still open, ${unreal:+,.2f} unrealized")
             return "\n".join(lines)
         except Exception as e:
             logger.debug(f"Could not build plain-text summary: {e}")
@@ -224,8 +245,55 @@ class EmailNotifier:
                 f"from {self.report_dir}"
             )
 
-    def _generate_html_summary(self, trades, burst_summary=""):
-        """Generate HTML email with trading summary"""
+    def _open_positions_html(self, open_positions):
+        """
+        The open-positions table for a mid-session report.
+
+        Deliberately separate from the closed-trade table: these rows have no
+        exit price, no realised P&L and no final exit reason, and forcing them
+        into the same 14 columns would mean a dozen "N/A"s per row. The
+        interesting numbers while a position is still live are different ones -
+        what it is worth now, and how far it has travelled in each direction.
+        """
+        if not open_positions:
+            return ""
+
+        rows = []
+        for p in sorted(open_positions,
+                        key=lambda x: float(x.get("unrealized_pl") or 0), reverse=True):
+            pl = float(p.get("unrealized_pl") or 0)
+            pl_pct = float(p.get("unrealized_pl_pct") or 0)
+            cls = "profit" if pl >= 0 else "loss"
+            mfe, mae = p.get("mfe_pct"), p.get("mae_pct")
+            mfe_s = f"{mfe:+.2f}%" if isinstance(mfe, (int, float)) else "N/A"
+            mae_s = f"{mae:+.2f}%" if isinstance(mae, (int, float)) else "N/A"
+            rows.append(
+                f"<tr><td class='symbol'>{p.get('symbol','N/A')}</td>"
+                f"<td>${float(p.get('entry_price') or 0):,.2f}</td>"
+                f"<td>${float(p.get('current_price') or 0):,.2f}</td>"
+                f"<td>{p.get('qty_remaining', 0)} of {p.get('entry_qty', 0)}</td>"
+                f"<td class='{cls}'>{pl_pct:+.2f}%</td>"
+                f"<td class='{cls}'>${pl:,.2f}</td>"
+                f"<td>{mfe_s}</td><td>{mae_s}</td>"
+                f"<td class='exit-reason'>{p.get('entry_method') or 'N/A'}</td>"
+                f"<td class='exit-reason'>{p.get('held_for') or 'N/A'}</td></tr>"
+            )
+
+        return (
+            '<h2 style="margin-top:30px;border-bottom:2px solid #f59e0b;'
+            'padding-bottom:10px;">Open Positions</h2>'
+            '<table class="trades-table"><thead><tr>'
+            '<th>Symbol</th><th>Entry</th><th>Current</th><th>Qty</th>'
+            '<th>Unrealized %</th><th>Unrealized P&L</th>'
+            '<th>Peak (MFE)</th><th>Trough (MAE)</th>'
+            '<th>Entry Method</th><th>Held</th>'
+            '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        )
+
+    def _generate_html_summary(self, trades, burst_summary="", label="Daily Summary",
+                               open_positions=None):
+        """Generate the HTML report: closed trades, and any still-open positions."""
+        open_positions = open_positions or []
         total_pl = sum(t.get("pl", 0) for t in trades)
         winning_trades = [t for t in trades if t.get("pl", 0) > 0]
         losing_trades = [t for t in trades if t.get("pl", 0) < 0]
@@ -233,6 +301,24 @@ class EmailNotifier:
 
         # Color coding
         pl_color = "#10b981" if total_pl >= 0 else "#ef4444"
+
+        open_positions_html = self._open_positions_html(open_positions)
+        unrealized_pl = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
+
+        open_summary_html = ""
+        if open_positions:
+            open_color = "#10b981" if unrealized_pl >= 0 else "#ef4444"
+            open_summary_html = (
+                '<div style="background:#fffbeb;border-left:4px solid #f59e0b;'
+                'padding:12px 15px;border-radius:8px;margin-bottom:20px;">'
+                '<h3 style="margin:0 0 4px 0;font-size:13px;color:#92400e;'
+                'text-transform:uppercase;letter-spacing:.04em;">Still Open</h3>'
+                f'<div style="font-size:14px;">{len(open_positions)} position(s) open, '
+                f'<span style="color:{open_color};font-weight:600;">'
+                f'${unrealized_pl:,.2f}</span> unrealized. '
+                'These are NOT included in the P&L figures above, which count '
+                'closed trades only.</div></div>'
+            )
 
         # Build HTML
         html = f"""
@@ -261,7 +347,7 @@ class EmailNotifier:
         <body>
             <div class="container">
                 <div class="header">
-                    <h1 style="margin: 0;">Trading Bot Daily Summary</h1>
+                    <h1 style="margin: 0;">Trading Bot {label}</h1>
                     <p style="margin: 5px 0 0 0; opacity: 0.9;">{datetime.now().strftime('%A, %B %d, %Y')}</p>
                 </div>
 
@@ -283,13 +369,16 @@ class EmailNotifier:
                         <div class="value">{len(winning_trades)} / {len(losing_trades)}</div>
                     </div>
                 </div>
+                {open_summary_html}
 
                 <div style="background:#f5f7fa;border-left:4px solid #6366f1;padding:12px 15px;border-radius:8px;margin-bottom:20px;">
                     <h3 style="margin:0 0 4px 0;font-size:13px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;">Bursting Logic</h3>
                     <div style="font-size:14px;">{burst_summary or 'Not recorded for this session.'}</div>
                 </div>
 
-                <h2 style="margin-top: 30px; border-bottom: 2px solid #3b82f6; padding-bottom: 10px;">Trade Details</h2>
+                {open_positions_html}
+
+                <h2 style="margin-top: 30px; border-bottom: 2px solid #3b82f6; padding-bottom: 10px;">Closed Trades</h2>
                 <table class="trades-table">
                     <thead>
                         <tr>

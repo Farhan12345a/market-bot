@@ -460,6 +460,31 @@ notifications:
     enabled: false
     priority: 0
 
+  # ---------------------------------------------------------------------
+  # When the report is sent
+  # ---------------------------------------------------------------------
+  # The full report (every closed trade, plus any positions still open) goes
+  # out at each of these ET times, ON TOP OF the one sent the moment the last
+  # position of the day closes. So a normal day produces three:
+  #
+  #   10:35  midday status - closed trades so far AND open positions, with
+  #          unrealized P&L, MFE and MAE on each
+  #   ~when all trades close - sent by finish_day, whenever that happens
+  #   16:00  closing report
+  #
+  # If the session ends early (2026-08-20 finished at 10:14) the 10:35 and
+  # 16:00 sends still fire from the idle loop, so an early finish does not
+  # silently cost you two of the three.
+  #
+  # A 16:00 slot is NOT double-sent when the day ends by time-stop at 16:00 -
+  # finish_day claims that slot as it fires.
+  report_times: ["10:35", "16:00"]
+
+  # A slot already this many minutes past when the process STARTS is recorded
+  # as sent rather than fired, so restarting at 15:00 does not deliver a
+  # "midday status" five hours late. A restart shortly after a slot still sends.
+  report_catchup_minutes: 30
+
 analytics:
   # Records EVERY entry signal that fires - taken or not - with the features
   # available at that moment, then follows each forward to see what the symbol
