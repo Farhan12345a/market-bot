@@ -278,7 +278,7 @@ trading:
   # max_daily_loss_usd. The loss limit now actually fires (it never once did
   # before), and on 2026-08-19 numbers it would have ended the session around
   # entry 40, before this cap was ever reached.
-  max_daily_entries: 40
+  max_daily_entries: 50
 
   max_total_exposure_fraction: 0.9  # never commit more than this fraction of CURRENT equity, combined,
                                      # across all open positions - a fraction (not a fixed $) so it scales
