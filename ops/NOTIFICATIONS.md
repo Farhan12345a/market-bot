@@ -44,7 +44,14 @@ Free tier is 3,000/month, 100/day. This bot sends one a weekday.
          echo 'RESEND_API_KEY=re_xxxxxxxx' >> /etc/market-bot.env
          chmod 600 /etc/market-bot.env
     4. In config.yaml set notifications.resend.enabled: true
-    5. bash ops/deploy.sh
+    5. Verify before waiting for 4pm:
+         set -a && . /etc/market-bot.env && set +a
+         venv/bin/python3 ops/test-notifications.py
+    6. bash ops/deploy.sh
+
+Note the interpreter: the bot runs from a virtualenv, so `python3` is the
+WRONG python and will fail on imports that are installed perfectly well.
+`systemctl cat market-bot | grep ExecStart` names the right one.
 
 Verify a domain later only if the report should ever reach a second address.
 

@@ -26,22 +26,56 @@ else
   git --no-pager log --oneline "$BEFORE..$AFTER" | sed 's/^/    /'
 fi
 
+say "Finding the interpreter the SERVICE actually uses"
+# Not `python3`. The bot runs from a virtualenv, so the system python has none
+# of its dependencies - checking imports with the wrong interpreter reports a
+# ModuleNotFoundError that says nothing about whether the deploy is safe.
+# Ask systemd what it runs, and only fall back to guessing if that fails.
+PY_BIN=""
+UNIT_EXEC=$(systemctl cat market-bot 2>/dev/null | grep -m1 '^ExecStart=' | sed 's/^ExecStart=//')
+for cand in \
+  "$(printf '%s\n' "$UNIT_EXEC" | tr ' ' '\n' | grep -m1 -E '(python|python3)$' || true)" \
+  "$(dirname "$(printf '%s\n' "$UNIT_EXEC" | awk '{print $1}')")/python" \
+  ./venv/bin/python ./venv/bin/python3 \
+  ./.venv/bin/python ./.venv/bin/python3 \
+  ./env/bin/python /usr/bin/python3
+do
+  [ -n "$cand" ] && [ -x "$cand" ] || continue
+  if "$cand" -c "import alpaca" >/dev/null 2>&1; then PY_BIN="$cand"; break; fi
+done
+
+if [ -z "$PY_BIN" ]; then
+  printf '\n\033[1;31m[FAIL] Could not find an interpreter with the bot deps installed.\033[0m\n'
+  echo "  systemd ExecStart: ${UNIT_EXEC:-<not found>}"
+  echo "  Find it by hand and re-run:   systemctl cat market-bot | grep ExecStart"
+  echo "  Nothing was restarted."
+  exit 1
+fi
+echo "    using $PY_BIN"
+echo "    $("$PY_BIN" --version 2>&1)"
+
 say "Verifying before restarting anything"
-python3 -c "import ast,sys,pathlib
+"$PY_BIN" -c "import ast,sys,pathlib
 [ast.parse(p.read_text()) for p in pathlib.Path('src').rglob('*.py')]" \
   || fail "python syntax error - NOT restarting"
 echo "    python syntax ok"
 
-python3 -c "import yaml;yaml.safe_load(open('config.yaml'))" \
+"$PY_BIN" -c "import yaml;yaml.safe_load(open('config.yaml'))" \
   || fail "config.yaml does not parse - NOT restarting"
 echo "    config.yaml parses"
 
-python3 -c "import sys;sys.path.insert(0,'.');import src.main" \
+"$PY_BIN" -c "import sys;sys.path.insert(0,'.');import src.main" \
   || fail "src.main does not import - NOT restarting"
 echo "    imports clean"
 
+# requests underpins both HTTPS notification channels and is easy to miss if
+# the venv predates them being added.
+"$PY_BIN" -c "import requests" >/dev/null 2>&1 \
+  || fail "'requests' is missing from $PY_BIN - run: $PY_BIN -m pip install -r requirements.txt"
+echo "    requests present (notifications can send)"
+
 say "Settings that will be live"
-python3 - <<'PY'
+"$PY_BIN" - <<'PY'
 import yaml
 t = yaml.safe_load(open("config.yaml"))["trading"]
 for k in ("entry_window_start","use_websocket_stream","rapid_increase_pct",

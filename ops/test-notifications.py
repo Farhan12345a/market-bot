@@ -3,7 +3,12 @@
 Send a test notification through the REAL delivery path and report exactly
 what happened.
 
-    cd /root/market-bot && python3 ops/test-notifications.py
+    cd /root/market-bot
+    set -a && . /etc/market-bot.env && set +a     # systemd's EnvironmentFile is
+                                                  # NOT loaded for a manual run
+    venv/bin/python3 ops/test-notifications.py    # the venv, not system python
+
+If unsure which interpreter that is:  systemctl cat market-bot | grep ExecStart
 
 Uses the same config, the same env vars and the same sender classes the bot
 uses at 4pm, so a pass here means the daily report will deliver. Sends nothing
