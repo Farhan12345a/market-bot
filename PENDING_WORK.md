@@ -306,7 +306,36 @@ where the actual expectancy gap is.
 
 ---
 
-## 2. ~~Turn on the WebSocket stream~~ — ENABLED for 2026-08-21, NOT YET VERIFIED
+## 2. WebSocket stream — CONNECTS FINE, was OVER-SUBSCRIBED (2026-08-21)
+
+**The network was never the problem.** First live run reached
+`connected to wss://stream.data.alpaca.markets/v2/iex` in 436ms. The 403s from
+the dev container were a container artifact, exactly like api.nasdaq.com.
+
+**What actually failed:** `error: symbol limit exceeded (405)`. Alpaca's free
+IEX feed caps subscriptions per connection; 59 symbols were requested. The
+failure mode is nasty - the socket opens, reports connected and healthy, and
+then delivers ZERO bars forever. The watchdog took the full 120s to notice and
+fell back to REST for the whole session.
+
+**Fixed, awaiting its first live run:** `stream_max_subscriptions: 30`, with
+bars and trades counted as separate subscriptions (so 15 symbols with ticks on).
+The screener's picks and the day's earnings adds get the slots; everything else
+uses REST, which is what all 59 did before the stream existed.
+
+**Still unknown, and it decides the config:** whether Alpaca counts UNIQUE
+SYMBOLS or SUBSCRIPTIONS. If unique symbols, `use_trade_ticks_for_entry` is free
+and 30 symbols can stream. Next session's log answers it - if 15 symbols
+subscribe with no 405, try raising the cap and watch for the error to return.
+
+**Judgement call to make with that answer:** 15 symbols with tick precision, or
+30 with bar-close only? The measured prize was ~$116/day of entry slippage on
+2026-08-20, and most of that is the 15-minute REST delay rather than
+sub-bar timing - which argues for BREADTH (30 bars-only) over precision.
+
+Original write-up below.
+
+## 2b. Original: turn on the WebSocket stream
 
 **Status:** `use_websocket_stream: true` and `rapid_increase` moved to 0.3%/3min
 together, both live in config. Entry ticks (`use_trade_ticks_for_entry`) are on too.

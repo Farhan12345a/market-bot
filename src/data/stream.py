@@ -78,6 +78,16 @@ RECONNECT_DELAY_SECONDS = 5
 # unambiguous: even one liquid symbol prints most minutes.
 NO_DATA_GIVE_UP_SECONDS = 120
 
+# Alpaca's free/IEX feed caps how many symbols one connection may subscribe to.
+# Exceeding it does NOT fail the connect - the socket opens, reports "connected",
+# and only then returns `error: symbol limit exceeded (405)`, after which not a
+# single bar is ever delivered. That is what happened on 2026-08-21: 59 symbols
+# subscribed, connection reported healthy, zero bars, and the watchdog fell back
+# to REST two minutes later. Capping up front turns a silent total failure into
+# a partial success - the most important symbols stream, the rest use REST,
+# which is exactly what the fallback was built to do per-symbol anyway.
+DEFAULT_MAX_SUBSCRIPTIONS = 30
+
 
 class PriceStream:
     """
@@ -85,11 +95,14 @@ class PriceStream:
     symbol. Thread-safe: the websocket thread writes, the trading loop reads.
     """
 
-    def __init__(self, api_key, api_secret, feed="iex", subscribe_trades=False):
+    def __init__(self, api_key, api_secret, feed="iex", subscribe_trades=False,
+                 max_subscriptions=DEFAULT_MAX_SUBSCRIPTIONS):
         self._api_key = api_key
         self._api_secret = api_secret
         self._feed = feed
         self._subscribe_trades = subscribe_trades
+        self._max_subscriptions = max_subscriptions
+        self._dropped_symbols = []
 
         self._bars = {}  # symbol -> {open, high, low, close, volume, timestamp}
         self._received_at = {}  # symbol -> time.monotonic() when the bar landed
@@ -113,13 +126,51 @@ class PriceStream:
 
     # ---- lifecycle -------------------------------------------------------
 
-    def start(self, symbols):
-        """Connect and subscribe to 1-minute bars for `symbols`."""
+    def symbol_budget(self):
+        """
+        How many symbols this connection may carry.
+
+        Bars and trades are counted as SEPARATE subscriptions, so enabling trade
+        ticks halves the reach. That is the conservative reading of Alpaca's
+        limit; if it turns out to count unique symbols instead, raising
+        stream_max_subscriptions recovers the difference with no code change.
+        """
+        channels = 2 if self._subscribe_trades else 1
+        return max(1, self._max_subscriptions // channels)
+
+    def start(self, symbols, priority=()):
+        """
+        Connect and subscribe to 1-minute bars for `symbols`.
+
+        Only the first symbol_budget() symbols are subscribed. `priority` names
+        the ones that must make the cut - the screener's picks and the day's
+        earnings adds - because those are where a signal is actually likely to
+        fire. Everything dropped still gets prices, just over REST.
+        """
         if self._thread and self._thread.is_alive():
             logger.warning("PriceStream.start() called while already running - ignoring")
             return
 
-        self._symbols = list(symbols)
+        requested = list(dict.fromkeys(symbols))
+        budget = self.symbol_budget()
+
+        if len(requested) > budget:
+            ranked = ([s for s in priority if s in requested]
+                      + [s for s in requested if s not in set(priority)])
+            kept, dropped = ranked[:budget], ranked[budget:]
+            self._dropped_symbols = dropped
+            logger.warning(
+                f"PriceStream: {len(requested)} symbols requested but the "
+                f"{self._feed} feed allows {self._max_subscriptions} subscriptions "
+                f"({'bars+trades' if self._subscribe_trades else 'bars'} = "
+                f"{2 if self._subscribe_trades else 1} per symbol, so {budget} symbols). "
+                f"Streaming the top {len(kept)}; the other {len(dropped)} use REST."
+            )
+            logger.info(f"PriceStream streaming: {', '.join(kept)}")
+            logger.info(f"PriceStream on REST: {', '.join(dropped)}")
+            requested = kept
+
+        self._symbols = requested
         self._stop_requested.clear()
         self._gave_up = False
         self._started_at = time.monotonic()

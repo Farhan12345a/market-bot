@@ -131,6 +131,7 @@ def select_symbols(config, screener, market_data):
     if not symbols and screener_ran and not screener_timed_out:
         logger.warning("Screener produced no candidates")
 
+    stream_priority["symbols"] = list(symbols)   # screener picks, before the merge
     default_list = config["trading"]["stock_universe"]
     merged = list(dict.fromkeys(symbols + default_list))  # screener picks first, then defaults, deduped
     if len(merged) != len(symbols):
@@ -182,6 +183,10 @@ def _augment_selection(config, screener, market_data, selection):
         logger.error(f"List augmentation failed, keeping the screener list as-is: {e}", exc_info=True)
         return selection
 
+    # Earnings / QQQ adds are the day's freshest catalysts - they outrank the
+    # static universe for a stream slot.
+    stream_priority["symbols"] = list(dict.fromkeys(stream_priority["symbols"] + added))
+
     if added and config["trading"].get("use_rsi_filter", False):
         rsi_period = config["trading"].get("rsi_period", 14)
         rsi_values = dict(rsi_values)
@@ -198,6 +203,13 @@ def _augment_selection(config, screener, market_data, selection):
 # Scheduled report sends. Shared across the session so a report fired by
 # finish_day and one fired by the clock can't double-send the same slot.
 report_state = {"sent": set(), "seeded": False}
+
+# Symbols that must get a WebSocket slot when the feed's subscription cap forces
+# a choice: the screener's picks and the day's earnings/QQQ adds. Those are the
+# names a signal is actually likely to fire on, whereas most of the 50-name
+# default universe sits untouched all session. Everything not streamed still
+# gets prices over REST - the per-symbol fallback was built for exactly this.
+stream_priority = {"symbols": []}
 
 
 def _slot_for_finish(et):
@@ -1382,6 +1394,7 @@ def main():
                 broker.api_secret,
                 feed=config["trading"].get("websocket_feed", "iex"),
                 subscribe_trades=config["trading"].get("use_trade_ticks_for_entry", True),
+                max_subscriptions=config["trading"].get("stream_max_subscriptions", 30),
             )
 
         # Initialize components
@@ -1478,7 +1491,7 @@ def main():
                 # here rather than at construction because the watchlist isn't
                 # decided until the screener has run.
                 if price_stream is not None:
-                    price_stream.start(symbols)
+                    price_stream.start(symbols, priority=stream_priority["symbols"])
 
                 logger.info("Market is open, monitoring for signals...")
                 try:

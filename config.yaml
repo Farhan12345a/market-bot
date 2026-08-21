@@ -34,6 +34,21 @@ trading:
   # the same day would make an unexpected result impossible to attribute.
   # Flip to true to turn the stream on - nothing else needs to change.
   use_websocket_stream: true
+
+  # Alpaca's free/IEX feed caps subscriptions per connection. Going over does
+  # NOT fail loudly: the socket connects, reports healthy, returns
+  # "error: symbol limit exceeded (405)", and then delivers ZERO bars forever.
+  # On 2026-08-21, 59 symbols were subscribed and the watchdog spent 120s
+  # discovering the silence before falling back to REST for the whole session.
+  #
+  # Bars and trades count as SEPARATE subscriptions, so with
+  # use_trade_ticks_for_entry on, 30 subscriptions = 15 symbols. Symbols beyond
+  # the cap are not dropped from the watchlist - they simply get REST prices,
+  # which is what every symbol used before the stream existed.
+  #
+  # Priority goes to the screener's picks and the day's earnings/QQQ adds; the
+  # static universe fills whatever is left.
+  stream_max_subscriptions: 30
   websocket_feed: "iex"   # iex = free tier. sip requires a paid subscription.
 
   # Subscribe to live TRADES as well as bars, and use the latest tick as the
