@@ -441,7 +441,7 @@ notifications:
   # which is exactly this use case, a report mailed to yourself. Verify a
   # domain only if the report ever needs to reach a second address.
   resend:
-    enabled: false
+    enabled: true
     from: "onboarding@resend.dev"
     to: "shahbazfarhan25@gmail.com"
 
