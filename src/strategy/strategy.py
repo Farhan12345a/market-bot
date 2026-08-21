@@ -52,6 +52,7 @@ class TradeManager:
         self.entry_time = _now_et()
         self.highest_price = entry_price
         self.first_exit_done = False
+        self.take_profit_done = False
 
         # For momentum and resistance detection
         self.price_history = [entry_price]  # Track prices for momentum calc
@@ -80,6 +81,36 @@ class TradeManager:
         if not self.first_exit_done and loss_pct <= first_exit_trigger:
             return int(self.entry_qty * self.config["trading"]["first_exit_pct"])
         return 0
+
+    def check_take_profit(self, current_price):
+        """
+        Scale out of a WINNER: sell take_profit_fraction of the original
+        position once price is up take_profit_pct. Fires at most once per
+        position (take_profit_done, set only in process_exit after the broker
+        confirms - same commit-after-confirmation discipline as first_exit).
+
+        EXPERIMENTAL, added 2026-08-20 at the user's request, and the 2026-08-20
+        data argues against it: only 3 of 25 trades that day ever reached +1%,
+        and those three (MARA +$121, RIOT +$59, LYFT +$44) were the entire
+        day's profit. Trimming half of each would have clipped the only
+        winners while doing nothing for the other 22 trades. Watch
+        take_profit_pct vs the MFE column before keeping this.
+        """
+        if not self.config["trading"].get("use_take_profit", False):
+            return 0
+        if self.take_profit_done:
+            return 0
+
+        trigger = self.config["trading"].get("take_profit_pct", 1.0) / 100
+        gain_pct = (current_price - self.entry_price) / self.entry_price
+        if gain_pct < trigger:
+            return 0
+
+        fraction = self.config["trading"].get("take_profit_fraction", 0.5)
+        qty = int(self.entry_qty * fraction)
+        # Never try to sell more than is still held (a first-exit tranche may
+        # already have gone), and never emit a 0-share order.
+        return max(0, min(qty, self.qty_remaining))
 
     def check_final_exit(self, current_price):
         """Check if we should sell all remaining at -1.0% loss"""
@@ -224,6 +255,8 @@ class TradeManager:
         self.qty_remaining -= qty_to_exit
         if exit_reason == "FIRST_EXIT_-0.5%":
             self.first_exit_done = True
+        if exit_reason == "TAKE_PROFIT":
+            self.take_profit_done = True
         self.orders_log.append({
             "action": "EXIT",
             "qty": qty_to_exit,
@@ -307,6 +340,7 @@ class Strategy:
         checks = [
             ("FINAL_EXIT_-1.0%", trade.check_final_exit),
             ("FIRST_EXIT_-0.5%", trade.check_first_exit),
+            ("TAKE_PROFIT", trade.check_take_profit),
             ("MOMENTUM_FADE", trade.check_momentum_fade),
             ("RESISTANCE", trade.check_resistance),
             ("TRAILING_STOP", trade.update_trailing_stop),

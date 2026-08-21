@@ -238,6 +238,22 @@ trading:
   burst_max_entries: 3        # take at most this many of them
   burst_size_multiplier: 0.5  # and size each at this fraction of normal
 
+  # --- Take profit (EXPERIMENTAL - added 2026-08-20 for the 08-21 session) ---
+  # Sell take_profit_fraction of the position once it is up take_profit_pct.
+  # Fires at most once per position; the remainder keeps running under the
+  # trailing stop.
+  #
+  # THE 2026-08-20 DATA ARGUES AGAINST THIS. Only 3 of 25 trades that day ever
+  # reached +1%, and those three were the entire day's profit (MARA +$121,
+  # RIOT +$59, LYFT +$44). Trimming half of each would have clipped the only
+  # winners while doing nothing for the other 22 trades, which never got near
+  # the trigger. It is on to be measured, not because the evidence supports it.
+  # Compare take_profit_pct against the mfe_pct column in trade_history.csv
+  # before keeping it past the 08-21 session.
+  use_take_profit: true
+  take_profit_pct: 1.0        # gain % that triggers the scale-out
+  take_profit_fraction: 0.5   # fraction of the ORIGINAL position sold
+
   # --- Exposure caps ---
   # Checked BEFORE every entry attempt (see Executor.pre_entry_check) - the
   # bot will never even try to submit an order that would breach either of

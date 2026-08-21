@@ -21,6 +21,7 @@ ENTRY_CONFIRM_GRACE_SECONDS = 120
 # time-based exit) - used to fill the "was a stop-loss used" column in the
 # daily trade report.
 STOP_LOSS_EXIT_REASONS = {"FINAL_EXIT_-1.0%", "FIRST_EXIT_-0.5%", "TRAILING_STOP", "FLATTEN_ALL"}
+# TAKE_PROFIT is deliberately NOT a stop-loss reason - it is a gain being banked.
 
 # FIRST_EXIT_-0.5% is the only exit reason that ever sells a PARTIAL position
 # (first_exit_pct, e.g. 33%) - every other reason always sells the entire
@@ -28,7 +29,10 @@ STOP_LOSS_EXIT_REASONS = {"FINAL_EXIT_-1.0%", "FIRST_EXIT_-0.5%", "TRAILING_STOP
 # entry/exit log lines for live journalctl monitoring - green (buy), red
 # (100% sold), yellow (partial sold) - so a scan of the live log makes the
 # nature of each fill obvious at a glance.
-PARTIAL_EXIT_REASONS = {"FIRST_EXIT_-0.5%"}
+# TAKE_PROFIT sells take_profit_fraction and leaves the rest running, so like
+# FIRST_EXIT it must not decrement the open-position count or be coloured as a
+# full close.
+PARTIAL_EXIT_REASONS = {"FIRST_EXIT_-0.5%", "TAKE_PROFIT"}
 
 ANSI_GREEN = "\033[92m"
 ANSI_RED = "\033[91m"
