@@ -300,6 +300,38 @@ trading:
                                   # the bot falls back to the static stock_universe list below
                                   # rather than eating into the entry window.
 
+  # ---------------------------------------------------------------------
+  # Pre-open list augmentation (earnings + QQQ), added 2026-08-21
+  # ---------------------------------------------------------------------
+  # A SECOND pre-market stage, run in the buffer between the screener and the
+  # bell. Both lists are scored, cut to their best N, and ADDED to the day's
+  # watchlist - they never replace or displace what the screener picked.
+  #
+  # Runs later than the screener on purpose. Earnings reactions need pre-market
+  # prints to have accumulated, and the QQQ trend read is a read of TODAY's
+  # tape; at 09:05 both would be measuring an empty book.
+  list_builder_start_time: "09:20"
+
+  # Earnings list: today's before-the-bell reporters plus yesterday's
+  # after-the-bell ones - i.e. only the names whose news is already priced-in
+  # to pre-market. A company reporting after TODAY's close has no catalyst at
+  # 09:35, so it is excluded.
+  #
+  # Source is Nasdaq's free public earnings calendar (no API key). If it is
+  # unreachable the list is simply empty and the watchlist is unchanged.
+  use_earnings_list: true
+  earnings_list_top_n: 10
+  earnings_calendar_timeout_seconds: 20
+
+  # QQQ list: the Nasdaq-100 constituents in src/screener/qqq_constituents.txt,
+  # used ONLY on days QQQ is itself trending up (gap, N-day return and price-vs-
+  # average, majority of three). On a flat or falling index these names are
+  # heavily correlated, so adding 10 of them is one bet held ten times rather
+  # than ten bets - the trend gate is what keeps that from happening daily.
+  use_qqq_list: true
+  qqq_list_top_n: 10
+  qqq_trend_lookback_days: 5
+
   # Default stock universe. Watched EVERY DAY no matter what - merged with
   # (not replaced by) whatever the daily screener additionally picks. Also
   # used directly when use_daily_screener is false, and as the fallback if

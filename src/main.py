@@ -32,6 +32,7 @@ from src.data.market_data import MarketDataManager
 from src.data.stream import PriceStream
 from src.executor.executor import Executor
 from src.screener.stock_screener import StockScreener
+from src.screener.list_builder import augment_symbols
 from src.notifications.email_notifier import EmailNotifier
 from src.analytics.signal_journal import SignalJournal
 
@@ -159,6 +160,40 @@ def select_symbols(config, screener, market_data):
         )
 
     return symbols, rsi_values
+
+def _augment_selection(config, screener, market_data, selection):
+    """
+    Run the earnings / QQQ list pass over an existing (symbols, rsi_values)
+    selection and return an updated one.
+
+    Kept separate from select_symbols because it runs LATER - the screener goes
+    at 09:05 to be safely finished before the bell, but both of these inputs
+    need pre-market to have woken up first: earnings reactions need prints to
+    have accumulated, and the QQQ read is a read of today's tape. Running them
+    at 09:05 would measure an empty book.
+
+    RSI is recomputed for the added names only, when the filter is on - without
+    this they would arrive with no RSI value and be silently unfilterable.
+    """
+    symbols, rsi_values = selection
+    try:
+        full, added = augment_symbols(config, screener, symbols)
+    except Exception as e:
+        logger.error(f"List augmentation failed, keeping the screener list as-is: {e}", exc_info=True)
+        return selection
+
+    if added and config["trading"].get("use_rsi_filter", False):
+        rsi_period = config["trading"].get("rsi_period", 14)
+        rsi_values = dict(rsi_values)
+        for sym in added:
+            try:
+                rsi_values[sym] = market_data.get_rsi(sym, period=rsi_period)
+            except Exception as e:
+                logger.warning(f"RSI unavailable for added symbol {sym}: {e}")
+                rsi_values[sym] = None
+
+    return full, rsi_values
+
 
 def _position_size(config, executor, price):
     """
@@ -1239,8 +1274,15 @@ def main():
         screener_start = config["trading"].get("screener_start_time", "09:05")
         screener_hour, screener_minute = (int(x) for x in screener_start.split(":"))
 
+        # Second pre-market stage: the earnings and QQQ lists, run in the buffer
+        # between the screener finishing and the bell.
+        augment_start = config["trading"].get("list_builder_start_time", "09:20")
+        augment_hour, augment_minute = (int(x) for x in augment_start.split(":"))
+
         # Holds the pre-market screener result until the open consumes it.
         pending_selection = None
+        # Whether the augmentation pass has already run against pending_selection.
+        pending_augmented = False
         # Date of the last completed session. run_trading_day RETURNS once every
         # position is closed ("all_closed"), which on 2026-08-20 happened at
         # 10:14 ET - and the loop immediately re-screened and started a second
@@ -1270,9 +1312,21 @@ def main():
                         "which eats into the entry window"
                     )
                     pending_selection = select_symbols(config, screener, market_data)
+                    pending_augmented = False
+
+                if not pending_augmented:
+                    # Either a late start, or the process came up after 09:20
+                    # and the scheduled slot never came round. Do it now: it
+                    # costs entry-window time but an unaugmented list is a
+                    # silently different strategy from the configured one.
+                    pending_selection = _augment_selection(
+                        config, screener, market_data, pending_selection
+                    )
+                    pending_augmented = True
 
                 symbols, rsi_values = pending_selection
                 pending_selection = None
+                pending_augmented = False
 
                 # Subscribe only once the day's symbol list is known. Started
                 # here rather than at construction because the watchlist isn't
@@ -1311,12 +1365,33 @@ def main():
                     f"{(market_open_today - now).total_seconds() / 60:.0f} min ahead of the open ====="
                 )
                 pending_selection = select_symbols(config, screener, market_data)
+                pending_augmented = False
                 finished = datetime.now(et)
                 if finished >= market_open_today:
                     logger.warning(
                         f"Screener ran past the open (finished {finished:%H:%M:%S} ET) - "
                         f"move screener_start_time earlier than {screener_start}"
                     )
+                continue
+
+            augment_time_today = now.replace(
+                hour=augment_hour, minute=augment_minute, second=0, microsecond=0
+            )
+
+            if (
+                pending_selection is not None
+                and not pending_augmented
+                and market_data.is_trading_day(now)
+                and augment_time_today <= now < market_open_today
+            ):
+                logger.info(
+                    f"===== PRE-MARKET: building earnings/QQQ lists at {now:%H:%M:%S} ET, "
+                    f"{(market_open_today - now).total_seconds() / 60:.0f} min ahead of the open ====="
+                )
+                pending_selection = _augment_selection(
+                    config, screener, market_data, pending_selection
+                )
+                pending_augmented = True
                 continue
 
             time.sleep(30)
