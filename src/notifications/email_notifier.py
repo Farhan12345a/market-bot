@@ -180,6 +180,7 @@ class EmailNotifier:
             if open_positions:
                 unreal = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
                 lines.append(f"{len(open_positions)} still open, ${unreal:+,.2f} unrealized")
+                lines.append(f"Combined ${pl + unreal:+,.2f}")
             return "\n".join(lines)
         except Exception as e:
             logger.debug(f"Could not build plain-text summary: {e}")
@@ -442,7 +443,45 @@ class EmailNotifier:
                         </tr>
             """
 
-        html += """
+        # Closing P&L block. Realized and unrealized are kept strictly apart:
+        # a midday report where the two are added together reads as a settled
+        # result when half of it is still moving, and unrealized P&L on an open
+        # position is an opinion, not money.
+        total_color = "#10b981" if (total_pl + unrealized_pl) >= 0 else "#ef4444"
+        unreal_color = "#10b981" if unrealized_pl >= 0 else "#ef4444"
+        combined_note = (
+            "Realized only - every position is closed."
+            if not open_positions else
+            f"{len(open_positions)} position(s) still open, so the combined figure "
+            f"will move until they close."
+        )
+        html += f"""
+                    </tbody>
+                </table>
+
+                <h2 style="margin-top:30px;border-bottom:2px solid #1a1f2e;padding-bottom:10px;">
+                    Profit &amp; Loss
+                </h2>
+                <table class="trades-table">
+                    <tbody>
+                        <tr>
+                            <td style="width:60%;"><strong>Realized P&amp;L</strong>
+                                <div class="exit-reason">{len(trades)} closed trade(s) - booked, final</div></td>
+                            <td style="text-align:right;font-size:20px;font-weight:bold;color:{pl_color};">
+                                ${total_pl:,.2f}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Unrealized P&amp;L</strong>
+                                <div class="exit-reason">{len(open_positions)} open position(s) - marked to current price, not booked</div></td>
+                            <td style="text-align:right;font-size:20px;font-weight:bold;color:{unreal_color};">
+                                ${unrealized_pl:,.2f}</td>
+                        </tr>
+                        <tr style="background:#f5f7fa;">
+                            <td><strong>Combined</strong>
+                                <div class="exit-reason">{combined_note}</div></td>
+                            <td style="text-align:right;font-size:22px;font-weight:bold;color:{total_color};">
+                                ${total_pl + unrealized_pl:,.2f}</td>
+                        </tr>
                     </tbody>
                 </table>
 
