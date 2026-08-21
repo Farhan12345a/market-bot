@@ -145,6 +145,67 @@ these thresholds. Check the signal journal before weighting it more heavily.
 
 ---
 
+## 0d. TODAY (after the close): fix the burst ranking
+
+See 0b. Two concrete changes:
+
+1. `_get_volatility_percentile` returns one of five hardcoded values
+   (10/30/50/75/95) by ATR band. Make it a TRUE percentile: score every
+   candidate's ATR%, then rank each against that day's distribution. This is
+   the 35-point term - it should separate names, not bucket them.
+2. Establish whether RVOL at exactly 1.00x pre-market is legitimate (no
+   intraday volume yet) or the 2026-08-20 `end=today` bug in another path. If
+   the former, exclude RVOL from the PRE-OPEN ranking rather than letting every
+   candidate carry an identical 0 - a term that never varies is noise with a
+   weight attached.
+
+Also: drop ETFs from the tradeable list. `max_stock_price: 300` already blocks
+QQQ at $711 by accident, but an ETF at $80 would sail through, and an index
+fund cannot burst the way a single name does. A simple `exclude_symbols` list,
+or a flag on known ETFs, is enough.
+
+---
+
+## 0e. PROPOSED (user, 2026-08-21): per-method behavioural watchlists
+
+**The idea.** Watch how symbols behave in the first 30 minutes, and remember
+the ones that repeatedly satisfy a given signal's criteria - e.g. "XYZ made
++0.3% in 3 min on 3 of the last 4 days". Keep a SEPARATE list per config/method,
+and when that method is enabled, feed its list back into the watchlist. Lists
+stay dynamic and rebuild themselves as behaviour changes.
+
+**Why this is worth doing.** Candidate generation is currently the weakest link:
+a hand-written 50-name `stock_universe` plus a screener scoring gap and
+momentum. Neither asks the only question that matters for THIS strategy - does
+this symbol actually produce the move the entry logic looks for? A behavioural
+list answers that directly, from observation.
+
+**Most of the data already exists.** `logs/signal_journal.csv` has recorded
+every signal since 2026-08-21, taken or not, with signal_pct, excess vs SPY,
+RVOL, spread, burst width and forward returns at 15/30 min. This feature is
+largely a READER over data already being collected, not new plumbing.
+
+**The distinction that decides whether this works.** Two different things could
+be remembered, and they are not equally safe:
+
+  (a) symbols that repeatedly TRIGGER the signal - a behavioural fact, several
+      observations per symbol per week, cheap to measure, low overfitting risk.
+  (b) symbols that repeatedly MADE MONEY on that signal - an outcome fact, at
+      roughly 1-2 trades per symbol per week and a ~24% win rate, a "3 of 4
+      winners" symbol is overwhelmingly likely to be noise.
+
+The user's phrasing ("stocks that succeeded") points at (b). **Build (a) first.**
+It is honest with the data volume available, and it improves candidate
+generation on its own. Layer (b) on only once the journal can show that a
+symbol's past win rate predicts its future one - which is a claim the journal is
+there to TEST, not to assume.
+
+**Sequencing.** Needs ~2-3 weeks of journal data before any list is meaningful,
+which puts it after the ranking work (item 4) and alongside it. Not blocked on
+anything else.
+
+---
+
 ## 1a. MONDAY 2026-08-24: poll interval + time-based windows
 
 Do these two together, in this order. The second is a prerequisite, not a
