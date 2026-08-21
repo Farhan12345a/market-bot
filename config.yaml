@@ -410,22 +410,55 @@ logging:
   log_file: "logs/trading.log"
 
 notifications:
+  # ---------------------------------------------------------------------
+  # SMTP - the original path. OFF, because it cannot work here.
+  # ---------------------------------------------------------------------
+  # DigitalOcean filters outbound 25/465/587, so every send this bot has
+  # ever attempted failed with "Network is unreachable" before the SMTP
+  # dialogue even began. Left in place (and still honoured if enabled) for
+  # any host that isn't blocked; use the HTTPS channels below on this one.
+  #
+  # The password formerly sat here in plaintext and was committed to git.
+  # It has to be ROTATED at https://myaccount.google.com/apppasswords, and
+  # if SMTP is ever re-enabled the new one belongs in the environment as
+  # SMTP_PASSWORD - not in this file, which is public to anyone with the repo.
   email:
-    enabled: true
-    # Gmail setup - Get app-specific password from: https://myaccount.google.com/apppasswords
+    enabled: false
     sender_email: "shahbazfarhan25@gmail.com"
-    sender_password: "qgej rnns eztf amnk"  # ← FILL THIS IN (see instructions below)
     recipient_email: "shahbazfarhan25@gmail.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
 
-# EMAIL SETUP INSTRUCTIONS:
-# 1. Go to https://myaccount.google.com/apppasswords
-# 2. Select "Mail" and "Windows Computer" (or your device)
-# 3. Generate app password
-# 4. Copy password here (replace "YOUR_APP_PASSWORD_HERE")
-# 5. Save config.yaml
-# 6. You're done! Bot will email summary after each trading day
+  # ---------------------------------------------------------------------
+  # Resend - email over HTTPS (port 443). Cannot be blocked here.
+  # ---------------------------------------------------------------------
+  # Setup: sign up at resend.com, create an API key, then on the Droplet
+  #   echo 'RESEND_API_KEY=re_xxxxxxxx' >> /etc/market-bot.env
+  # and flip enabled to true. NEVER put the key in this file.
+  #
+  # With no verified domain, Resend permits sending only FROM
+  # onboarding@resend.dev TO the address the account was registered with -
+  # which is exactly this use case, a report mailed to yourself. Verify a
+  # domain only if the report ever needs to reach a second address.
+  resend:
+    enabled: false
+    from: "onboarding@resend.dev"
+    to: "shahbazfarhan25@gmail.com"
+
+  # ---------------------------------------------------------------------
+  # Pushover - phone push over HTTPS. The channel that actually matters.
+  # ---------------------------------------------------------------------
+  # Setup: get the User Key from the Pushover app, create an application
+  # token at https://pushover.net/apps/build, then on the Droplet
+  #   echo 'PUSHOVER_TOKEN=xxxx' >> /etc/market-bot.env
+  #   echo 'PUSHOVER_USER=xxxx'  >> /etc/market-bot.env
+  # and flip enabled to true.
+  #
+  # priority: -1 quiet, 0 normal, 1 bypasses quiet hours. Keep 0 for the
+  # daily report; 1 is for alerts you want at 09:31 regardless.
+  pushover:
+    enabled: false
+    priority: 0
 
 analytics:
   # Records EVERY entry signal that fires - taken or not - with the features

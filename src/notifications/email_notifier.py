@@ -8,6 +8,8 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 import os
 
+from src.notifications.senders import build_senders, notify
+
 logger = logging.getLogger(__name__)
 
 REPORT_DIR = "logs/reports"
@@ -41,12 +43,24 @@ class EmailNotifier:
             "report_retention_days", REPORT_RETENTION_DAYS
         )
 
+        # HTTPS delivery (Resend / Pushover). Independent of self.enabled, which
+        # only ever governed the SMTP path - so turning SMTP off, as anyone on a
+        # DigitalOcean box eventually does, no longer silently turns off every
+        # other channel with it.
+        self.senders = build_senders(config)
+
         if not self.enabled:
             logger.info("Email notifications disabled (daily report will still be saved to disk)")
             return
 
         self.sender_email = self.email_config.get("sender_email")
-        self.sender_password = self.email_config.get("sender_password")
+        # Environment first. The config key is still read as a fallback for any
+        # host with a working SMTP route, but it must not be filled in on a
+        # committed file - that is how the last app password leaked.
+        self.sender_password = (
+            os.environ.get("SMTP_PASSWORD", "").strip()
+            or self.email_config.get("sender_password")
+        )
         self.recipient_email = self.email_config.get("recipient_email")
         self.smtp_server = self.email_config.get("smtp_server", "smtp.gmail.com")
         self.smtp_port = self.email_config.get("smtp_port", 587)
@@ -95,17 +109,75 @@ class EmailNotifier:
         except Exception as e:
             logger.error(f"Could not prune old reports: {e}")
 
-        if not self.enabled:
-            return False
+        subject = f"Trading Bot Daily Summary - {datetime.now().strftime('%Y-%m-%d')}"
+        delivered = False
 
+        # HTTPS channels first: on this host they are the ones that can work.
+        if self.senders:
+            delivered = notify(
+                self.senders, subject, self._plain_text_summary(trades), html_content
+            )
+
+        if self.enabled:
+            try:
+                self._send_email(subject, html_content)
+                logger.info(f"✓ Daily summary emailed to {self.recipient_email}")
+                delivered = True
+            except Exception as e:
+                logger.error(f"Error sending email (report is still saved to disk): {e}")
+
+        if not delivered:
+            logger.warning(
+                "Daily report was NOT delivered by any channel - it is saved at "
+                f"{self.report_dir}/"
+            )
+        return delivered
+
+    def _plain_text_summary(self, trades):
+        """
+        The report condensed to something that fits in a push notification.
+
+        A 40-row HTML table is not a phone alert. This is the line you want to
+        read on a lock screen; the full report stays on disk and in email.
+        """
         try:
-            subject = f"Trading Bot Daily Summary - {datetime.now().strftime('%Y-%m-%d')}"
-            self._send_email(subject, html_content)
-            logger.info(f"✓ Daily summary emailed to {self.recipient_email}")
-            return True
+            closed = [t for t in trades if t.get("exit_price") is not None]
+            pl = sum(float(t.get("pl") or 0) for t in closed)
+            wins = sum(1 for t in closed if float(t.get("pl") or 0) > 0)
+            n = len(closed)
+            win_rate = (wins / n * 100) if n else 0.0
+
+            ranked = sorted(closed, key=lambda t: float(t.get("pl") or 0))
+            lines = [
+                f"P&L ${pl:+,.2f} on {n} round-trips, {win_rate:.0f}% win rate",
+            ]
+            if ranked:
+                best, worst = ranked[-1], ranked[0]
+                lines.append(f"Best  {best.get('symbol','?')} ${float(best.get('pl') or 0):+,.2f}")
+                lines.append(f"Worst {worst.get('symbol','?')} ${float(worst.get('pl') or 0):+,.2f}")
+
+            tp = sum(1 for t in closed if t.get("exit_reason") == "TAKE_PROFIT")
+            if tp:
+                lines.append(f"{tp} take-profit scale-out(s) fired")
+            return "\n".join(lines)
         except Exception as e:
-            logger.error(f"Error sending email (report is still saved to disk): {e}")
+            logger.debug(f"Could not build plain-text summary: {e}")
+            return "Daily report is ready - see logs/reports/."
+
+    def send_alert(self, subject, text):
+        """
+        Deliver a one-off operational alert (not the daily report).
+
+        Separate from send_daily_summary because the useful alerts have nothing
+        to do with trades: the process not running at 09:25, the daily loss
+        limit firing, the price stream falling back to REST at the open. Those
+        are worth a phone buzz; the end-of-day report largely is not, since it
+        is already on disk.
+        """
+        if not self.senders:
+            logger.info(f"ALERT (no channel configured): {subject} - {text}")
             return False
+        return notify(self.senders, subject, text)
 
     def _save_report(self, html_content):
         """Write the report to logs/reports/trading-report-YYYY-MM-DD.html."""

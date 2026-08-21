@@ -18,65 +18,116 @@ the fix. Details of the ticket are in `DO_SUPPORT_TICKET.md`.
 
 ---
 
-## Email over HTTPS
+## The code is already done
 
-Any of these work; all are free at this volume (one message a weekday).
-
-**Resend** — simplest. Sign up, verify a domain *or* use their sandbox sender,
-create an API key. Sending is one POST to `https://api.resend.com/emails`.
-Free tier: 3,000/month.
-
-**Mailgun / SendGrid** — same shape, slightly more setup. Pick these if you
-already have an account.
-
-The change on our side is small: `EmailNotifier.send_daily_summary` currently
-ends in an `smtplib` call. It grows a `transport:` config key — `smtp` (today's
-behaviour, kept as the default so nothing changes for anyone) or `https` — and
-the HTTPS branch POSTs the same HTML body it already builds. The report-saving
-and retention logic is untouched, since that already happens before any send is
-attempted.
-
-**I can implement this in one pass once you have an API key.** Say the word and
-paste the key into the Droplet's environment (not into git).
+Both channels are built, wired and tested (61 cases). They ship **disabled**, so
+nothing changes until you flip a flag. What is left is only account signup and
+putting two or three keys on the Droplet — no code session needed, and I never
+need to see a key.
 
 ---
 
-## Text messages
+## Email: use Resend
 
-DigitalOcean has nothing to do with SMS — no ticket will fix this. Three real
-options, best first:
+Chosen over Mailgun and SendGrid for one reason that matters here: **it needs no
+domain.** With no verified domain, Resend lets you send from
+`onboarding@resend.dev` to the address you signed up with — which is exactly
+this use case, a report mailed to yourself. Mailgun and SendGrid both want
+domain verification (DNS records, a wait) before they will send anything useful.
 
-**1. Pushover** — you've used it before. $5 once per platform, no subscription.
-Delivers to the phone as a push notification with sound, which is what you
-actually want at 09:35 on a trading morning; it is not literally SMS, but it
-arrives faster and more reliably than one. Needs a User Key (in the app) and an
-application API token (create one at pushover.net/apps/build). Sending is a
-single POST to `https://api.pushover.net/1/messages.json`.
+Free tier is 3,000/month, 100/day. This bot sends one a weekday.
 
-**2. Carrier email-to-SMS gateway** — free, and rides on whatever email
-transport you end up with: send to `5551234567@vtext.com` (Verizon),
-`@txt.att.net` (AT&T), `@tmomail.net` (T-Mobile). Zero extra services. The
-catch is that carriers have been quietly retiring these gateways and delivery
-is best-effort with no error when it silently drops.
+    1. Sign up at resend.com with shahbazfarhan25@gmail.com
+       (this must be the SAME address as notifications.resend.to)
+    2. API Keys -> Create API Key -> copy it (starts with re_)
+    3. On the Droplet:
+         echo 'RESEND_API_KEY=re_xxxxxxxx' >> /etc/market-bot.env
+         chmod 600 /etc/market-bot.env
+    4. In config.yaml set notifications.resend.enabled: true
+    5. bash ops/deploy.sh
 
-**3. Twilio** — real SMS, ~$0.0079 a message plus ~$1.15/month for a number.
-Only worth it if you specifically need a genuine SMS rather than a push.
-
-**Recommendation: Pushover.** It's the cheapest, it's the most reliable, you
-already know it, and it solves alerting for everything else too — a stream
-disconnect at 09:31, the daily loss limit firing, the bot dying mid-session.
-Those matter far more than the end-of-day report, which is already on disk.
+Verify a domain later only if the report should ever reach a second address.
 
 ---
 
-## What to send, once something works
+## Text: use Pushover
 
-Not just the daily report. Ranked by how much you'd want the interruption:
+    1. Install Pushover, sign in, copy your User Key from the main screen
+    2. Create an application token at https://pushover.net/apps/build
+       (name it "market-bot"; any icon)
+    3. On the Droplet:
+         echo 'PUSHOVER_TOKEN=xxxx' >> /etc/market-bot.env
+         echo 'PUSHOVER_USER=xxxx'  >> /etc/market-bot.env
+    4. In config.yaml set notifications.pushover.enabled: true
+    5. bash ops/deploy.sh
+
+$5 once per platform, no subscription. Not literally SMS — and better than it
+for this: it arrives faster, it can have its own alert sound, and it costs
+nothing per message. Real SMS via Twilio is ~$0.0079/message plus ~$1.15/month
+for a number, and buys nothing you want here.
+
+**If you only do one of the two, do Pushover.** The report is already saved to
+`logs/reports/` every day, so email mostly buys convenience. What is genuinely
+missing is a buzz when something is wrong at 09:31.
+
+---
+
+## Making systemd read the env file
+
+One-time, on the Droplet:
+
+    systemctl edit market-bot
+
+Add:
+
+    [Service]
+    EnvironmentFile=-/etc/market-bot.env
+
+Then `systemctl daemon-reload`. The leading `-` means a missing file is not an
+error, so the bot still starts if the env file is ever absent.
+
+---
+
+## What gets sent where
+
+| | Resend (email) | Pushover (phone) |
+|---|---|---|
+| Daily report | full HTML table | one-line summary: P&L, win rate, best/worst, take-profit fires |
+| `send_alert()` | plain text | plain text |
+
+Both fire independently — one failing does not stop the other, and neither can
+raise into the trading loop. If every channel fails, the log says so explicitly
+and the report is still on disk.
+
+---
+
+## Still to wire: the alerts that actually matter
+
+`EmailNotifier.send_alert(subject, text)` exists and is tested, but nothing
+calls it yet. Ranked by how much you would want the interruption:
 
 1. **The bot is not running** at 09:25 ET on a trading day. Silence currently
-   looks identical to a healthy morning.
+   looks identical to a healthy morning — this is the big one.
 2. **Daily loss limit fired** — everything just got flattened.
-3. **Stream fell back to REST** at the open, meaning entries are running on
-   15-minute-delayed prices again.
-4. Daily report at the close. The one you have now, and the least urgent of the
-   four — it's saved to disk either way.
+3. **Stream fell back to REST** at the open, so entries are running on delayed
+   prices again.
+4. Daily report at the close. Already handled, and the least urgent.
+
+(1) needs a watchdog outside the bot process — a cron on the Droplet, since a
+dead process cannot alert about itself. Say the word and I will add it.
+
+---
+
+## The DigitalOcean ticket
+
+Still worth filing (`DO_SUPPORT_TICKET.md`) but it is now strictly optional:
+nothing above touches SMTP. See that file for why it is commonly declined.
+
+---
+
+## Rotate the leaked Gmail password
+
+`config.yaml` carried a live Gmail app password in plaintext, committed since
+the initial commit. It has been removed from the file, but **git history still
+has it** — revoke it at https://myaccount.google.com/apppasswords. Nothing needs
+it any more; SMTP is off and the HTTPS channels do not use it.
