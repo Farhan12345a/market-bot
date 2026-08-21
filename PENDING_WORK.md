@@ -288,9 +288,15 @@ Email has never delivered. DigitalOcean blocks outbound SMTP (587) — confirmed
 `logs/reports/trading-report-YYYY-MM-DD.html` regardless, so nothing is lost, but
 nothing is pushed either.
 
-Options: Pushover (user has used it before; needs a User Key and a new
-application API token), or an HTTPS email API (Resend/SendGrid/Mailgun) which
-sidesteps the port block entirely since it's just HTTPS.
+**Written up in full: `ops/NOTIFICATIONS.md`**, with a ready-to-send support
+ticket in `ops/DO_SUPPORT_TICKET.md`. Short version: the ticket is worth filing
+but is commonly declined, and it does nothing for texts; the fix that actually
+works is to send over HTTPS instead of SMTP (Resend for email, Pushover for
+push). Waiting on an API key — the code change is one pass once there is one.
+
+Worth more than the daily report, which is already on disk: an alert when the
+bot ISN'T RUNNING at 09:25 ET. Silence currently looks exactly like a healthy
+morning.
 
 ---
 
@@ -300,6 +306,29 @@ sidesteps the port block entirely since it's just HTTPS.
 - `resistance_lookback_samples: 3` — superseded by `resistance_min_decline_pct`,
   which fixes the actual defect (no magnitude floor) rather than just requiring
   more consecutive ticks.
+
+---
+
+## 7. Claude Code is not installed on the VPS — deploys are still manual
+
+Decided days ago (option B: install Claude Code on the Droplet rather than
+push-from-here / pull-on-the-box), never done. The open question then was
+whether this container could reach the VPS over SSH and do it directly.
+
+**Answered 2026-08-21: it cannot.** Outbound port 22 times out from here, the
+same wall that blocks SMTP, the WebSocket, yfinance and api.nasdaq.com. So this
+container can only ever push to GitHub; something on the VPS has to pull.
+
+Cost of leaving it: every change waits on a manual `git pull && systemctl
+restart`, and commits queue up unshipped. There were **10 queued** on 2026-08-21.
+
+One-time fix, run on the Droplet:
+
+    cd /root/market-bot && git pull && bash ops/setup-claude-on-vps.sh
+
+Thereafter `bash ops/deploy.sh` pulls, syntax-checks, parses config, import-
+checks, prints the settings about to go live, warns if the market is open, and
+rolls back if the service doesn't come up.
 
 ---
 
