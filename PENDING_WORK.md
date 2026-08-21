@@ -42,7 +42,30 @@ exactly - verified by test, no other change needed.
 
 ---
 
-## 0b. Earnings + QQQ lists: endpoints UNVERIFIED from any host (2026-08-21)
+## 0b. ~~Earnings + QQQ lists: endpoints unverified~~ — VERIFIED WORKING 2026-08-21
+
+**The Nasdaq earnings endpoint works from the VPS.** First live run, 09:20 ET:
+9 BMO rows for today and 40 AMC rows for yesterday, filtered to 5 candidates,
+ranked, and BJ / BEKE / BKE added (56 watched -> 59). The 403s were a dev-
+container artifact, exactly as suspected. QQQ correctly declined to contribute
+(1/3 up-votes: gap +0.58% up, but 5d -2.75% and price below its 5d average).
+
+**One weakness this exposed.** All three earnings picks scored an IDENTICAL
+Movability of 26.2 and RVOL of exactly 1.00x, so the ranking was decided almost
+entirely by the gap term. Two causes:
+
+- `_get_volatility_percentile` is a 5-bucket ladder (10/30/50/75/95), not a
+  percentile. 26.2 = 75 x 0.35, i.e. all three merely landed in the same
+  1.5-2.5% ATR bucket. The heaviest-weighted term (35 pts) discriminates far
+  less than its name suggests. Replace with a true rank across the candidate set.
+- RVOL at exactly 1.00x for all three is the pre-2026-08-20 bug's signature.
+  It may be legitimate pre-market (no intraday volume history yet), or the same
+  fault in a different path. Check the next few sessions before trusting it.
+
+Neither is harmful - the picks were reasonable - but the ranking is weaker than
+the log makes it look. Original write-up below.
+
+## 0c. Earnings + QQQ lists: original unverified note (2026-08-21)
 
 Both lists shipped with full unit coverage, but the **network calls have never
 succeeded from this container** - the dev proxy returns 403 for api.nasdaq.com,
@@ -119,6 +142,30 @@ their ordering are affected.
 **Worth testing rather than assuming:** MRVL had the highest gap on 2026-08-19
 (11.2%) and was the second-worst symbol (-$328). Gap may be a *negative* signal at
 these thresholds. Check the signal journal before weighting it more heavily.
+
+---
+
+## 1a. MONDAY 2026-08-24: poll interval + time-based windows
+
+Do these two together, in this order. The second is a prerequisite, not a
+nice-to-have.
+
+**(a) Convert sample counts to time durations FIRST.**
+`momentum_fade_window_samples` and `resistance_lookback_samples` are counts of
+polls, not spans of time. At today's 60s poll they mean 5 min and 3 min. Drop
+the poll to 5s without changing them and they silently become **25 seconds and
+15 seconds** - both exit rules become 12x more sensitive, re-creating exactly
+the hair-trigger behaviour fixed on 2026-08-20. Express both as minutes and
+derive the sample count from the live poll interval.
+
+**(b) Then lower `entry_check_interval_seconds`** from 60 to 5-10.
+
+Gated on the stream: at 59 symbols and a 5s poll this is ~700 REST calls/min,
+which will rate-limit. It is only safe once bars arrive by WebSocket push.
+
+**Stream status as of 2026-08-21 09:22 ET: still unverified** - the connection
+attempt happens at the open. If it fell back to REST, do NOT do (b) at all;
+(a) is still worth doing on its own merits.
 
 ---
 
