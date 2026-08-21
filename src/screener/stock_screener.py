@@ -27,29 +27,94 @@ class StockScreener:
             return []
 
     def _get_recent_gap(self, symbol) -> float:
-        """Calculate gap from yesterday's close to today's open (%)"""
+        """
+        Gap from yesterday's close to where the stock is trading NOW (%).
+
+        Deliberately measured against the current/pre-market price rather than
+        today's official opening print. The screener runs at 09:05 ET (see
+        screener_start_time), and today's DAILY bar does not exist yet at that
+        hour - so the previous implementation, which required two daily bars
+        and returned 0 when it could not get both, scored a 0.0% gap for every
+        single symbol. On 2026-08-20 that made MRVL, CADL and CMG tie at an
+        identical 44.0 and cut the selection to 3 names; the accidental
+        post-open re-run the same morning scored the same universe 79.0 / 66.7
+        / 58.1 with real gaps (COIN 7.8%, HOOD 5.3%), which is what the
+        component is worth when it works.
+
+        Measuring against the live price is also the better signal: it is
+        where the stock is actually changing hands right now, not one opening
+        print, and it is available before the bell when the decision is made.
+
+        Falls back to the old today's-open path when there is no current
+        price (thin or absent pre-market prints on the free IEX feed), so a
+        post-open run behaves exactly as before.
+        """
         try:
             today = datetime.now(self.et).date()
-            yesterday = today - timedelta(days=1)
+            start = today - timedelta(days=7)  # buffer for weekends/holidays
 
-            # Get yesterday's close and today's open
             bars = self.broker.get_historical_bars(
-                symbol, yesterday, today + timedelta(days=1), "1Day"
+                symbol, start, today + timedelta(days=1), "1Day"
             )
-
-            if symbol not in bars or len(bars[symbol]) < 2:
-                return 0
+            if symbol not in bars or bars[symbol].empty:
+                return 0.0
 
             df = bars[symbol].sort_values("timestamp")
-            yesterday_close = df.iloc[-2]["close"]
-            today_open = df.iloc[-1]["open"]
 
-            gap_pct = abs((today_open - yesterday_close) / yesterday_close * 100)
-            return gap_pct
+            # Rows dated today are today's own (partial) daily bar - exclude
+            # them so "yesterday's close" is genuinely the prior session.
+            df["_date"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(self.et).dt.date
+            prior = df[df["_date"] < today]
+            if prior.empty:
+                return 0.0
+            yesterday_close = float(prior.iloc[-1]["close"])
+            if yesterday_close <= 0:
+                return 0.0
+
+            current = self._get_current_price(symbol)
+            if not current:
+                # No live print - fall back to today's official open if the
+                # daily bar has appeared (i.e. we are running after the bell).
+                today_rows = df[df["_date"] == today]
+                if today_rows.empty:
+                    return 0.0
+                current = float(today_rows.iloc[-1]["open"])
+
+            return abs((current - yesterday_close) / yesterday_close * 100)
 
         except Exception as e:
             logger.debug(f"Error calculating gap for {symbol}: {e}")
-            return 0
+            return 0.0
+
+    def _get_current_price(self, symbol) -> float:
+        """
+        Latest traded price, including pre-market. Returns 0 when unavailable.
+
+        Tries the most recent 1-minute bar first (covers extended hours on the
+        IEX feed) and falls back to the latest quote midpoint. Both are
+        best-effort: a thinly traded name may have neither before the bell,
+        which the caller handles.
+        """
+        try:
+            now = datetime.now(self.et)
+            bars = self.broker.get_historical_bars(
+                symbol, now - timedelta(hours=12), now, "1Min"
+            )
+            if symbol in bars and not bars[symbol].empty:
+                price = float(bars[symbol].sort_values("timestamp").iloc[-1]["close"])
+                if price > 0:
+                    return price
+        except Exception as e:
+            logger.debug(f"No recent minute bar for {symbol}: {e}")
+
+        try:
+            quote = self.broker.get_latest_quote(symbol)
+            if quote and quote.get("bid") and quote.get("ask"):
+                return (float(quote["bid"]) + float(quote["ask"])) / 2
+        except Exception as e:
+            logger.debug(f"No quote for {symbol}: {e}")
+
+        return 0.0
 
     def _get_5day_return(self, symbol) -> float:
         """Calculate 5-day return (%)"""

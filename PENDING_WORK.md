@@ -4,7 +4,19 @@ Open items, most actionable first. Each has enough context to pick up cold.
 
 ---
 
-## 1. Pre-market gap is always 0.0% — regression from moving the screener earlier
+## 1. ~~Pre-market gap is always 0.0%~~ — FIXED 2026-08-20
+
+**Status: FIXED.** `_get_recent_gap` now measures yesterday's close against the
+CURRENT price (latest minute bar, falling back to the quote midpoint), so it works
+before the bell. The old today's-open path remains as a fallback for post-open runs.
+Verified live: 9 of 9 symbols produced non-zero gaps spanning 0.21%–15.44%, against
+0 of 3 on the pre-market run that morning.
+
+Note the function returns a float, not None — `score_stock` does `min(25, gap * 5)`
+and would break on None. "No data" and "no gap" therefore still both score 0; that
+distinction was in the original plan and was dropped as not worth touching scoring for.
+
+Original write-up below.
 
 **Found:** 2026-08-20, first pre-market screen.
 
@@ -120,12 +132,19 @@ where the actual expectancy gap is.
 
 ---
 
-## 2. Turn on the WebSocket stream, and pair it with a shorter lookback
+## 2. ~~Turn on the WebSocket stream~~ — ENABLED for 2026-08-21, NOT YET VERIFIED
 
-Currently `use_websocket_stream: false` — shipped off deliberately so its first
-session wouldn't be confounded with the other fifteen commits.
+**Status:** `use_websocket_stream: true` and `rapid_increase` moved to 0.3%/3min
+together, both live in config. Entry ticks (`use_trade_ticks_for_entry`) are on too.
+What remains is the live verification described below - the connection has still
+never succeeded from any host.
 
-**To enable:** flip to `true`. Nothing else needs changing. Within two minutes of
+**Extra reason this matters, measured 2026-08-20:** 11 of 20 entries filled worse
+than the price their signal fired at, costing $115.94 on a day that lost $239.00 -
+roughly half the loss. That gap is the data lag priced in dollars. Entry slippage is
+now logged per trade ("entry price corrected X -> Y (+Z% slippage)"), so the stream's
+effect is directly measurable: expect average slippage to fall from ~0.3% to under
+0.05%, the residual being the bid-ask spread which no data feed can remove. Within two minutes of
 the open the log either shows `PriceStream connected` with bars flowing, or an
 explicit ERROR saying it got zero bars and is falling back to REST.
 
