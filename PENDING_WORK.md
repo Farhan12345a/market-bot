@@ -4,6 +4,72 @@ Open items, most actionable first. Each has enough context to pick up cold.
 
 ---
 
+## 0. **MONDAY: decide whether to KEEP or REMOVE the take-profit** (2026-08-24)
+
+**This is the one item with a deadline.** `use_take_profit` was switched ON for
+the 2026-08-21 session as a deliberate one-day experiment, at the user's
+request, and the user asked to be told if it backfires so it can come out on
+Monday.
+
+```yaml
+use_take_profit: true      # <- set to false to remove
+take_profit_pct: 1.0
+take_profit_fraction: 0.5
+```
+
+**The evidence going in argues against it.** On 2026-08-20, only 3 of 25 trades
+ever reached +1%: MARA +$121, RIOT +$59, LYFT +$44. Those three *were* the
+day's profit. Selling half of each at +1% would have clipped precisely the
+winners while doing nothing at all for the other 22 trades. The strategy's
+problem is a 23-24% win rate, not winners running too far - and a scale-out
+lowers the payoff ratio, which raises the breakeven win rate. It is being run
+anyway because one day of real data beats an argument, and because the MFE
+column now makes the counterfactual measurable rather than arguable.
+
+**How to judge it Monday, in order:**
+
+1. In the report, count exits with reason `TAKE_PROFIT`. **Zero fires = no
+   information gained, not a pass** - re-run it another day or drop it.
+2. For each one, compare `mfe_pct` against the +1.0% trigger. MFE well above
+   1.0% means the trimmed half was sold cheap; MFE at ~1.0% means it caught the
+   actual peak and earned its keep.
+3. Compare the day's payoff ratio to the 1.73x of 2026-08-20. A fall is the
+   expected cost; the question is whether the win rate rose enough to pay for it.
+
+**Verdict expected: REMOVE**, unless (2) shows MFE clustering near 1.0%.
+Set `use_take_profit: false`. That single key restores the previous behaviour
+exactly - verified by test, no other change needed.
+
+---
+
+## 0b. Earnings + QQQ lists: endpoints UNVERIFIED from any host (2026-08-21)
+
+Both lists shipped with full unit coverage, but the **network calls have never
+succeeded from this container** - the dev proxy returns 403 for api.nasdaq.com,
+invesco.com and even Yahoo, exactly as it does for the WebSocket. The VPS is a
+different network and runs yfinance fine in production, so this is most likely
+a dev-container artifact - but it is *unproven*, same status as the stream was.
+
+**First run to check, in the 09:20-09:30 ET window:**
+
+```
+grep -E "Earnings calendar|EARNINGS LIST|QQQ trend|QQQ LIST|List augmentation" \
+  <(journalctl -u market-bot --since today)
+```
+
+- `Earnings calendar 2026-08-24 (BMO): N rows -> M usable symbols` - working.
+- `Earnings calendar unreachable ... ProxyError/HTTPError` - the endpoint is
+  blocked or has moved. Fall back to a keyed provider (Finnhub and FMP both
+  have free tiers with a proper `earnings-calendar?from=&to=` route), or
+  disable with `use_earnings_list: false`. Nothing else breaks either way.
+- `QQQ is not trending up` is a **normal** message, not a failure - the list is
+  gated on the index and will be skipped on plenty of days.
+
+Also worth an eye: `src/screener/qqq_constituents.txt` is a static list dated
+2026-08-21. Nasdaq reconstitutes each December. Re-check it quarterly.
+
+---
+
 ## 1. ~~Pre-market gap is always 0.0%~~ — FIXED 2026-08-20
 
 **Status: FIXED.** `_get_recent_gap` now measures yesterday's close against the
@@ -240,8 +306,14 @@ sidesteps the port block entirely since it's just HTTPS.
 ## Test suites
 
 Not in the repo — they live in the session scratchpad and will be lost when the
-container is reclaimed. 176 cases as of `1487f3b`, covering: broker-lag position
+container is reclaimed. **284 cases as of `55a6dd9`**, covering: broker-lag position
 reconciliation, three-bar acceleration, report save/retention, WebSocket
-routing/fallback/watchdog, burst throttle, signal journal, and an A–Z pass against
-the real `config.yaml`. Worth moving into `tests/` if any of this is to be
+routing/fallback/watchdog, burst throttle, signal journal, take-profit scale-out,
+the earnings/QQQ list builder, and an A–Z pass against the real `config.yaml`.
+
+Two harness traps worth knowing before re-running them: any suite that calls
+`check_exit` must pin `strategy._now_et`, or a run after 16:00 ET returns
+`TIME_STOP_4PM` for every position and masks the rule under test; and a mock
+broker must *decrement* on a sell rather than dropping the symbol, or every
+partial exit looks like a stale-position leak. Worth moving into `tests/` if any of this is to be
 maintained.
