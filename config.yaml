@@ -318,6 +318,22 @@ trading:
                                      # automatically with account size instead of needing to be re-tuned
 
   # Stock universe (can be dynamic or static)
+  # When FALSE, stock_universe is a CANDIDATE POOL rather than an auto-include:
+  # its names are scored by the screener alongside candidates_file, and only the
+  # ones that earn a top-N place get watched.
+  #
+  # Until 2026-08-21 this was effectively true: 8 screener picks were merged
+  # with all 50 defaults, so 50 of 56 watched symbols had passed no test at all.
+  # That matters far more now that the WebSocket budget is ~14 symbols - a
+  # watchlist of 56 meant three quarters of what could be traded was running on
+  # ~15-minute-delayed REST prices, which is exactly the condition that produced
+  # entries at the 87th percentile of the surrounding half-hour.
+  #
+  # Safety: if the screener errors, times out, or finds nothing above
+  # min_screener_score, the full static list is still used. An unfiltered
+  # watchlist beats an empty one.
+  merge_default_universe: false
+
   use_daily_screener: true  # Set to true to dynamically select stocks each day
   screener_start_time: "09:05"  # ET. Screener runs PRE-MARKET so the symbol list is ready
                                  # at the bell. It previously waited for the market to open

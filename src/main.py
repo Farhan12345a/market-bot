@@ -133,13 +133,40 @@ def select_symbols(config, screener, market_data):
 
     stream_priority["symbols"] = list(symbols)   # screener picks, before the merge
     default_list = config["trading"]["stock_universe"]
-    merged = list(dict.fromkeys(symbols + default_list))  # screener picks first, then defaults, deduped
-    if len(merged) != len(symbols):
+    merge_default = config["trading"].get("merge_default_universe", True)
+
+    if merge_default:
+        merged = list(dict.fromkeys(symbols + default_list))  # screener picks first, then defaults, deduped
+        if len(merged) != len(symbols):
+            logger.info(
+                f"Merged screener picks with the default stock_universe list: "
+                f"{len(symbols)} screener + {len(default_list)} default -> {len(merged)} total watched"
+            )
+        symbols = merged
+    elif symbols:
+        # stock_universe is a CANDIDATE POOL, not an auto-include: every name in
+        # it was scored by the screener above (see StockScreener._load_candidates)
+        # and only the ones that earned a place are here. Until 2026-08-21 the
+        # whole 50-name list was appended unconditionally, so 50 of 56 watched
+        # symbols had passed no test at all - and with only ~14 WebSocket slots,
+        # most of what could be traded was running on 15-minute-delayed prices.
         logger.info(
-            f"Merged screener picks with the default stock_universe list: "
-            f"{len(symbols)} screener + {len(default_list)} default -> {len(merged)} total watched"
+            f"Watching the screener's {len(symbols)} picks only "
+            f"(merge_default_universe is off - the {len(default_list)} "
+            f"stock_universe names were scored as candidates, not auto-included)"
         )
-    symbols = merged
+    else:
+        # Screener errored, timed out, or found nothing above min_screener_score.
+        # Fall back to the static list rather than trading nothing - this is the
+        # one case where the unfiltered universe is still better than an empty
+        # watchlist.
+        logger.warning(
+            f"No screener picks to watch - falling back to the {len(default_list)} "
+            f"static stock_universe names so the session still has a watchlist"
+        )
+        symbols = list(dict.fromkeys(default_list))
+
+    _warn_if_watchlist_outruns_the_stream(config, symbols)
 
     logger.info(
         f"Symbol selection: screener_ran={screener_ran}, "
@@ -210,6 +237,46 @@ report_state = {"sent": set(), "seeded": False}
 # default universe sits untouched all session. Everything not streamed still
 # gets prices over REST - the per-symbol fallback was built for exactly this.
 stream_priority = {"symbols": []}
+
+
+def _warn_if_watchlist_outruns_the_stream(config, symbols):
+    """
+    Say plainly how much of the watchlist will run on delayed REST prices.
+
+    The two settings are easy to drift apart: widening the watchlist is a
+    one-line config change, while the WebSocket budget is fixed by the data
+    plan. On 2026-08-21, 59 symbols were watched against 0 streamed slots and
+    the log never once said that 100% of entries were being decided on
+    ~15-minute-old prices.
+    """
+    t = config["trading"]
+    if not t.get("use_websocket_stream", False):
+        logger.info(
+            f"WebSocket stream is OFF - all {len(symbols)} watched symbols use "
+            f"REST prices (~15 min delayed)"
+        )
+        return
+
+    cap = t.get("stream_max_subscriptions", 30)
+    per_symbol = 2 if t.get("use_trade_ticks_for_entry", False) else 1
+    budget = max(1, cap // per_symbol)
+
+    if len(symbols) <= budget:
+        logger.info(
+            f"All {len(symbols)} watched symbols fit the stream budget "
+            f"({budget}) - every tradeable name gets live prices"
+        )
+        return
+
+    on_rest = len(symbols) - budget
+    logger.warning(
+        f"Watchlist ({len(symbols)}) exceeds the stream budget ({budget}): "
+        f"{on_rest} symbol(s), {on_rest / len(symbols) * 100:.0f}% of the "
+        f"watchlist, will trade on REST prices ~15 min delayed. Entry quality "
+        f"on those is the problem measured on 2026-08-20 (losing entries landed "
+        f"at the 87th percentile of the surrounding half-hour). Either shrink "
+        f"num_stocks_to_trade or raise stream_max_subscriptions."
+    )
 
 
 def _set_run_context(config, email_notifier, symbols, price_stream):
@@ -1493,7 +1560,14 @@ def main():
         et = pytz.timezone("America/New_York")
 
         if config["trading"].get("use_daily_screener", False):
-            screener = StockScreener(broker, config["trading"]["candidates_file"])
+            # When the default universe is no longer auto-included, its names
+            # must still be SCORED - otherwise turning the merge off would just
+            # delete 50 candidates instead of making them compete.
+            extra = ([] if config["trading"].get("merge_default_universe", True)
+                     else config["trading"].get("stock_universe", []))
+            screener = StockScreener(
+                broker, config["trading"]["candidates_file"], extra_candidates=extra
+            )
         else:
             screener = None
 

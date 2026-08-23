@@ -10,21 +10,40 @@ logger = logging.getLogger(__name__)
 class StockScreener:
     """Daily pre-market screener to identify high-volatility candidates"""
 
-    def __init__(self, broker, candidates_file="candidates.txt"):
+    def __init__(self, broker, candidates_file="candidates.txt", extra_candidates=()):
         self.broker = broker
-        self.candidates = self._load_candidates(candidates_file)
+        self.candidates = self._load_candidates(candidates_file, extra_candidates)
         self.et = pytz.timezone("America/New_York")
 
-    def _load_candidates(self, file) -> List[str]:
-        """Load candidate symbols from file"""
+    def _load_candidates(self, file, extra=()) -> List[str]:
+        """
+        Candidate pool: candidates_file, plus `extra`.
+
+        `extra` carries stock_universe when merge_default_universe is off. Those
+        names then COMPETE for a place on score instead of being appended to the
+        watchlist unconditionally - which is the whole point of turning the merge
+        off. Skipping this step would silently drop 50 perfectly good candidates
+        from consideration rather than promoting them to earn their spot.
+        """
+        symbols = []
         try:
             with open(file) as f:
                 symbols = [line.strip().upper() for line in f if line.strip()]
-            logger.info(f"Loaded {len(symbols)} candidate symbols")
-            return symbols
         except FileNotFoundError:
             logger.error(f"Candidates file {file} not found")
-            return []
+
+        extra = [str(x).strip().upper() for x in (extra or []) if str(x).strip()]
+        pool = list(dict.fromkeys(symbols + extra))
+
+        if extra:
+            added = len(pool) - len(dict.fromkeys(symbols))
+            logger.info(
+                f"Loaded {len(pool)} candidate symbols "
+                f"({len(dict.fromkeys(symbols))} from {file} + {added} new from stock_universe)"
+            )
+        else:
+            logger.info(f"Loaded {len(pool)} candidate symbols")
+        return pool
 
     def _get_recent_gap(self, symbol) -> float:
         """
