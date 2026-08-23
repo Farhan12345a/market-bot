@@ -212,6 +212,21 @@ report_state = {"sent": set(), "seeded": False}
 stream_priority = {"symbols": []}
 
 
+def _flush_journal_safely(journal):
+    """
+    Last-ditch journal write on an abnormal exit.
+
+    Wrapped because it runs inside except-handlers that are already dealing
+    with a failure: losing the journal is bad, but raising here would mask the
+    original error and skip the daily report as well.
+    """
+    try:
+        if journal is not None:
+            journal.flush(final=True)
+    except Exception as e:
+        logger.error(f"Could not flush the signal journal on shutdown: {e}")
+
+
 def _slot_for_finish(et):
     """
     The scheduled slot a finish_day report should count as having covered.
@@ -711,6 +726,12 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         signal_journal.update_forward_returns(
             lambda sym: (market_data.get_latest_bar(sym, "1Min") or {}).get("close")
         )
+        # Persist anything whose forward horizons have all elapsed. Append-only,
+        # so this is cheap and cannot damage rows already written. Without it the
+        # journal existed purely in memory until finish_day, and any session that
+        # ended by crash, OOM or restart contributed nothing at all - which is
+        # fatal for a dataset whose entire value is accumulating day over day.
+        signal_journal.flush(final=False)
 
         stream = getattr(market_data, "stream", None)
         if stream is not None and not stream_warned:
@@ -1559,12 +1580,14 @@ def main():
         logger.info("Interrupted by user")
         executor.flatten_all_positions()
         executor.save_trades_log()
+        _flush_journal_safely(signal_journal)
         email_notifier.send_daily_summary()
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         try:
             executor.flatten_all_positions()
             executor.save_trades_log()
+            _flush_journal_safely(signal_journal)
             email_notifier.send_daily_summary()
         except:
             pass

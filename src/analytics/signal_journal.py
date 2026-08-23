@@ -111,15 +111,41 @@ class SignalJournal:
 
     # ---- output ----------------------------------------------------------
 
-    def flush(self):
+    def _is_complete(self, entry):
+        """True once every forward horizon for this row has elapsed."""
+        if not self.horizons:
+            return True
+        return datetime.now() - entry["born"] >= timedelta(minutes=max(self.horizons))
+
+    def flush(self, final=True):
         """
-        Write every buffered row to CSV. Rows whose forward horizon never
-        elapsed (signals late in the session) are written with those columns
-        blank rather than dropped - a signal at 09:54 is still a valid
-        observation of what fired and what the bot decided.
+        Write buffered rows to CSV.
+
+        final=True (session end): writes EVERYTHING. Rows whose forward horizon
+        never elapsed - a signal at 09:54 with a 30-minute horizon - are written
+        with those columns blank rather than dropped, because what fired and
+        what the bot decided is a valid observation on its own.
+
+        final=False (during the session): writes only rows whose horizons have
+        ALL elapsed, keeping the rest buffered so their forward returns can
+        still be filled in. Called every poll so a crash, a restart or an OOM
+        kill costs at most the last few minutes of signals instead of the whole
+        day. Until 2026-08-21 flush() ran in exactly one place - finish_day -
+        so any session that did not end cleanly wrote nothing at all.
+
+        Append-only, so incremental writes never risk the rows already on disk.
         """
         if not self.enabled or not self._pending:
             return None
+
+        if final:
+            ready, keep = self._pending, []
+        else:
+            ready = [e for e in self._pending if self._is_complete(e)]
+            keep = [e for e in self._pending if not self._is_complete(e)]
+            if not ready:
+                return None
+
         try:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
             write_header = not os.path.exists(self.path)
@@ -127,14 +153,15 @@ class SignalJournal:
                 writer = csv.DictWriter(f, fieldnames=JOURNAL_FIELDS)
                 if write_header:
                     writer.writeheader()
-                for entry in self._pending:
+                for entry in ready:
                     writer.writerow(entry["row"])
-            self._written += len(self._pending)
-            self._taken_written += sum(1 for e in self._pending if e["row"].get("taken"))
+            self._written += len(ready)
+            self._taken_written += sum(1 for e in ready if e["row"].get("taken"))
             logger.info(
-                f"Wrote {len(self._pending)} signal(s) to {os.path.abspath(self.path)}"
+                f"Wrote {len(ready)} signal(s) to {os.path.abspath(self.path)}"
+                + (f" ({len(keep)} still awaiting forward returns)" if keep else "")
             )
-            self._pending = []
+            self._pending = keep
             return self.path
         except Exception as e:
             logger.error(f"Could not write signal journal: {e}")
