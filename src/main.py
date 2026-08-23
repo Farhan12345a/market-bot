@@ -232,6 +232,8 @@ def _set_run_context(config, email_notifier, symbols, price_stream):
             "price_source": "stream" if streamed else "REST",
             "feed": t.get("websocket_feed", "iex") if streamed else "",
             "symbols_note": f"cap {t.get('stream_max_subscriptions', 30)} subscriptions",
+            "reentry_cooldown_minutes": t.get("reentry_cooldown_minutes", 0),
+            "reentry_cooldown_after_loss_only": t.get("reentry_cooldown_after_loss_only", True),
         }
         logger.info(f"Run context: {email_notifier.run_context}")
     except Exception as e:

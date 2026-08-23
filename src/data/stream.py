@@ -97,15 +97,31 @@ DEFAULT_MAX_SUBSCRIPTIONS = 30
 # two-minute timeout into an immediate, correctly-named failure.
 ALPACA_WS_LOGGER = "alpaca.data.live.websocket"
 
+# Alpaca allows ONE data websocket per account. Two sources of a second one:
+#   1. This process opening a second PriceStream without closing the first -
+#      prevented outright by _ACTIVE_STREAM below.
+#   2. A PREVIOUS process whose socket the server has not reaped yet. A
+#      systemd restart is the common case: the new process can be connecting
+#      while the old connection is still registered. That resolves itself in
+#      seconds, so "connection limit exceeded" is treated as RETRYABLE rather
+#      than fatal - giving up on it would throw away the whole session's live
+#      data over a few seconds of overlap.
+CONNECTION_LIMIT_RETRIES = 4
+CONNECTION_LIMIT_RETRY_DELAY = 15
+
+# The single live stream in this process, if any.
+_ACTIVE_STREAM = None
+_ACTIVE_LOCK = threading.Lock()
+
+# Retried, not given up on - see CONNECTION_LIMIT_RETRIES.
+RETRYABLE_STREAM_ERRORS = ("connection limit exceeded",)
+
 FATAL_STREAM_ERRORS = {
     "symbol limit exceeded": (
         "too many symbols subscribed for this feed - lower "
         "stream_max_subscriptions (bars and trades may each count as one)"
     ),
-    "connection limit exceeded": (
-        "the account already has a data websocket open - another process, or a "
-        "previous run whose socket has not closed yet"
-    ),
+
     "auth failed": "the API key/secret were rejected by the stream endpoint",
     "not authenticated": "the stream endpoint rejected authentication",
     "insufficient subscription": (
@@ -119,17 +135,25 @@ class _StreamErrorWatcher(logging.Handler):
 
     def __init__(self):
         super().__init__(level=logging.ERROR)
-        self.hit = None
+        self.hit = None          # fatal: give up on the stream
+        self.retryable = None    # transient: close, wait, try again
 
     def emit(self, record):
         try:
             text = str(record.getMessage()).lower()
+            for needle in RETRYABLE_STREAM_ERRORS:
+                if needle in text:
+                    self.retryable = record.getMessage()
+                    return
             for needle, explanation in FATAL_STREAM_ERRORS.items():
                 if needle in text:
                     self.hit = (record.getMessage(), explanation)
                     return
         except Exception:
             pass
+
+    def clear_retryable(self):
+        self.retryable = None
 
 
 class PriceStream:
@@ -167,6 +191,7 @@ class PriceStream:
         self._gave_up = False
         self._watchdog = None
         self._error_watcher = None
+        self._connection_attempts = 0
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -214,7 +239,33 @@ class PriceStream:
             logger.info(f"PriceStream on REST: {', '.join(dropped)}")
             requested = kept
 
+        # Only one data websocket per account, so only one per process. If an
+        # earlier PriceStream is still alive - a mid-session re-screen, a retry
+        # path, a future caller that forgets - close it before opening another,
+        # rather than racing it for the account's single slot.
+        global _ACTIVE_STREAM
+        with _ACTIVE_LOCK:
+            previous = _ACTIVE_STREAM
+            _ACTIVE_STREAM = self
+
+        # stop() OUTSIDE the lock. It takes _ACTIVE_LOCK itself, and a plain
+        # Lock is not reentrant, so calling it from inside the critical section
+        # deadlocks the caller - which here is the main trading thread at
+        # session start. Claiming the slot first also means the stop() below
+        # cannot clear the entry we just made: it only clears the slot when it
+        # still points at the stream being stopped.
+        if previous is not None and previous is not self:
+            logger.warning(
+                "PriceStream: another stream is still active - closing it "
+                "first (Alpaca permits one data websocket per account)"
+            )
+            try:
+                previous.stop()
+            except Exception as e:
+                logger.debug(f"Could not stop the previous stream: {e}")
+
         self._symbols = requested
+        self._connection_attempts = 0
         self._error_watcher = _StreamErrorWatcher()
         logging.getLogger(ALPACA_WS_LOGGER).addHandler(self._error_watcher)
         self._stop_requested.clear()
@@ -247,7 +298,38 @@ class PriceStream:
 
             # A named error from alpaca-py beats waiting out the timeout: it
             # arrives in milliseconds and says exactly what is wrong.
-            hit = self._error_watcher.hit if self._error_watcher else None
+            watcher = self._error_watcher
+            retryable = watcher.retryable if watcher else None
+            if retryable:
+                watcher.clear_retryable()
+                self._connection_attempts += 1
+                if self._connection_attempts <= CONNECTION_LIMIT_RETRIES:
+                    logger.warning(
+                        f"PriceStream: {retryable} - the account's single data "
+                        f"websocket is still held, almost always a previous "
+                        f"process whose socket has not been reaped yet. "
+                        f"Retrying in {CONNECTION_LIMIT_RETRY_DELAY}s "
+                        f"(attempt {self._connection_attempts} of "
+                        f"{CONNECTION_LIMIT_RETRIES}). REST is serving prices "
+                        f"meanwhile."
+                    )
+                    self._restart_connection()
+                    # Give the retry its own full grace period rather than
+                    # letting the original no-data timeout expire underneath it.
+                    self._started_at = time.monotonic()
+                    continue
+                logger.error(
+                    f"PriceStream: still cannot get the account's data websocket "
+                    f"after {CONNECTION_LIMIT_RETRIES} attempts ({retryable}). "
+                    f"Another process is holding it - check for a second "
+                    f"market-bot, or an Alpaca dashboard streaming. Running on "
+                    f"REST (~15 min delayed) for this session."
+                )
+                self._gave_up = True
+                self.stop()
+                return
+
+            hit = watcher.hit if watcher else None
             if hit:
                 raw, explanation = hit
                 logger.error(
@@ -277,6 +359,10 @@ class PriceStream:
 
     def stop(self):
         """Signal the background thread to stop and close the connection."""
+        global _ACTIVE_STREAM
+        with _ACTIVE_LOCK:
+            if _ACTIVE_STREAM is self:
+                _ACTIVE_STREAM = None
         self._stop_requested.set()
         if self._error_watcher is not None:
             try:
@@ -290,6 +376,23 @@ class PriceStream:
             except Exception as e:
                 logger.debug(f"Error stopping stream (usually harmless): {e}")
         self._connected = False
+
+    def _restart_connection(self):
+        """
+        Drop the current socket so the supervisor loop reconnects.
+
+        Closes only the connection, NOT the PriceStream: _stop_requested is
+        left clear so _run_forever falls straight into its reconnect branch.
+        Waits out CONNECTION_LIMIT_RETRY_DELAY here so the server has time to
+        release the previous holder's slot.
+        """
+        stream = self._stream
+        if stream is not None:
+            try:
+                stream.stop()
+            except Exception as e:
+                logger.debug(f"Error closing the socket before retry: {e}")
+        self._stop_requested.wait(CONNECTION_LIMIT_RETRY_DELAY)
 
     def _resolve_feed(self):
         """Turn the config feed string into alpaca-py's DataFeed enum."""

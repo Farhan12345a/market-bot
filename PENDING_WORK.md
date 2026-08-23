@@ -206,6 +206,36 @@ anything else.
 
 ---
 
+## 1-MON. AFTER MONDAY'S RUN: settle the subscription-counting question
+
+**Ask this the moment Monday's session ends.** It is worth double the streamed
+coverage and it takes one config change to answer.
+
+`stream_max_subscriptions: 28` assumes bars and trades each count as one
+subscription, so with ticks on only **14 symbols** stream. If Alpaca actually
+counts UNIQUE SYMBOLS, 28 symbols could stream with ticks and half the capacity
+is being wasted.
+
+**How to tell.** In Monday's log, find:
+
+    PriceStream opening iex connection for 14 symbols (28 subscriptions: bars + trades)
+
+- No `symbol limit exceeded` and bars flowing -> the cap works, nothing proven
+  yet about which model is right.
+- Then next session set `stream_max_subscriptions: 56` (= 28 symbols x 2). If
+  it still connects, Alpaca counts unique symbols and the cap can stay there.
+  If the 405 returns, the conservative reading was right - revert to 28.
+
+Either way the failure is now caught in ~2s by name rather than after 120s of
+silence, so testing it costs a couple of seconds, not a session.
+
+**Also review Monday:** whether ticks are worth their halved coverage at all.
+The measured prize was ~$116/day of entry slippage on 2026-08-20 and most of
+that is the 15-minute REST delay, not sub-bar timing. `use_trade_ticks_for_entry:
+false` doubles reach immediately.
+
+---
+
 ## 1a. MONDAY 2026-08-24: poll interval + time-based windows
 
 Do these two together, in this order. The second is a prerequisite, not a

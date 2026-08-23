@@ -259,6 +259,46 @@ class EmailNotifier:
                 f"from {self.report_dir}"
             )
 
+    def _reentry_labels(self, trades):
+        """
+        Label each trade with whether it was a re-entry into a symbol traded
+        earlier the same day, and how long after the previous exit.
+
+        Computed here from the trade list rather than recorded at entry time,
+        so it works on every report ever saved, including past ones. The
+        cooldown (reentry_cooldown_minutes) only gates symbols that just LOST,
+        so this column is how you see whether the setting is doing anything:
+        a "2nd, +6m" row on a 5-minute cooldown was allowed by a hair, and a
+        column with no re-entries at all means the cooldown is longer than the
+        entry window and nothing can ever come back.
+        """
+        labels, seen = {}, {}
+        for trade in sorted(trades, key=lambda x: str(x.get("timestamp", ""))):
+            sym = trade.get("symbol")
+            prev = seen.get(sym)
+            if prev is None:
+                labels[id(trade)] = "1st"
+            else:
+                n = prev["count"] + 1
+                gap = ""
+                try:
+                    t_now = datetime.fromisoformat(str(trade.get("timestamp")))
+                    t_prev = datetime.fromisoformat(str(prev["timestamp"]))
+                    mins = (t_now - t_prev).total_seconds() / 60
+                    gap = f", +{int(mins)}m"
+                except Exception:
+                    pass
+                labels[id(trade)] = f"{self._ordinal(n)}{gap}"
+            seen[sym] = {
+                "count": (prev["count"] + 1) if prev else 1,
+                "timestamp": trade.get("timestamp"),
+            }
+        return labels
+
+    @staticmethod
+    def _ordinal(n):
+        return f"{n}{'th' if 11 <= n % 100 <= 13 else {1:'st',2:'nd',3:'rd'}.get(n % 10, 'th')}"
+
     def _run_context_html(self):
         """
         The band at the top of every report describing HOW the session ran.
@@ -304,6 +344,9 @@ class EmailNotifier:
             cell("Price source",
                  f'<span style="color:{source_color};">{source}</span>',
                  ctx.get("feed", "")),
+            cell("Re-entry cooldown",
+                 f'{ctx.get("reentry_cooldown_minutes", "?")} min',
+                 "after losses only" if ctx.get("reentry_cooldown_after_loss_only") else "after any exit"),
         ]
 
         return (
@@ -465,11 +508,14 @@ class EmailNotifier:
                             <th>Peak (MFE)</th>
                             <th>Trough (MAE)</th>
                             <th>Exit Reason</th>
+                            <th>Re-entry</th>
                             <th>Stop Loss?</th>
                         </tr>
                     </thead>
                     <tbody>
         """
+
+        reentry_labels = self._reentry_labels(trades)
 
         for trade in sorted(trades, key=lambda x: x.get("timestamp", ""), reverse=True):
             symbol = trade.get("symbol", "N/A")
@@ -508,6 +554,7 @@ class EmailNotifier:
                             <td class="profit">{mfe_str}</td>
                             <td class="loss">{mae_str}</td>
                             <td><span class="exit-reason">{exit_reason}</span></td>
+                            <td><span class="exit-reason">{reentry_labels.get(id(trade), "1st")}</span></td>
                             <td>{stop_loss_str}</td>
                         </tr>
             """
