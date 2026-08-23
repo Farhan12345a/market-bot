@@ -69,6 +69,39 @@ def _fetch_nasdaq_earnings(date_str: str, timeout: int) -> List[dict]:
     return rows
 
 
+def _earnings_surprise(row: dict):
+    """
+    Percentage EPS surprise for a row that has already reported, or None.
+
+    Nasdaq exposes `surprise` directly on reported rows, and `eps` /
+    `epsForecast` as fallbacks. Values arrive as strings, sometimes with $ or
+    parentheses for negatives, and are simply absent before a company reports -
+    absent is NOT a miss, so it returns None and the caller decides.
+    """
+    def num(v):
+        if v is None:
+            return None
+        t = str(v).strip().replace("$", "").replace(",", "").replace("%", "")
+        if not t or t in ("N/A", "--", "-"):
+            return None
+        neg = t.startswith("(") and t.endswith(")")
+        if neg:
+            t = t[1:-1]
+        try:
+            return -float(t) if neg else float(t)
+        except ValueError:
+            return None
+
+    direct = num(row.get("surprise"))
+    if direct is not None:
+        return direct
+
+    actual, forecast = num(row.get("eps")), num(row.get("epsForecast"))
+    if actual is None or forecast is None or forecast == 0:
+        return None
+    return (actual - forecast) / abs(forecast) * 100
+
+
 def _report_timing(row: dict) -> str:
     """
     Normalise Nasdaq's timing field to 'bmo' / 'amc' / 'unknown'.
@@ -91,7 +124,7 @@ def fetch_earnings_symbols(now_et: datetime, config: dict) -> Tuple[List[str], D
     Symbols whose earnings are a live catalyst for TODAY's open:
     today's before-the-bell reporters plus yesterday's after-the-bell ones.
 
-    Returns (symbols, {symbol: 'today BMO' | 'prev AMC'}).
+    Returns (symbols, {symbol: label}, {symbol: eps_surprise_pct or None}).
     """
     trading = config["trading"]
     timeout = trading.get("earnings_calendar_timeout_seconds", 20)
@@ -102,7 +135,7 @@ def fetch_earnings_symbols(now_et: datetime, config: dict) -> Tuple[List[str], D
     while prev.weekday() >= 5:
         prev -= timedelta(days=1)
 
-    symbols, why = [], {}
+    symbols, why, surprises = [], {}, {}
 
     for date, wanted, label in (
         (today, "bmo", "today BMO"),
@@ -117,8 +150,10 @@ def fetch_earnings_symbols(now_et: datetime, config: dict) -> Tuple[List[str], D
             if _report_timing(row) != wanted:
                 continue
             if sym not in why:
+                surprise = _earnings_surprise(row)
                 symbols.append(sym)
                 why[sym] = label
+                surprises[sym] = surprise
                 kept += 1
         logger.info(f"Earnings calendar {date} ({wanted.upper()}): {len(rows)} rows -> {kept} usable symbols")
 
@@ -127,7 +162,7 @@ def fetch_earnings_symbols(now_et: datetime, config: dict) -> Tuple[List[str], D
             "Earnings list is empty - either no qualifying reporters, or the "
             "calendar fetch failed. Watchlist is unaffected."
         )
-    return symbols, why
+    return symbols, why, surprises
 
 
 # --------------------------------------------------------------------------
@@ -351,6 +386,56 @@ def rank_top_n(screener, symbols, config, top_n, label, exclude=()) -> List[str]
 # Entry point
 # --------------------------------------------------------------------------
 
+def _filter_earnings_candidates(screener, symbols, why, surprises, config):
+    """
+    Keep only earnings names worth trading at the open: those that BEAT, and
+    that have NOT already made the move.
+
+    The logic behind both halves. A beat is the catalyst - a miss gaps a stock
+    DOWN, and this strategy is long-only, so a missing company is not a
+    candidate at any price. And a name already up 6% pre-market has spent the
+    catalyst: on 2026-08-21 BKE gapped +6.68% and BEKE +5.21%, and those two
+    plus BJ cost -$144.30 on a -$30.78 day. The move to trade is the one that
+    has not happened yet.
+
+    Names whose surprise cannot be read are KEPT, not dropped. Nasdaq often
+    has not published EPS for a before-the-bell reporter by 09:20, and
+    discarding every one of them would empty the list on most mornings. An
+    unknown is an unknown, not a miss.
+    """
+    trading = config["trading"]
+    require_beat = trading.get("earnings_require_beat", True)
+    max_gap = trading.get("earnings_max_gap_pct", 3.0)
+
+    kept = []
+    for sym in symbols:
+        surprise = surprises.get(sym)
+        if require_beat and surprise is not None and surprise <= 0:
+            logger.info(f"  - {sym} skipped: MISSED earnings ({surprise:+.1f}%)")
+            continue
+
+        gap = 0.0
+        try:
+            gap = screener._get_recent_gap(sym) or 0.0
+        except Exception as e:
+            logger.debug(f"Could not read gap for {sym}: {e}")
+
+        if max_gap and gap > max_gap:
+            logger.info(
+                f"  - {sym} skipped: already gapped +{gap:.2f}% "
+                f"(over earnings_max_gap_pct {max_gap}%) - the move is made"
+            )
+            continue
+
+        kept.append(sym)
+
+    logger.info(
+        f"Earnings filter: {len(symbols)} reported -> {len(kept)} tradeable "
+        f"(beat required: {require_beat}, max gap {max_gap}%)"
+    )
+    return kept
+
+
 def augment_symbols(config, screener, existing, now_et=None) -> Tuple[List[str], List[str]]:
     """
     Extend the day's watchlist with the earnings and QQQ lists.
@@ -371,17 +456,25 @@ def augment_symbols(config, screener, existing, now_et=None) -> Tuple[List[str],
     # --- earnings ---------------------------------------------------------
     if trading.get("use_earnings_list", False):
         try:
-            cands, why = fetch_earnings_symbols(now_et, config)
+            cands, why, surprises = fetch_earnings_symbols(now_et, config)
             if cands:
-                logger.info(f"Earnings candidates before ranking: {len(cands)}")
+                logger.info(f"Earnings candidates before filtering: {len(cands)}")
+                cands = _filter_earnings_candidates(
+                    screener, cands, why, surprises, config
+                )
                 picks = rank_top_n(
                     screener, cands, config,
-                    trading.get("earnings_list_top_n", 10),
+                    trading.get("earnings_list_top_n", 3),
                     "EARNINGS LIST",
                     exclude=set(existing) | set(added),
                 )
                 for p in picks:
-                    logger.info(f"  + {p} (earnings: {why.get(p, 'n/a')})")
+                    sp = surprises.get(p)
+                    logger.info(
+                        f"  + {p} (earnings: {why.get(p, 'n/a')}"
+                        + (f", beat by {sp:+.1f}%" if sp is not None else ", surprise unknown")
+                        + ")"
+                    )
                 added.extend(picks)
         except Exception as e:
             logger.error(f"Earnings list failed, continuing without it: {e}", exc_info=True)

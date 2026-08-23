@@ -9,7 +9,7 @@ trading:
   # 6 wins / 12 trades for +$356. In the opening minutes nearly every
   # high-beta name clears rapid_increase_pct at once, so the signal selects
   # "the market opened" rather than any individual stock's strength.
-  entry_window_start: "09:35"        # Start watching candidates for a rapid price rise (HH:MM ET)
+  entry_window_start: "09:33"        # Start watching candidates for a rapid price rise (HH:MM ET)
   entry_window_end: "09:55"          # Stop looking for NEW entries after this time (HH:MM ET). Widened from 09:45.
   # --- Real-time price stream ---
   # Alpaca's free tier delays the REST historical endpoint by ~15 minutes but
@@ -188,7 +188,14 @@ trading:
   # trade's peak is treated as a failed breakout and exits.
   resistance_lookback_samples: 3   # Number of recent price samples checked for the failed-breakout
                                     # pattern (oldest sample = peak, must strictly decline from there)
-  resistance_min_decline_pct: 0.3  # ...AND the drop off that peak must exceed this %. Without a floor
+  # Raised 0.3 -> 0.5 on 2026-08-21 from that day's split. RESISTANCE fired 13
+  # times: the 6 shallow fires (decline < 0.5%) cost -$5.63 between them, while
+  # the 7 real ones carried -$64.83 of genuine deterioration plus HOOD's
+  # +$100.07. So the shallow tier is not losing money - it is closing positions
+  # that had barely moved, before they can become anything. Requiring half a
+  # percent keeps the rule doing its job on real rollovers and stops it
+  # harvesting noise.
+  resistance_min_decline_pct: 0.5  # ...AND the drop off that peak must exceed this %. Without a floor
                                     # the "strictly declining" test is met by a single cent, so the rule
                                     # fired on noise inside the spread - it exited NFLX on -0.08%,
                                     # UBER on -0.11% and ASTS on -0.14% on 2026-08-19, 14 times in all.
@@ -277,7 +284,7 @@ trading:
   # Compare take_profit_pct against the mfe_pct column in trade_history.csv
   # before keeping it past the 08-21 session.
   use_take_profit: true
-  take_profit_pct: 1.0        # gain % that triggers the scale-out
+  take_profit_pct: 1.25        # gain % that triggers the scale-out
   take_profit_fraction: 0.5   # fraction of the ORIGINAL position sold
 
   # --- Exposure caps ---
@@ -346,7 +353,21 @@ trading:
   # Source is Nasdaq's free public earnings calendar (no API key). If it is
   # unreachable the list is simply empty and the watchlist is unchanged.
   use_earnings_list: true
-  earnings_list_top_n: 10
+
+  # Only trade an earnings name that BEAT and has NOT already made the move.
+  #
+  # A miss gaps a stock DOWN and this strategy is long-only, so a company that
+  # missed is not a candidate at any price. A name already up 6% pre-market has
+  # spent its catalyst: on 2026-08-21 BKE gapped +6.68% and BEKE +5.21%, and
+  # those two plus BJ cost -$144.30 on a day that lost $30.78 in total. Without
+  # them the session was PROFITABLE.
+  #
+  # A symbol whose surprise cannot be read is KEPT, not dropped - Nasdaq often
+  # has not published EPS for a before-the-bell reporter by 09:20, and treating
+  # unknown as a miss would empty the list most mornings.
+  earnings_require_beat: true
+  earnings_max_gap_pct: 3.0
+  earnings_list_top_n: 3
   earnings_calendar_timeout_seconds: 20
 
   # QQQ list: the Nasdaq-100 constituents in src/screener/qqq_constituents.txt,

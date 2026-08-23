@@ -315,6 +315,53 @@ class Strategy:
         self.trades[symbol] = TradeManager(symbol, price, qty, self.config)
         logger.info(f"{symbol}: Entered {qty} shares at {price}")
 
+    def correct_entry_price(self, symbol, actual):
+        """
+        Rebase an open position onto the price actually PAID.
+
+        submit_entry_order records the price the signal fired at; the broker's
+        avg_entry_price is what was really paid, and it arrives a poll later.
+        The executor already reconciled its own copy, but until 2026-08-21 it
+        never told the strategy - so every exit rule kept measuring against the
+        signal price for the life of the position.
+
+        That is not a rounding difference. On 2026-08-21 mean adverse slippage
+        was +0.42%, so a "-1.0%" final exit was really firing around -1.4% from
+        the true cost, and MARA's take-profit fired at a genuine +0.07% because
+        12.29 is +1.28% above the signal price of 12.135 but only +0.07% above
+        the 12.2817 actually paid. Stops fired late and profit targets fired
+        early, every time the fill missed.
+
+        The peak/trough trackers are rebased too: they were seeded from the
+        signal price, so a position that gapped away from its signal would
+        otherwise carry a high-water mark it never actually traded at.
+        """
+        if symbol not in self.trades:
+            return False
+        try:
+            actual = float(actual)
+        except (TypeError, ValueError):
+            return False
+        if actual <= 0:
+            return False
+
+        trade = self.trades[symbol]
+        if abs(trade.entry_price - actual) <= 1e-6:
+            return False
+
+        old_price = trade.entry_price
+        trade.entry_price = actual
+        trade.highest_since_entry = max(trade.highest_since_entry, actual)
+        trade.lowest_since_entry = min(trade.lowest_since_entry, actual)
+        trade.highest_price = max(trade.highest_price, actual)
+
+        logger.info(
+            f"{symbol}: exit rules rebased to the actual fill "
+            f"{old_price:.4f} -> {actual:.4f} "
+            f"({(actual - old_price) / old_price * 100:+.2f}%)"
+        )
+        return True
+
     def check_exit(self, symbol, current_bar):
         """
         Check whether `symbol`'s open position should exit, in priority order.

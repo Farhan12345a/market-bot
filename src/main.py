@@ -1476,6 +1476,9 @@ def main():
         market_data = MarketDataManager(broker, stream=price_stream)
         strategy = Strategy(config)
         executor = Executor(broker, config)
+        # So a reconciled fill price reaches the exit rules, not just the
+        # executor's own bookkeeping.
+        executor.on_entry_price_corrected = strategy.correct_entry_price
         reconcile_existing_positions(broker, strategy, executor)
         email_notifier = EmailNotifier(config)
         signal_journal = SignalJournal(config)

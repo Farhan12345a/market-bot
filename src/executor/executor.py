@@ -43,6 +43,9 @@ class Executor:
     """Handles order submission and trade tracking"""
 
     def __init__(self, broker, config):
+        # Set by main to Strategy.correct_entry_price. Optional so the executor
+        # stays usable on its own (and in tests) without a strategy attached.
+        self.on_entry_price_corrected = None
         self.broker = broker
         self.config = config
         # trades_log holds one row PER COMPLETED EXIT - self-contained with
@@ -173,6 +176,15 @@ class Executor:
                         f"({slip_pct:+.2f}% slippage vs the signal price)"
                     )
                     self.open_entries[symbol] = actual
+                    # Tell the strategy too, or every exit rule for this
+                    # position keeps measuring against the signal price.
+                    if self.on_entry_price_corrected is not None:
+                        try:
+                            self.on_entry_price_corrected(symbol, actual)
+                        except Exception as e:
+                            logger.error(
+                                f"Could not rebase {symbol} onto its fill price: {e}"
+                            )
 
             self.daily_pnl = self._compute_daily_pnl(account, positions)
         except Exception as e:
