@@ -381,6 +381,14 @@ def _maybe_send_scheduled_reports(config, email_notifier, strategy, executor, ma
             logger.info(f"Scheduled report for {slot} ET already {int((now-due).total_seconds()/60)} min past at startup - skipping")
             continue
 
+        # Persist the trade log BEFORE reading it back for the report. The
+        # scheduled send used to read whatever was on disk from the last save,
+        # which on 2026-08-21 was a file it could not parse at all.
+        try:
+            executor.save_trades_log()
+        except Exception as e:
+            logger.error(f"Could not save the trade log before the scheduled report: {e}")
+
         open_rows = _open_position_rows(strategy, market_data, et)
         label = "Midday Status" if hh < 16 else "Closing Report"
         logger.info(

@@ -100,10 +100,22 @@ class EmailNotifier:
         try:
             trades = []
             if os.path.exists(trades_file):
-                with open(trades_file) as f:
-                    trades_data = json.load(f)
-                trades = (trades_data if isinstance(trades_data, list)
-                          else trades_data.get("trades", []))
+                # A malformed trades file must not cost the whole report. On
+                # 2026-08-21 the 10:35 Midday Status died outright on
+                # "Expecting value: line 16 column 17" and delivered nothing,
+                # even though the open-position data it also carries was fine
+                # and came from memory, not from this file.
+                try:
+                    with open(trades_file) as f:
+                        trades_data = json.load(f)
+                    trades = (trades_data if isinstance(trades_data, list)
+                              else trades_data.get("trades", []))
+                except (ValueError, OSError) as e:
+                    logger.error(
+                        f"Could not parse {trades_file} ({e}) - reporting open "
+                        f"positions only. The closed-trade table will be empty "
+                        f"for this send; the file is rewritten at the next save."
+                    )
             else:
                 logger.warning(f"No trades file found: {trades_file}")
 
