@@ -200,7 +200,18 @@ trading:
   # bought straight back into the same decline: RGTI -$340 over 4 exits,
   # MRVL -$328 over 3, CLSK -$238 over 4, PLUG -$137, UPST -$134.
   # Set 0 to disable.
-  reentry_cooldown_minutes: 20
+  # Lowered from 20 to 5 on 2026-08-21. The cooldown exists to stop the bot
+  # re-buying a name it just stopped out of while the same failed move is still
+  # unwinding - real, but 20 minutes was sized for a 59-symbol watchlist where
+  # there was always another candidate. With the stream capped to ~14 symbols,
+  # a 20-minute lockout on a 20-minute entry window means one bad entry
+  # retires that symbol for the entire session.
+  #
+  # NOT set to 0. On 2026-08-19 the bot re-entered the same losing names
+  # repeatedly inside a few minutes; with reentry_cooldown_after_loss_only
+  # true, this only ever gates a symbol that just LOST, and 5 minutes is
+  # enough for the immediate post-stop churn to settle.
+  reentry_cooldown_minutes: 5
   reentry_cooldown_after_loss_only: true  # false = cool down after ANY exit. Left true because
                                            # re-entering a name that just PAID was profitable that
                                            # day (UBER +$190 over 2, CHWY +$159 over 4, CMG +$109

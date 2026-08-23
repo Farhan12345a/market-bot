@@ -88,6 +88,49 @@ NO_DATA_GIVE_UP_SECONDS = 120
 # which is exactly what the fallback was built to do per-symbol anyway.
 DEFAULT_MAX_SUBSCRIPTIONS = 30
 
+# alpaca-py reports fatal subscription problems by LOGGING them on its own
+# logger and then sitting there - it does not raise, and run() does not return.
+# On 2026-08-21 `error: symbol limit exceeded (405)` was printed 258ms after
+# connect, and this class could not see it: the watchdog spent its full 120s
+# inferring the failure from silence, then blamed the wrong cause ("likely an
+# Alpaca connection limit") in the log. Watching their logger turns a silent
+# two-minute timeout into an immediate, correctly-named failure.
+ALPACA_WS_LOGGER = "alpaca.data.live.websocket"
+
+FATAL_STREAM_ERRORS = {
+    "symbol limit exceeded": (
+        "too many symbols subscribed for this feed - lower "
+        "stream_max_subscriptions (bars and trades may each count as one)"
+    ),
+    "connection limit exceeded": (
+        "the account already has a data websocket open - another process, or a "
+        "previous run whose socket has not closed yet"
+    ),
+    "auth failed": "the API key/secret were rejected by the stream endpoint",
+    "not authenticated": "the stream endpoint rejected authentication",
+    "insufficient subscription": (
+        "this feed is not included in the account's data plan"
+    ),
+}
+
+
+class _StreamErrorWatcher(logging.Handler):
+    """Records fatal errors alpaca-py only ever logs."""
+
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self.hit = None
+
+    def emit(self, record):
+        try:
+            text = str(record.getMessage()).lower()
+            for needle, explanation in FATAL_STREAM_ERRORS.items():
+                if needle in text:
+                    self.hit = (record.getMessage(), explanation)
+                    return
+        except Exception:
+            pass
+
 
 class PriceStream:
     """
@@ -123,6 +166,7 @@ class PriceStream:
         self._started_at = None
         self._gave_up = False
         self._watchdog = None
+        self._error_watcher = None
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -171,6 +215,8 @@ class PriceStream:
             requested = kept
 
         self._symbols = requested
+        self._error_watcher = _StreamErrorWatcher()
+        logging.getLogger(ALPACA_WS_LOGGER).addHandler(self._error_watcher)
         self._stop_requested.clear()
         self._gave_up = False
         self._started_at = time.monotonic()
@@ -193,11 +239,27 @@ class PriceStream:
         retry loop from hammering an endpoint that is refusing us, since the
         supervisor below cannot see that happening from outside run().
         """
-        while not self._stop_requested.wait(10):
+        while not self._stop_requested.wait(2):
             with self._lock:
                 received = self._bars_received
             if received:
                 return  # data is flowing; nothing to police
+
+            # A named error from alpaca-py beats waiting out the timeout: it
+            # arrives in milliseconds and says exactly what is wrong.
+            hit = self._error_watcher.hit if self._error_watcher else None
+            if hit:
+                raw, explanation = hit
+                logger.error(
+                    f"PriceStream FATAL: the feed rejected this subscription - "
+                    f"{explanation}. Alpaca said: \"{raw}\". Giving up on the "
+                    f"stream for this session and running on REST (~15 min "
+                    f"delayed). Trading continues normally on the fallback."
+                )
+                self._gave_up = True
+                self.stop()
+                return
+
             if time.monotonic() - self._started_at < NO_DATA_GIVE_UP_SECONDS:
                 continue
 
@@ -216,6 +278,11 @@ class PriceStream:
     def stop(self):
         """Signal the background thread to stop and close the connection."""
         self._stop_requested.set()
+        if self._error_watcher is not None:
+            try:
+                logging.getLogger(ALPACA_WS_LOGGER).removeHandler(self._error_watcher)
+            except Exception:
+                pass
         stream = self._stream
         if stream is not None:
             try:
@@ -258,10 +325,23 @@ class PriceStream:
                     self._api_key, self._api_secret, feed=feed
                 )
                 self._stream.subscribe_bars(self._on_bar, *self._symbols)
+                subs = len(self._symbols)
                 if self._subscribe_trades:
                     self._stream.subscribe_trades(self._on_trade, *self._symbols)
+                    subs *= 2
+                # NOT "connected" yet. subscribe_bars/subscribe_trades only
+                # register local handlers; no network I/O has happened. Saying
+                # "connected" here is what made the 2026-08-21 log read
+                # "PriceStream connected, subscribed to 59 symbols" 258ms
+                # BEFORE the feed rejected those 59 symbols outright.
                 self._connected = True
-                logger.info(f"PriceStream connected, subscribed to {len(self._symbols)} symbols")
+                logger.info(
+                    f"PriceStream opening {self._feed} connection for "
+                    f"{len(self._symbols)} symbols "
+                    f"({subs} subscriptions: bars"
+                    f"{' + trades' if self._subscribe_trades else ''}) - "
+                    f"waiting for the first bar to confirm it works"
+                )
                 self._stream.run()  # blocks until the connection drops
             except Exception as e:
                 logger.error(f"PriceStream connection error: {e}")
