@@ -49,6 +49,13 @@ class EmailNotifier:
         # other channel with it.
         self.senders = build_senders(config)
 
+        # Run context for the report header - what data path this session
+        # actually used. Set by main once the symbol list and stream state are
+        # known. Every documented test run needs this to be comparable to the
+        # next one; "was this on ticks or bar closes, and over how many
+        # symbols?" is not answerable after the fact from P&L alone.
+        self.run_context = {}
+
         if not self.enabled:
             logger.info("Email notifications disabled (daily report will still be saved to disk)")
             return
@@ -165,9 +172,15 @@ class EmailNotifier:
             win_rate = (wins / n * 100) if n else 0.0
 
             ranked = sorted(closed, key=lambda t: float(t.get("pl") or 0))
-            lines = [
-                f"P&L ${pl:+,.2f} on {n} round-trips, {win_rate:.0f}% win rate",
-            ]
+            ctx = self.run_context or {}
+            lines = []
+            if ctx:
+                lines.append(
+                    f"[{ctx.get('symbols_streamed', 0)}/{ctx.get('symbols_watched', 0)} streamed, "
+                    f"ticks {'ON' if ctx.get('trade_ticks') else 'OFF'}, "
+                    f"{ctx.get('price_source', '?')}]"
+                )
+            lines.append(f"P&L ${pl:+,.2f} on {n} round-trips, {win_rate:.0f}% win rate")
             if ranked:
                 best, worst = ranked[-1], ranked[0]
                 lines.append(f"Best  {best.get('symbol','?')} ${float(best.get('pl') or 0):+,.2f}")
@@ -246,6 +259,60 @@ class EmailNotifier:
                 f"from {self.report_dir}"
             )
 
+    def _run_context_html(self):
+        """
+        The band at the top of every report describing HOW the session ran.
+
+        Deliberately first, above the P&L. Comparing two days' results is
+        meaningless without knowing whether prices arrived by stream or by
+        15-minute-delayed REST, whether entries used trade ticks or bar closes,
+        and across how many symbols - and none of that is recoverable from the
+        numbers afterwards.
+        """
+        ctx = self.run_context or {}
+        if not ctx:
+            return ""
+
+        def cell(label, value, note=""):
+            return (
+                '<td style="padding:10px 14px;vertical-align:top;">'
+                f'<div style="font-size:11px;color:#6b7280;text-transform:uppercase;'
+                f'letter-spacing:.04em;">{label}</div>'
+                f'<div style="font-size:16px;font-weight:600;">{value}</div>'
+                + (f'<div style="font-size:11px;color:#6b7280;">{note}</div>' if note else "")
+                + '</td>'
+            )
+
+        streamed = ctx.get("symbols_streamed")
+        watched = ctx.get("symbols_watched")
+        rest = ctx.get("symbols_rest")
+        ticks = ctx.get("trade_ticks")
+        source = ctx.get("price_source", "unknown")
+
+        source_color = {"stream": "#10b981", "REST (stream failed)": "#ef4444",
+                        "REST": "#6b7280"}.get(source, "#6b7280")
+
+        cells = [
+            cell("Total symbols", watched if watched is not None else "n/a",
+                 ctx.get("symbols_note", "")),
+            cell("Streamed live",
+                 f"{streamed} of {watched}" if streamed is not None else "0",
+                 f"{rest} on REST" if rest is not None else ""),
+            cell("Trade ticks",
+                 "ON" if ticks else "OFF",
+                 "entry detection" if ticks else "bar closes only"),
+            cell("Price source",
+                 f'<span style="color:{source_color};">{source}</span>',
+                 ctx.get("feed", "")),
+        ]
+
+        return (
+            '<div style="background:#f5f7fa;border-left:4px solid #1a1f2e;'
+            'border-radius:8px;margin-bottom:20px;overflow-x:auto;">'
+            '<table style="width:100%;border-collapse:collapse;">'
+            '<tr>' + "".join(cells) + '</tr></table></div>'
+        )
+
     def _open_positions_html(self, open_positions):
         """
         The open-positions table for a mid-session report.
@@ -303,6 +370,7 @@ class EmailNotifier:
         # Color coding
         pl_color = "#10b981" if total_pl >= 0 else "#ef4444"
 
+        run_context_html = self._run_context_html()
         open_positions_html = self._open_positions_html(open_positions)
         unrealized_pl = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
 
@@ -370,6 +438,7 @@ class EmailNotifier:
                         <div class="value">{len(winning_trades)} / {len(losing_trades)}</div>
                     </div>
                 </div>
+                {run_context_html}
                 {open_summary_html}
 
                 <div style="background:#f5f7fa;border-left:4px solid #6366f1;padding:12px 15px;border-radius:8px;margin-bottom:20px;">

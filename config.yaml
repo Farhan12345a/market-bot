@@ -48,7 +48,7 @@ trading:
   #
   # Priority goes to the screener's picks and the day's earnings/QQQ adds; the
   # static universe fills whatever is left.
-  stream_max_subscriptions: 30
+  stream_max_subscriptions: 28
   websocket_feed: "iex"   # iex = free tier. sip requires a paid subscription.
 
   # Subscribe to live TRADES as well as bars, and use the latest tick as the

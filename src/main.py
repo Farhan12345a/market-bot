@@ -212,6 +212,49 @@ report_state = {"sent": set(), "seeded": False}
 stream_priority = {"symbols": []}
 
 
+def _set_run_context(config, email_notifier, symbols, price_stream):
+    """
+    Record HOW this session is running, for the band at the top of every report.
+
+    Captured at session start rather than at report time so it reflects what was
+    actually configured, and refreshed by _refresh_run_context once the stream
+    has had a chance to fail - a session that started on the stream and fell
+    back to REST at 09:32 must not report itself as a streamed session.
+    """
+    t = config["trading"]
+    try:
+        streamed = len(price_stream._symbols) if price_stream is not None else 0
+        email_notifier.run_context = {
+            "symbols_watched": len(symbols),
+            "symbols_streamed": streamed,
+            "symbols_rest": len(symbols) - streamed,
+            "trade_ticks": bool(t.get("use_trade_ticks_for_entry", False)) and streamed > 0,
+            "price_source": "stream" if streamed else "REST",
+            "feed": t.get("websocket_feed", "iex") if streamed else "",
+            "symbols_note": f"cap {t.get('stream_max_subscriptions', 30)} subscriptions",
+        }
+        logger.info(f"Run context: {email_notifier.run_context}")
+    except Exception as e:
+        logger.debug(f"Could not build run context: {e}")
+
+
+def _refresh_run_context(email_notifier, price_stream):
+    """Downgrade the run context to REST if the stream gave up mid-session."""
+    try:
+        if price_stream is None or not email_notifier.run_context:
+            return
+        if getattr(price_stream, "_gave_up", False):
+            ctx = email_notifier.run_context
+            if ctx.get("price_source") != "REST (stream failed)":
+                ctx["price_source"] = "REST (stream failed)"
+                ctx["symbols_streamed"] = 0
+                ctx["symbols_rest"] = ctx.get("symbols_watched", 0)
+                ctx["trade_ticks"] = False
+                logger.info("Run context downgraded: the stream gave up, this session is REST")
+    except Exception as e:
+        logger.debug(f"Could not refresh run context: {e}")
+
+
 def _flush_journal_safely(journal):
     """
     Last-ditch journal write on an abnormal exit.
@@ -732,6 +775,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         # ended by crash, OOM or restart contributed nothing at all - which is
         # fatal for a dataset whose entire value is accumulating day over day.
         signal_journal.flush(final=False)
+        _refresh_run_context(email_notifier, getattr(market_data, "stream", None))
 
         stream = getattr(market_data, "stream", None)
         if stream is not None and not stream_warned:
@@ -1513,6 +1557,8 @@ def main():
                 # decided until the screener has run.
                 if price_stream is not None:
                     price_stream.start(symbols, priority=stream_priority["symbols"])
+
+                _set_run_context(config, email_notifier, symbols, price_stream)
 
                 logger.info("Market is open, monitoring for signals...")
                 try:
