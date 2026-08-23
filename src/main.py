@@ -131,7 +131,24 @@ def select_symbols(config, screener, market_data):
     if not symbols and screener_ran and not screener_timed_out:
         logger.warning("Screener produced no candidates")
 
-    stream_priority["symbols"] = list(symbols)   # screener picks, before the merge
+    # Stream slots are scarce (~14) and must go to the names most likely to
+    # produce the move the strategy is built to catch - not to whichever symbol
+    # sorts first. screen() already returns picks in descending score order, so
+    # that order IS the merit order; fall back to list order if scores are
+    # unavailable (screener disabled, crashed, or fell back to the static list).
+    screener_details.clear()
+    if screener is not None:
+        screener_details.update(getattr(screener, "last_details", None) or {})
+
+    by_merit = list(symbols)
+    ranked = getattr(screener, "last_scores", None) if screener is not None else None
+    if ranked:
+        by_merit = sorted(symbols, key=lambda s_: ranked.get(s_, 0), reverse=True)
+        logger.info(
+            "Stream priority (best first): "
+            + ", ".join(f"{s_}={ranked.get(s_, 0):.0f}" for s_ in by_merit[:14])
+        )
+    stream_priority["symbols"] = by_merit
     default_list = config["trading"]["stock_universe"]
     merge_default = config["trading"].get("merge_default_universe", True)
 
@@ -237,6 +254,23 @@ report_state = {"sent": set(), "seeded": False}
 # default universe sits untouched all session. Everything not streamed still
 # gets prices over REST - the per-symbol fallback was built for exactly this.
 stream_priority = {"symbols": []}
+
+# Per-symbol screener detail from this session's run, so the signal journal can
+# record what the screener SAW about a symbol next to what the signal did. Held
+# at module scope for the same reason as stream_priority: it is produced in
+# select_symbols and consumed deep in the trading loop, and threading it through
+# every call between the two would touch a lot of well-tested signatures.
+screener_details = {}
+
+
+def _opening_move_fields(details_by_symbol, symbol):
+    """Opening-move stats for the journal row, or blanks if unavailable."""
+    d = (details_by_symbol or {}).get(symbol) or {}
+    return {
+        "opening_hit_rate": d.get("opening_hit_rate"),
+        "opening_avg_gain": d.get("opening_avg_gain"),
+        "opening_sessions": d.get("opening_sessions"),
+    }
 
 
 def _warn_if_watchlist_outruns_the_stream(config, symbols):
@@ -1151,6 +1185,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     rvol=_compute_rvol(cand["bar"], volume_history[symbol]),
                     spread_pct=_spread_pct(market_data, symbol, price),
                     burst_width=burst_width,
+                    **_opening_move_fields(screener_details, symbol),
                     taken=taken, skip_reason=skip_reason,
                     qty=None, size_multiplier=burst_size,
                 )
@@ -1546,6 +1581,7 @@ def main():
         # So a reconciled fill price reaches the exit rules, not just the
         # executor's own bookkeeping.
         executor.on_entry_price_corrected = strategy.correct_entry_price
+        executor.entry_price_source = market_data.entry_price_source
         reconcile_existing_positions(broker, strategy, executor)
         email_notifier = EmailNotifier(config)
         signal_journal = SignalJournal(config)
@@ -1566,7 +1602,8 @@ def main():
             extra = ([] if config["trading"].get("merge_default_universe", True)
                      else config["trading"].get("stock_universe", []))
             screener = StockScreener(
-                broker, config["trading"]["candidates_file"], extra_candidates=extra
+                broker, config["trading"]["candidates_file"],
+                extra_candidates=extra, config=config,
             )
         else:
             screener = None

@@ -10,10 +10,15 @@ logger = logging.getLogger(__name__)
 class StockScreener:
     """Daily pre-market screener to identify high-volatility candidates"""
 
-    def __init__(self, broker, candidates_file="candidates.txt", extra_candidates=()):
+    def __init__(self, broker, candidates_file="candidates.txt", extra_candidates=(), config=None):
         self.broker = broker
+        # Trading config, for the tunables the newer scoring components read.
+        # Defaults to {} so the screener stays constructible standalone.
+        self.config = (config or {}).get("trading", config or {})
         self.candidates = self._load_candidates(candidates_file, extra_candidates)
         self.et = pytz.timezone("America/New_York")
+        self.last_scores = {}
+        self.last_details = {}
 
     def _load_candidates(self, file, extra=()) -> List[str]:
         """
@@ -262,6 +267,92 @@ class StockScreener:
             logger.debug(f"Error calculating volatility for {symbol}: {e}")
             return 50
 
+    def get_opening_move_stats(self, symbol):
+        """
+        How this symbol has actually behaved in the first N minutes of recent
+        sessions - the single most direct measure of "does this name do the
+        thing my entry logic is looking for".
+
+        Returns a dict:
+            sessions     how many past opens were measurable
+            hit_rate     fraction of them that reached opening_move_target_pct
+            avg_max_gain mean best gain from the opening price, in %
+            best         largest single-session gain seen
+
+        Everything else in score_stock is a PROXY for this - gap says a catalyst
+        exists, volatility says the name can move, volume says people are
+        present. This measures the outcome those proxies are trying to predict.
+
+        One request per symbol covers the whole lookback, because the minute
+        bars for several days come back together. Bars are grouped by ET
+        calendar date and each session is measured from its own 09:30 open, so a
+        holiday or half day simply contributes fewer sessions rather than
+        corrupting the average.
+
+        CAUTION, and it is the reason this is configurable and separately
+        weighted: "patterns repeat" is a hypothesis, not a fact. Five
+        observations per symbol is thin, and a name that popped four mornings
+        running may reflect a hot sector that week rather than anything durable.
+        Gap looked compelling on the same reasoning and turned out to be
+        NEGATIVE at the tail (MRVL: largest gap of 2026-08-19, second-worst
+        symbol). The stats are logged to the signal journal whether or not they
+        are scored, so the claim can be tested against forward returns rather
+        than assumed.
+        """
+        empty = {"sessions": 0, "hit_rate": 0.0, "avg_max_gain": 0.0, "best": 0.0}
+        try:
+            lookback = self.config.get("opening_move_lookback_days", 5)
+            window = self.config.get("opening_move_window_minutes", 30)
+            target = self.config.get("opening_move_target_pct", 1.0)
+
+            end = datetime.now(self.et).date()
+            # Calendar days, widened for weekends/holidays so `lookback`
+            # TRADING sessions actually come back.
+            start = end - timedelta(days=max(lookback * 2 + 5, 10))
+
+            bars = self.broker.get_historical_bars(symbol, start, end, "1Min")
+            if symbol not in bars or bars[symbol].empty:
+                return empty
+
+            df = bars[symbol].copy().sort_values("timestamp")
+            ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            df = df[ts.notna()]
+            if df.empty:
+                return empty
+            df["_et"] = ts[ts.notna()].dt.tz_convert(self.et)
+            df["_date"] = df["_et"].dt.date
+            df["_mins"] = df["_et"].dt.hour * 60 + df["_et"].dt.minute
+
+            open_min = 9 * 60 + 30
+            gains = []
+            for day, chunk in df.groupby("_date"):
+                # Regular session only: pre- and post-market prints would
+                # otherwise supply the "opening" price.
+                sess = chunk[(chunk["_mins"] >= open_min) &
+                             (chunk["_mins"] < open_min + window)]
+                if sess.empty:
+                    continue
+                first = float(sess.iloc[0]["open"])
+                if first <= 0:
+                    continue
+                peak = float(sess["high"].max())
+                gains.append((peak - first) / first * 100)
+
+            gains = gains[-lookback:]          # most recent N sessions
+            if not gains:
+                return empty
+
+            hits = sum(1 for g in gains if g >= target)
+            return {
+                "sessions": len(gains),
+                "hit_rate": hits / len(gains),
+                "avg_max_gain": sum(gains) / len(gains),
+                "best": max(gains),
+            }
+        except Exception as e:
+            logger.debug(f"Opening-move stats failed for {symbol}: {e}")
+            return empty
+
     def _has_earnings_nearby(self, symbol) -> bool:
         """Check if stock has earnings in the next 5 days"""
         try:
@@ -350,10 +441,43 @@ class StockScreener:
             details["volatility_percentile"] = vol_percentile
             details["volatility_score"] = vol_rank_score
 
+            # Opening-move history (configurable points, default 15).
+            # Off by default in code; config turns it on. Scored SEPARATELY from
+            # the four proxies above rather than replacing any of them, so its
+            # contribution is measurable in isolation - and so it can be zeroed
+            # without disturbing the rest if the pattern does not hold up.
+            om = self.get_opening_move_stats(symbol)
+            details["opening_sessions"] = om["sessions"]
+            details["opening_hit_rate"] = om["hit_rate"]
+            details["opening_avg_gain"] = om["avg_max_gain"]
+            details["opening_best"] = om["best"]
+
+            opening_score = 0
+            if self.config.get("use_opening_move_score", False) and om["sessions"]:
+                max_pts = self.config.get("opening_move_points", 15)
+                # Hit rate carries two thirds, average size one third. Frequency
+                # matters more than magnitude here: the strategy needs the move
+                # to HAPPEN inside a 20-minute entry window, and one huge day
+                # among four flat ones is not a tradeable pattern.
+                target = self.config.get("opening_move_target_pct", 1.0)
+                size_component = min(1.0, om["avg_max_gain"] / target) if target else 0
+                opening_score = max_pts * (om["hit_rate"] * 0.67 + size_component * 0.33)
+
+                # Thin evidence is discounted rather than trusted: with fewer
+                # sessions than asked for, the estimate is noisier and gets
+                # proportionally less weight.
+                wanted = self.config.get("opening_move_lookback_days", 5)
+                if om["sessions"] < wanted:
+                    opening_score *= om["sessions"] / wanted
+
+            score += opening_score
+            details["opening_score"] = opening_score
+
             # Price check (filter only)
             price = self._get_price(symbol)
             details["price"] = price
 
+            details["score"] = score
             return score, details
 
         except Exception as e:
@@ -388,6 +512,10 @@ class StockScreener:
 
         # Sort by score
         sorted_stocks = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        # Kept so callers can order by merit rather than by list position -
+        # notably which symbols get the scarce WebSocket slots.
+        self.last_scores = dict(sorted_stocks)
+        self.last_details = details_dict
 
         # Filter by minimum score and take top N
         selected = [
@@ -407,6 +535,9 @@ class StockScreener:
                 f"Gap: {details['gap_pct']:5.1f}% | "
                 f"5d Return: {details['5day_return_pct']:6.1f}% | "
                 f"Vol Ratio: {details['volume_ratio']:4.2f}x | "
+                f"Open30: {details.get('opening_hit_rate', 0) * 100:3.0f}% hit / "
+                f"{details.get('opening_avg_gain', 0):+4.2f}% avg "
+                f"({details.get('opening_sessions', 0)}d) | "
                 f"Price: ${details['price']:7.2f}"
             )
 

@@ -46,6 +46,9 @@ class Executor:
         # Set by main to Strategy.correct_entry_price. Optional so the executor
         # stays usable on its own (and in tests) without a strategy attached.
         self.on_entry_price_corrected = None
+        # Set by main to MarketDataManager.entry_price_source, so each fill
+        # records whether it was priced live or from delayed REST data.
+        self.entry_price_source = None
         self.broker = broker
         self.config = config
         # trades_log holds one row PER COMPLETED EXIT - self-contained with
@@ -282,7 +285,7 @@ class Executor:
 
         return True, ""
 
-    def record_entry_meta(self, symbol, method, rsi, entry_time=None):
+    def record_entry_meta(self, symbol, method, rsi, entry_time=None, price_source=None):
         """
         Record how/when a position was opened, independent of open_entries
         (which only holds price and is read by the P&L calc). Called for
@@ -294,6 +297,12 @@ class Executor:
             "method": method,
             "rsi": rsi,
             "entry_time": entry_time or datetime.now().isoformat(),
+            # Which data path priced this entry: "tick"/"stream bar" (live) or
+            # "REST" (~15 min delayed). With only ~14 stream slots against a
+            # larger watchlist, both happen in the same session, and until this
+            # existed there was no way to tell the two apart after the fact -
+            # so the stream's actual effect on fill quality was unmeasurable.
+            "price_source": price_source or "unknown",
         }
 
     def submit_entry_order(self, symbol, qty, price=None, entry_method=None, entry_rsi=None):
@@ -317,7 +326,10 @@ class Executor:
             return None
 
         self.open_entries[symbol] = price
-        self.record_entry_meta(symbol, method=entry_method or "UNKNOWN", rsi=entry_rsi)
+        self.record_entry_meta(
+            symbol, method=entry_method or "UNKNOWN", rsi=entry_rsi,
+            price_source=(self.entry_price_source(symbol) if self.entry_price_source else None),
+        )
 
         self.order_history.append({
             "timestamp": datetime.now().isoformat(),
@@ -398,6 +410,7 @@ class Executor:
                 "entry_price": entry_price,
                 "entry_method": meta.get("method"),
                 "burst_logic": meta.get("burst_logic") or "n/a",
+                "price_source": meta.get("price_source") or "unknown",
                 # Max favorable / adverse excursion: the best and worst
                 # unrealized moves this position saw before closing. Purely
                 # observational, but they answer a question the exit reason
@@ -616,7 +629,7 @@ class Executor:
             return
 
         fieldnames = [
-            "date", "symbol", "entry_time", "entry_price", "entry_method", "burst_logic", "entry_rsi",
+            "date", "symbol", "entry_time", "entry_price", "entry_method", "burst_logic", "price_source", "entry_rsi",
             "mfe_pct", "mae_pct",
             "exit_time", "exit_price", "exit_reason", "stop_loss_used", "exit_rsi",
             "qty", "pl", "pl_pct",

@@ -511,6 +511,7 @@ class EmailNotifier:
                             <th>Entry</th>
                             <th>Entry Method</th>
                             <th>Bursting Logic</th>
+                            <th>Price Source</th>
                             <th>Entry RSI</th>
                             <th>Exit</th>
                             <th>Exit RSI</th>
@@ -539,6 +540,7 @@ class EmailNotifier:
             exit_reason = trade.get("exit_reason", "Unknown")
             entry_method = trade.get("entry_method") or "N/A"
             burst_logic = trade.get("burst_logic") or "n/a"
+            price_source = trade.get("price_source") or "unknown"
             mfe, mae = trade.get("mfe_pct"), trade.get("mae_pct")
             mfe_str = f"{mfe:+.2f}%" if isinstance(mfe, (int, float)) else "N/A"
             mae_str = f"{mae:+.2f}%" if isinstance(mae, (int, float)) else "N/A"
@@ -557,6 +559,7 @@ class EmailNotifier:
                             <td>${entry_price:.2f}</td>
                             <td><span class="exit-reason">{entry_method}</span></td>
                             <td><span class="exit-reason">{burst_logic}</span></td>
+                            <td><span class="exit-reason">{price_source}</span></td>
                             <td>{entry_rsi_str}</td>
                             <td>${exit_price:.2f}</td>
                             <td>{exit_rsi_str}</td>

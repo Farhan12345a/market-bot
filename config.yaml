@@ -341,6 +341,37 @@ trading:
                                  # Leave enough headroom for screener_timeout_seconds below.
   candidates_file: "candidates.txt"  # File with candidate symbols
   num_stocks_to_trade: 15  # Number of top stocks to select each day
+  # ---------------------------------------------------------------------
+  # Opening-move history (added 2026-08-21)
+  # ---------------------------------------------------------------------
+  # Scores a symbol on how it has ACTUALLY behaved in the first N minutes of
+  # recent sessions, rather than on proxies for it. Gap says a catalyst exists,
+  # volatility says the name can move, volume says people are present - this
+  # measures the outcome all three are trying to predict: did this stock
+  # actually run in the first half hour, and how often.
+  #
+  # Costs one extra API call per symbol (minute bars for the whole lookback
+  # arrive in a single request), roughly +15% screening time.
+  #
+  # TREAT THE WEIGHT AS PROVISIONAL. "Patterns repeat" is a hypothesis. Five
+  # observations per symbol is thin evidence, and a name that popped four
+  # mornings running may reflect a hot sector that week rather than anything
+  # durable. Gap looked equally compelling and turned out NEGATIVE at the tail
+  # (MRVL had the largest gap of 2026-08-19 and was the second-worst symbol).
+  # The stats are written to the signal journal whether or not they are scored,
+  # so after ~2 weeks the claim can be checked against forward returns. If it
+  # does not hold, set opening_move_points to 0 - nothing else changes.
+  # Stream slots go to the HIGHEST-SCORING symbols, not to whichever sorts
+  # first. Those slots are the difference between a live price and a
+  # ~15-minute-old one, so they belong to the names most likely to produce the
+  # move this whole strategy exists to catch.
+  use_opening_move_score: true
+  opening_move_lookback_days: 5      # how many recent SESSIONS to measure
+  opening_move_window_minutes: 30    # minutes after 09:30 ET to look inside
+  opening_move_target_pct: 1.0       # a session "hits" if it gains this much
+  opening_move_points: 15            # max points (other components: 25/25/20/20)
+                                     # 0 disables scoring but keeps the logging
+
   min_screener_score: 35  # Minimum score to trade (0-100)
   screener_timeout_seconds: 420  # 7 min hard cap on the screener. With ~50+ candidates,
                                   # each scored via several sequential API calls (including

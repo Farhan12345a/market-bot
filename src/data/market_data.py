@@ -19,7 +19,8 @@ class MarketDataManager:
         self.stream = stream
         self._stream_hits = 0
         self._rest_fallbacks = 0
-        self._tick_entries = 0   # entry prices taken from a live trade
+        self._tick_entries = 0
+        self._last_entry_source = {}   # entry prices taken from a live trade
         self._bar_entries = 0    # entry prices that fell back to the bar close
 
     def get_20day_avg_volume(self, symbol):
@@ -167,9 +168,26 @@ class MarketDataManager:
             tick = self.stream.get_last_trade_price(symbol)
             if tick:
                 self._tick_entries += 1
+                self._last_entry_source[symbol] = "tick"
                 return tick
         self._bar_entries += 1
+        # A bar close can still have come from the stream. The distinction that
+        # matters for judging a fill is live-vs-delayed, not tick-vs-bar: with a
+        # ~14-symbol budget most of the watchlist is priced by REST at ~15
+        # minutes old, and there was previously no way to tell which trades
+        # those were.
+        streamed = False
+        if self.stream is not None:
+            try:
+                streamed = self.stream.get_bar(symbol) is not None
+            except Exception:
+                streamed = False
+        self._last_entry_source[symbol] = "stream bar" if streamed else "REST"
         return (bar or {}).get("close", 0)
+
+    def entry_price_source(self, symbol):
+        """How `symbol`'s most recent entry price was obtained."""
+        return self._last_entry_source.get(symbol, "unknown")
 
     def data_source_stats(self):
         """Counts of stream-served vs REST-served bar reads, for logging."""

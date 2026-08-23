@@ -37,7 +37,12 @@ JOURNAL_FIELDS = [
     "spy_pct",           # the market's own move over the same window
     "rvol",              # this bar's volume vs this symbol's recent bar average
     "spread_pct",        # bid-ask as a % of price, the real cost-to-trade
-    "burst_width",       # how many symbols fired in this same poll
+    "burst_width",              # how many symbols fired in this same poll
+    # Opening-move history, recorded whether or not it is being SCORED. The
+    # whole point is to test the "patterns repeat" claim against forward
+    # returns rather than assume it: with these columns, two weeks of journal
+    # answers whether a high past hit-rate actually predicts anything.
+    "opening_hit_rate", "opening_avg_gain", "opening_sessions",
     # --- what the bot decided ---
     "taken", "skip_reason", "qty", "size_multiplier",
     # --- what actually happened next (the label) ---

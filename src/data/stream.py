@@ -266,6 +266,17 @@ class PriceStream:
 
         self._symbols = requested
         self._connection_attempts = 0
+        # Clear last session's cache. Bars and ticks are keyed by symbol with no
+        # session marker, so a long-lived process starting a second day would
+        # otherwise inherit yesterday's closing prices. They are old enough that
+        # the staleness checks would reject them anyway - but only by accident,
+        # and "correct because a different check happens to catch it" is not a
+        # property worth relying on for prices the bot trades against.
+        with self._lock:
+            self._bars.clear()
+            self._received_at.clear()
+            self._last_trade.clear()
+            self._trade_received_at.clear()
         self._error_watcher = _StreamErrorWatcher()
         logging.getLogger(ALPACA_WS_LOGGER).addHandler(self._error_watcher)
         self._stop_requested.clear()
@@ -529,6 +540,13 @@ class PriceStream:
         Latest streamed bar for `symbol`, or None if there isn't a usable one
         (never streamed, or older than BAR_STALE_AFTER_SECONDS). None means
         "fall back to REST" - it never means "no price".
+
+        Deliberately keeps serving the cache after the stream dies, unlike
+        is_healthy(). The two answer different questions: is_healthy() asks "is
+        the feed alive" and must say no immediately, while this asks "what is
+        the best price available", and a bar up to 180 seconds old is still far
+        fresher than REST's ~15-minute delay. Once it ages past the staleness
+        window the symbol falls back on its own.
         """
         with self._lock:
             bar = self._bars.get(symbol)
@@ -565,6 +583,14 @@ class PriceStream:
         connection state alone, and would otherwise leave the bot quietly
         running on REST fallback for a whole session without saying so.
         """
+        # A stream that has given up, or been stopped, is not healthy no matter
+        # how recent its last bar was. Without this check a stream that ran fine
+        # and then died at 09:45 kept reporting healthy for BAR_STALE_AFTER_SECONDS
+        # afterwards, purely because its final bar was still recent - so the run
+        # context, and anything else gating on this, would describe a dead feed
+        # as a live one for the three minutes when it most mattered.
+        if self._gave_up or self._stop_requested.is_set():
+            return False
         with self._lock:
             if not self._received_at:
                 return False
