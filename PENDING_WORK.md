@@ -176,6 +176,74 @@ these thresholds. Check the signal journal before weighting it more heavily.
 
 ---
 
+## 0a. NEXT: breakeven floor instead of a wider trailing stop
+
+**Do this before deciding whether 1.35% was right.** It solves the same problem
+the wider trail was meant to solve, without the side effect that makes the
+wider trail dangerous.
+
+**The problem.** On 2026-08-24, DASH, ADBE and ADSK each reached +0.5-0.6% and
+were then cut by the 0.75% trailing stop for small losses, never reaching the
++1.0% take-profit tier. That is the trail and the tiers fighting each other.
+
+**Why widening the trail is the wrong fix.** A trail only fires above the -1.0%
+final exit if the peak clears a threshold:
+
+| trailing_stop_pct | peak must exceed |
+|-------------------|------------------|
+| 0.75%             | -0.25%           |
+| 1.35%             | **+0.35%**       |
+| 1.50%             | +0.51%           |
+
+At 1.35%, five of that day's nine trailing exits lose the trail entirely and
+fall to -1.0%. Three of them never traded above entry at all - for those the
+0.75% trail was acting as a stop TIGHTER than the final exit and was saving
+money (HOOD left at -0.42%, not -1.0%). Modelled pessimistically the day goes
+from -$119 to about -$317.
+
+**The fix.** Compose a floor with the existing trail rather than replacing it:
+effective stop = max(trailing_level, breakeven_floor).
+
+```yaml
+breakeven_trigger_pct: 0.5   # once up this much...
+breakeven_floor_pct: 0.0     # ...the stop never goes below entry
+                             # a small positive value covers the exit spread
+```
+
+Then DASH/ADBE/ADSK exit at ~breakeven instead of -0.15/-0.19/-0.24%, AND the
+three that never went green keep the tight 0.75% trail that protected them.
+Restore `trailing_stop_pct: 0.75` at the same time.
+
+**Set breakeven_trigger_pct from the mfe_pct column, not from this document.**
+
+---
+
+## 0e. Limit orders for streamed symbols only - INVESTIGATE, do not assume
+
+Proposed 2026-08-25: use LIMIT buys for the ~14 streamed symbols (where the
+price is live) and MARKET buys for the rest. The reasoning is sound - the
+objection to limit orders is stale pricing, and streamed symbols do not have
+stale prices.
+
+**What has to be measured first.** Fill rate. The entry signal is "up 0.3% in 3
+minutes", i.e. buying into a move already running, so a limit at the signal
+price is a bet the move pauses. Slippage is now +0.205% mean adverse; a limit
+that misses even 1 entry in 5 costs far more than that in foregone winners
+(CHWY +1.61%, DASH +1.37% on 2026-08-24).
+
+**Cheap way to find out, no risk:** the signal journal already records
+signal_pct and forward returns. Add the quote at signal time and, for each
+signal, whether price traded back to the signal price within 60s. That
+answers "would a limit have filled?" without placing a single limit order.
+Two weeks of that decides it.
+
+**If it goes ahead:** marketable limit (signal price + a few cents), not a
+passive one, with a timeout that converts to market after N seconds - never a
+resting limit that silently does not fill. Exits stay MARKET always: a limit
+sell in a falling stock does not fill, which turns a stop into a suggestion.
+
+---
+
 ## 0d. TODAY (after the close): fix the burst ranking
 
 See 0b. Two concrete changes:

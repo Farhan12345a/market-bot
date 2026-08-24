@@ -517,6 +517,31 @@ class StockScreener:
         self.last_scores = dict(sorted_stocks)
         self.last_details = details_dict
 
+        # Drop out-of-band prices BEFORE ranking, so they can never occupy a
+        # top-N slot, a stream subscription, or a poll cycle. On 2026-08-24 AMC
+        # signalled ten times at ~$2.70 and was refused ten times, and each of
+        # those refusals still counted toward the burst width that throttles
+        # genuine entries. A symbol the bot can never buy should not be
+        # considered for anything.
+        min_price = self.config.get("min_stock_price") or 0
+        max_price = self.config.get("max_stock_price") or 0
+        if min_price or max_price:
+            priced_out = []
+            for sym in list(scores):
+                px = (details_dict.get(sym) or {}).get("price") or 0
+                if not px:
+                    continue  # unknown price is not evidence of a bad one
+                if (min_price and px < min_price) or (max_price and px > max_price):
+                    priced_out.append(f"{sym} (${px:.2f})")
+                    scores.pop(sym, None)
+            if priced_out:
+                logger.info(
+                    f"Excluded {len(priced_out)} symbol(s) outside "
+                    f"${min_price}-${max_price} before ranking: {', '.join(priced_out)}"
+                )
+            sorted_stocks = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+            self.last_scores = dict(sorted_stocks)
+
         # Filter by minimum score and take top N
         selected = [
             sym for sym, score in sorted_stocks
