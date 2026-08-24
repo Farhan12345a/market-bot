@@ -4,7 +4,38 @@ Open items, most actionable first. Each has enough context to pick up cold.
 
 ---
 
-## 0. **MONDAY: decide whether to KEEP or REMOVE the take-profit** (2026-08-24)
+## 0. ~~MONDAY: keep or remove the take-profit?~~ — RESOLVED 2026-08-21: **KEPT**
+
+**Verdict: KEEP.** The 2026-08-21 session answered it, and answered against my
+own recommendation.
+
+Take-profit fired **7 times for 7 winners, +$150.63** - a third of the day's
+$455 gross profit. My argument for removing it was built on 2026-08-20, when
+only 3 of 25 trades ever reached +1%. On 2026-08-21, 7 of 22 did. The
+difference was the $10 price floor and the 09:35 start putting the bot into
+names that actually move, which the earlier evidence could not have predicted.
+
+It was not free. It clipped the two best trades of the day:
+
+| Symbol | Sold half at | The other half exited at |
+|--------|--------------|--------------------------|
+| HOOD   | +0.87%       | **+4.66%**               |
+| SOFI   | +1.09%       | **+3.46%**               |
+| MARA   | +0.07%       | -1.24% (take-profit saved this one) |
+
+**That trade-off is what the tiers now address** (shipped 2026-08-24): 33% at
++1.0%, 40% at +1.25%, all remaining at +1.5%. Early certainty on the first two
+thirds, a third left free to run.
+
+The MARA row also exposed a real bug: it fired at a genuine +0.07% because the
+exit rules were still measuring against the SIGNAL price rather than the fill.
+Fixed by Strategy.correct_entry_price.
+
+**No further action.** Do not set use_take_profit: false.
+
+---
+
+## 0-OLD. Original take-profit decision procedure (superseded, kept for context)
 
 **This is the one item with a deadline.** `use_take_profit` was switched ON for
 the 2026-08-21 session as a deliberate one-day experiment, at the user's
@@ -236,7 +267,28 @@ false` doubles reach immediately.
 
 ---
 
-## 1a. MONDAY 2026-08-24: poll interval + time-based windows
+## 1a. MONDAY 2026-08-24: poll interval — **BLOCKED, gate not met**
+
+**Status as of 2026-08-24 08:46 ET: NOT starting this.** The work is gated on
+the WebSocket stream being confirmed working, and it is not.
+
+- 2026-08-21: the stream connected in 436ms and was then rejected with
+  `symbol limit exceeded (405)` for 59 symbols. Zero bars, full session on REST.
+- 2026-08-24: the subscription cap (28 subs / 14 symbols) ships today, but this
+  session has not run yet. The gate stays unresolved until its log is read.
+
+Dropping entry_check_interval_seconds to 5-10s on REST would mean roughly 700
+calls/min and immediate rate-limiting - which would degrade the REST path the
+bot is currently depending on entirely. **Re-evaluate after a session in which
+bars actually flow.**
+
+Step 1 below (time-based windows) is worth doing on its own merits and is NOT
+gated - but it is an exit-logic change and does not belong in a deploy made
+minutes before an unattended session. Next quiet window.
+
+Original write-up follows.
+
+## 1a-OLD. poll interval + time-based windows
 
 Do these two together, in this order. The second is a prerequisite, not a
 nice-to-have.
