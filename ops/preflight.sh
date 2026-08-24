@@ -9,6 +9,8 @@
 # --notify, which delivers one test message through the real path).
 
 cd "$(dirname "$0")/.." || exit 1
+export SYSTEMD_PAGER=cat
+export PAGER=cat
 PASS=0; FAIL=0; WARN=0
 ok()   { printf '  \033[92mOK\033[0m    %s\n' "$*"; PASS=$((PASS+1)); }
 bad()  { printf '  \033[91mFAIL\033[0m  %s\n' "$*"; FAIL=$((FAIL+1)); }
@@ -37,7 +39,7 @@ STARTED=$(systemctl show market-bot -p ActiveEnterTimestamp --value)
 ok "service started: ${STARTED:-unknown}"
 
 sec "3. Interpreter and dependencies"
-PY=$(systemctl cat market-bot 2>/dev/null | grep -m1 '^ExecStart=' | tr ' ' '\n' | grep -m1 -E 'python3?$')
+PY=$(systemctl --no-pager cat market-bot 2>/dev/null | grep -m1 '^ExecStart=' | tr ' ' '\n' | grep -m1 -E 'python3?$')
 [ -x "$PY" ] || PY=./venv/bin/python3
 if [ -x "$PY" ]; then ok "interpreter: $PY ($($PY --version 2>&1))"
 else bad "cannot find the service's interpreter"; fi
@@ -70,7 +72,7 @@ if [ -f /etc/market-bot.env ]; then
   ok "/etc/market-bot.env exists ($(stat -c %a /etc/market-bot.env) perms)"
   grep -q RESEND_API_KEY /etc/market-bot.env && ok "RESEND_API_KEY present in env file" || warn "no RESEND_API_KEY in env file"
 else warn "/etc/market-bot.env missing - notifications will not send"; fi
-systemctl cat market-bot 2>/dev/null | grep -q EnvironmentFile \
+systemctl --no-pager cat market-bot 2>/dev/null | grep -q EnvironmentFile \
   && ok "systemd loads the env file" \
   || bad "systemd has no EnvironmentFile - the key will NOT reach the process (see ops/NOTIFICATIONS.md)"
 journalctl -u market-bot --since "1 hour ago" 2>/dev/null | grep -q "Notification channels active" \

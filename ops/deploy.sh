@@ -8,6 +8,12 @@
 # second, and rolls back if the service doesn't come up.
 
 set -euo pipefail
+
+# systemctl pipes into a pager when it thinks it has a terminal, and that pager
+# then sits waiting for a keypress - which looks exactly like a hang, at exactly
+# the step that reads the unit file. Belt and braces alongside --no-pager.
+export SYSTEMD_PAGER=cat
+export PAGER=cat
 cd /root/market-bot
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -27,12 +33,17 @@ else
 fi
 
 say "Finding the interpreter the SERVICE actually uses"
+# Progress markers, so a run that stops here is diagnosable. A silent gap at
+# this step is ambiguous between a dropped SSH session, a pager waiting for a
+# keypress, and a slow import - and the difference matters, because a deploy
+# that dies before the restart leaves the OLD code running.
+echo "    reading the unit file..."
 # Not `python3`. The bot runs from a virtualenv, so the system python has none
 # of its dependencies - checking imports with the wrong interpreter reports a
 # ModuleNotFoundError that says nothing about whether the deploy is safe.
 # Ask systemd what it runs, and only fall back to guessing if that fails.
 PY_BIN=""
-UNIT_EXEC=$(systemctl cat market-bot 2>/dev/null | grep -m1 '^ExecStart=' | sed 's/^ExecStart=//')
+UNIT_EXEC=$(systemctl --no-pager cat market-bot 2>/dev/null | grep -m1 '^ExecStart=' | sed 's/^ExecStart=//')
 for cand in \
   "$(printf '%s\n' "$UNIT_EXEC" | tr ' ' '\n' | grep -m1 -E '(python|python3)$' || true)" \
   "$(dirname "$(printf '%s\n' "$UNIT_EXEC" | awk '{print $1}')")/python" \
@@ -47,10 +58,11 @@ done
 if [ -z "$PY_BIN" ]; then
   printf '\n\033[1;31m[FAIL] Could not find an interpreter with the bot deps installed.\033[0m\n'
   echo "  systemd ExecStart: ${UNIT_EXEC:-<not found>}"
-  echo "  Find it by hand and re-run:   systemctl cat market-bot | grep ExecStart"
+  echo "  Find it by hand and re-run:   systemctl --no-pager cat market-bot | grep ExecStart"
   echo "  Nothing was restarted."
   exit 1
 fi
+echo "    candidates checked, picked one"
 echo "    using $PY_BIN"
 echo "    $("$PY_BIN" --version 2>&1)"
 
