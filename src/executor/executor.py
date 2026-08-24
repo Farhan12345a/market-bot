@@ -399,6 +399,25 @@ class Executor:
         condition gets retried on the next poll cycle instead of the bot
         silently forgetting it still holds (and needs to protect) it.
         """
+        # Clear any still-working entry order for this symbol FIRST. Alpaca
+        # rejects an exit while an opposite-side order is open ("potential wash
+        # trade detected"), which on 2026-08-24 blocked four exits - including
+        # PDD's, whose -0.56% RESISTANCE exit was refused and which then left at
+        # the -1.0% final stop for $86.56 instead of roughly $47.
+        #
+        # Safe as an unconditional step: once the strategy has decided to exit,
+        # the unfilled remainder of the entry is something it no longer wants.
+        try:
+            cancelled = self.broker.cancel_open_orders(symbol)
+            if cancelled:
+                logger.info(
+                    f"{symbol}: cancelled {cancelled} working order(s) before exiting"
+                )
+        except Exception as e:
+            # Never block the exit on this - a failed cancel just means the
+            # submit below may hit the same rejection it would have anyway.
+            logger.debug(f"{symbol}: pre-exit cancel failed, submitting anyway: {e}")
+
         try:
             order = self.broker.submit_market_order(symbol, qty, side="sell")
         except Exception as e:

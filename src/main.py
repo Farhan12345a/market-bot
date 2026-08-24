@@ -183,6 +183,7 @@ def select_symbols(config, screener, market_data):
         )
         symbols = list(dict.fromkeys(default_list))
 
+    symbols = _filter_watchlist_by_price(config, symbols)
     _warn_if_watchlist_outruns_the_stream(config, symbols)
 
     logger.info(
@@ -271,6 +272,59 @@ def _opening_move_fields(details_by_symbol, symbol):
         "opening_avg_gain": d.get("opening_avg_gain"),
         "opening_sessions": d.get("opening_sessions"),
     }
+
+
+def _filter_watchlist_by_price(config, symbols):
+    """
+    Drop symbols outside the tradeable price band from the WATCHLIST.
+
+    min_stock_price / max_stock_price were enforced only at entry, so an
+    ineligible name stayed on the watchlist all session, was polled every cycle,
+    fired signals, and was rejected each time. On 2026-08-24 AMC signalled ten
+    separate times at ~$2.70 and was refused ten times; TLRY and PTON did the
+    same. Every one of those consumed a stream slot or a REST call and, worse,
+    counted toward the burst width that throttles genuine entries.
+
+    Prices come from the screener's own details, gathered minutes earlier. A
+    symbol with NO price is KEPT: absent data is not evidence of an out-of-band
+    price, and the entry-time check still catches it. The entry check stays in
+    place regardless - this reduces noise, it does not replace the gate.
+    """
+    t = config["trading"]
+    min_price = t.get("min_stock_price") or 0
+    max_price = t.get("max_stock_price") or 0
+    if not min_price and not max_price:
+        return symbols
+
+    kept, dropped = [], []
+    for sym in symbols:
+        price = (screener_details.get(sym) or {}).get("price")
+        if not price:
+            kept.append(sym)          # unknown price -> keep, entry gate decides
+            continue
+        if min_price and price < min_price:
+            dropped.append(f"{sym} (${price:.2f} < ${min_price})")
+            continue
+        if max_price and price > max_price:
+            dropped.append(f"{sym} (${price:.2f} > ${max_price})")
+            continue
+        kept.append(sym)
+
+    if dropped:
+        logger.info(
+            f"Watchlist price filter: dropped {len(dropped)} symbol(s) outside "
+            f"${min_price}-${max_price} before the session starts - "
+            f"{', '.join(dropped)}"
+        )
+    if not kept:
+        # Every candidate priced out. Watching nothing guarantees a blank day,
+        # so keep the list and let the entry gate reject individually.
+        logger.warning(
+            "Price filter would empty the watchlist - keeping it intact and "
+            "letting the entry-time check do the rejecting instead"
+        )
+        return symbols
+    return kept
 
 
 def _warn_if_watchlist_outruns_the_stream(config, symbols):

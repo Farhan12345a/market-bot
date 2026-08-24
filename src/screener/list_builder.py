@@ -407,11 +407,30 @@ def _filter_earnings_candidates(screener, symbols, why, surprises, config):
     require_beat = trading.get("earnings_require_beat", True)
     max_gap = trading.get("earnings_max_gap_pct", 3.0)
 
+    require_known = trading.get("earnings_require_known_beat", False)
+
     kept = []
     for sym in symbols:
         surprise = surprises.get(sym)
+
         if require_beat and surprise is not None and surprise <= 0:
             logger.info(f"  - {sym} skipped: MISSED earnings ({surprise:+.1f}%)")
+            continue
+
+        if require_known and surprise is None:
+            # Nasdaq often has not published EPS for a before-the-bell reporter
+            # by 09:20, so "unknown" usually means "too early", not "bad". This
+            # setting trades coverage for certainty: on 2026-08-24 the only
+            # earnings name added was PDD, logged "surprise unknown", and it was
+            # the worst trade of the day at -$86.56 on a -$119.38 session.
+            #
+            # The cost is real - some mornings this will empty the list - which
+            # is why it is a separate flag rather than folded into
+            # earnings_require_beat.
+            logger.info(
+                f"  - {sym} skipped: earnings surprise not published yet "
+                f"(earnings_require_known_beat is on)"
+            )
             continue
 
         gap = 0.0
@@ -431,7 +450,8 @@ def _filter_earnings_candidates(screener, symbols, why, surprises, config):
 
     logger.info(
         f"Earnings filter: {len(symbols)} reported -> {len(kept)} tradeable "
-        f"(beat required: {require_beat}, max gap {max_gap}%)"
+        f"(beat required: {require_beat}, known beat required: {require_known}, "
+        f"max gap {max_gap}%)"
     )
     return kept
 

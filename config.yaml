@@ -165,7 +165,22 @@ trading:
   final_exit_loss_pct: -1.0    # Hard stop: sell ALL remaining shares if price falls this much from entry (%)
   first_exit_loss_pct: -0.5    # Scale-out: sell first_exit_pct of the position if price falls this much from entry (%)
   first_exit_pct: 0.33         # Fraction of the original position sold on the first_exit_loss_pct trigger above
-  trailing_stop_pct: 0.75      # Trailing stop: exit ALL remaining shares if price falls this % below the
+  # Raised 0.75 -> 1.35 on 2026-08-24 at the user's request. NOTE THE
+  # COUNTER-EVIDENCE, recorded here so it is easy to revert: a wider trail goes
+  # INERT for any position whose peak stays below +0.35%, because the trail level
+  # then sits under the -1.0% final exit. On 2026-08-24, 5 of the 9 trailing-stop
+  # exits had peaks below that, and 3 never traded above the entry price at all -
+  # for those the 0.75% trail was acting as a stop TIGHTER than the final exit
+  # and was saving money (HOOD left at -0.42%, not -1.0%).
+  #
+  # The argument FOR widening is the other four: DASH, ADBE and ADSK reached
+  # +0.5-0.6% and were cut for small losses before the +1.0% take-profit tier
+  # could fire. Whether they would have recovered is not knowable from the log.
+  #
+  # If this session is worse, revert to 0.75 and use breakeven_trigger_pct
+  # instead (PENDING_WORK item 1c) - a floor at entry solves the same problem
+  # without disabling the trail on positions that never go green.
+  trailing_stop_pct: 1.35      # Trailing stop: exit ALL remaining shares if price falls this % below the
                                 # HIGHEST price seen since entry (not below entry price - protects gains already made)
   time_stop_hour: 16           # Close all positions at this hour (ET) if nothing else has exited yet
 
@@ -439,6 +454,16 @@ trading:
   # has not published EPS for a before-the-bell reporter by 09:20, and treating
   # unknown as a miss would empty the list most mornings.
   earnings_require_beat: true
+
+  # Also drop names whose EPS surprise cannot be read at all.
+  #
+  # Nasdaq frequently has not published EPS for a before-the-bell reporter by
+  # 09:20, so "unknown" usually means "too early", not "bad" - which is why this
+  # is separate from earnings_require_beat and why it will empty the list on
+  # some mornings. Turned on because the evidence so far points one way: on
+  # 2026-08-24 the single earnings name added was PDD, logged "surprise
+  # unknown", and it lost $86.56 on a day that lost $119.38 in total.
+  earnings_require_known_beat: true
   earnings_max_gap_pct: 3.0
   earnings_list_top_n: 3
   earnings_calendar_timeout_seconds: 20

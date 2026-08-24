@@ -82,6 +82,54 @@ class AlpacaBroker:
             logger.error(f"Error submitting limit order: {e}")
             raise
 
+    def cancel_open_orders(self, symbol):
+        """
+        Cancel every still-open order for `symbol`. Returns how many were cancelled.
+
+        Exists because Alpaca refuses an exit while an entry for the same symbol
+        is still working:
+
+            {"code":40310000,
+             "message":"potential wash trade detected. use complex orders",
+             "reject_reason":"opposite side market/stop order exists"}
+
+        On 2026-08-24 that rejected four exits. Market orders are not always
+        instantaneous - HOOD's average entry price moved across four consecutive
+        polls as the order filled in pieces - and any exit attempted while the
+        remainder is still working is refused. PDD's RESISTANCE exit at -0.56%
+        was blocked that way and the position left instead at the -1.0% final
+        stop, turning a ~$47 loss into $86.56.
+
+        Cancelling first is the correct order of operations regardless: if the
+        strategy has decided to leave, the unfilled remainder of the entry is
+        something it no longer wants.
+        """
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+
+            request = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+            open_orders = self.trading_client.get_orders(filter=request) or []
+        except Exception as e:
+            logger.debug(f"Could not list open orders for {symbol}: {e}")
+            return 0
+
+        cancelled = 0
+        for order in open_orders:
+            try:
+                self.trading_client.cancel_order_by_id(order.id)
+                cancelled += 1
+                logger.info(
+                    f"{symbol}: cancelled working {getattr(order, 'side', '?')} order "
+                    f"{str(order.id)[:8]} "
+                    f"({getattr(order, 'filled_qty', '?')}/{getattr(order, 'qty', '?')} filled) "
+                    f"so the exit can be submitted"
+                )
+            except Exception as e:
+                logger.warning(f"{symbol}: could not cancel order {order.id}: {e}")
+
+        return cancelled
+
     def get_filled_sell_orders_since(self, symbol, since):
         """
         Filled SELL orders for `symbol` at or after `since` (tz-aware datetime).
