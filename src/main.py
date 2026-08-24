@@ -934,6 +934,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     order = executor.submit_exit_order(
                         symbol, exit_info["qty"], exit_info["reason"], exit_info["price"],
                         exit_rsi=exit_rsi, mfe_pct=mfe_pct, mae_pct=mae_pct,
+                        # So the executor can tell a partial sale from a full
+                        # one by the numbers rather than by the reason string.
+                        qty_before=(trade.qty_remaining if trade else None),
                     )
                     if order is not None:
                         strategy.confirm_exit(symbol, exit_info["qty"], exit_info["reason"], exit_info["price"])

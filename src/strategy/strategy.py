@@ -9,6 +9,10 @@ logger = logging.getLogger(__name__)
 
 ET = pytz.timezone("America/New_York")
 
+# Tolerance for take-profit tier comparisons. Far below any price move that
+# matters (1e-9 of a percent) and far above float representation error.
+TIER_EPSILON = 1e-9
+
 
 def _now_et():
     """
@@ -52,7 +56,10 @@ class TradeManager:
         self.entry_time = _now_et()
         self.highest_price = entry_price
         self.first_exit_done = False
-        self.take_profit_done = False
+        # Indices of take-profit tiers already filled for this position. A set
+        # rather than a single flag, because each tier fires at most once but
+        # several can fire over the life of one position.
+        self.take_profit_tiers_done = set()
 
         # For momentum and resistance detection
         self.price_history = [entry_price]  # Track prices for momentum calc
@@ -82,35 +89,94 @@ class TradeManager:
             return int(self.entry_qty * self.config["trading"]["first_exit_pct"])
         return 0
 
+    def take_profit_tiers(self):
+        """
+        Configured scale-out tiers, lowest gain first, normalised and validated.
+
+        Falls back to the single-tier form (take_profit_pct /
+        take_profit_fraction) when take_profit_tiers is absent, so an older
+        config keeps working unchanged.
+        """
+        cfg = self.config["trading"]
+        raw = cfg.get("take_profit_tiers")
+        if not raw:
+            return [{
+                "gain_pct": cfg.get("take_profit_pct", 1.0),
+                "sell_fraction": cfg.get("take_profit_fraction", 0.5),
+            }]
+
+        tiers = []
+        for entry in raw:
+            try:
+                gain = float(entry["gain_pct"])
+                frac = float(entry["sell_fraction"])
+            except (KeyError, TypeError, ValueError):
+                logger.warning(f"{self.symbol}: ignoring malformed take-profit tier {entry!r}")
+                continue
+            if gain <= 0 or frac <= 0:
+                logger.warning(f"{self.symbol}: ignoring non-positive take-profit tier {entry!r}")
+                continue
+            tiers.append({"gain_pct": gain, "sell_fraction": frac})
+
+        tiers.sort(key=lambda t: t["gain_pct"])
+        return tiers
+
     def check_take_profit(self, current_price):
         """
-        Scale out of a WINNER: sell take_profit_fraction of the original
-        position once price is up take_profit_pct. Fires at most once per
-        position (take_profit_done, set only in process_exit after the broker
-        confirms - same commit-after-confirmation discipline as first_exit).
+        Scale out of a WINNER across several gain tiers.
 
-        EXPERIMENTAL, added 2026-08-20 at the user's request, and the 2026-08-20
-        data argues against it: only 3 of 25 trades that day ever reached +1%,
-        and those three (MARA +$121, RIOT +$59, LYFT +$44) were the entire
-        day's profit. Trimming half of each would have clipped the only
-        winners while doing nothing for the other 22 trades. Watch
-        take_profit_pct vs the MFE column before keeping this.
+        Returns (qty, reason) - unlike the other checks, which return a bare
+        qty - because the caller needs to know WHICH tier fired, both to name
+        the exit in the report and to mark the right tier as spent.
+
+        Rules, and the reasoning behind each:
+
+        - The HIGHEST tier whose threshold is met fires, not the lowest. A gap
+          straight through +1.5% should sell what a +1.5% move deserves, not
+          trickle out 33% and leave the rest to a rule that may never fire again.
+        - Firing a tier retires every tier below it. Otherwise a position that
+          jumped to +1.3% and pulled back to +1.0% would sell AGAIN on the way
+          down, which is scaling into weakness, not out of strength.
+        - sell_fraction is a fraction of the ORIGINAL position, so 0.33 + 0.40
+          means 73% of what was bought - stable regardless of what earlier
+          tranches took. A fraction >= 1.0 means "all remaining", which is how
+          the top tier closes the position outright.
+        - Never sells more than is still held, and never emits a zero-share
+          order.
+
+        Fires at most once per tier per position, and only ever commits in
+        process_exit after the broker confirms - the same discipline as
+        first_exit.
         """
         if not self.config["trading"].get("use_take_profit", False):
-            return 0
-        if self.take_profit_done:
-            return 0
+            return 0, None
 
-        trigger = self.config["trading"].get("take_profit_pct", 1.0) / 100
-        gain_pct = (current_price - self.entry_price) / self.entry_price
-        if gain_pct < trigger:
-            return 0
+        gain_pct = (current_price - self.entry_price) / self.entry_price * 100
+        tiers = self.take_profit_tiers()
 
-        fraction = self.config["trading"].get("take_profit_fraction", 0.5)
-        qty = int(self.entry_qty * fraction)
-        # Never try to sell more than is still held (a first-exit tranche may
-        # already have gone), and never emit a 0-share order.
-        return max(0, min(qty, self.qty_remaining))
+        for idx in range(len(tiers) - 1, -1, -1):
+            if idx in self.take_profit_tiers_done:
+                continue
+            tier = tiers[idx]
+            # Epsilon, not a bare <. A price computed as exactly the target
+            # lands on 1.4999999999999998 in binary floating point, so a strict
+            # comparison silently skips the tier that should fire. With tiers
+            # only 0.25% apart that does not merely delay the exit - it fires
+            # the WRONG tier, selling 40% where the whole position was intended.
+            if gain_pct < tier["gain_pct"] - TIER_EPSILON:
+                continue
+
+            if tier["sell_fraction"] >= 1.0:
+                qty = self.qty_remaining
+            else:
+                qty = int(self.entry_qty * tier["sell_fraction"])
+            qty = max(0, min(qty, self.qty_remaining))
+            if qty <= 0:
+                return 0, None
+
+            return qty, f"TAKE_PROFIT_{tier['gain_pct']:g}%"
+
+        return 0, None
 
     def check_final_exit(self, current_price):
         """Check if we should sell all remaining at -1.0% loss"""
@@ -255,8 +321,17 @@ class TradeManager:
         self.qty_remaining -= qty_to_exit
         if exit_reason == "FIRST_EXIT_-0.5%":
             self.first_exit_done = True
-        if exit_reason == "TAKE_PROFIT":
-            self.take_profit_done = True
+        if str(exit_reason).startswith("TAKE_PROFIT"):
+            # Retire the tier that fired AND everything below it - see
+            # check_take_profit for why selling again on a pullback is wrong.
+            tiers = self.take_profit_tiers()
+            for idx, tier in enumerate(tiers):
+                if exit_reason == f"TAKE_PROFIT_{tier['gain_pct']:g}%":
+                    self.take_profit_tiers_done.update(range(idx + 1))
+                    break
+            else:
+                # Single-tier/legacy reason string: retire everything.
+                self.take_profit_tiers_done.update(range(len(tiers)))
         self.orders_log.append({
             "action": "EXIT",
             "qty": qty_to_exit,
@@ -384,10 +459,14 @@ class Strategy:
         if current_price < trade.lowest_since_entry:
             trade.lowest_since_entry = current_price
 
+        # Take-profit is checked separately because it names its own reason
+        # (which tier fired); everything else has a fixed reason.
+        tp_qty, tp_reason = trade.check_take_profit(current_price)
+
         checks = [
             ("FINAL_EXIT_-1.0%", trade.check_final_exit),
             ("FIRST_EXIT_-0.5%", trade.check_first_exit),
-            ("TAKE_PROFIT", trade.check_take_profit),
+            (tp_reason or "TAKE_PROFIT", (lambda _p: tp_qty)),
             ("MOMENTUM_FADE", trade.check_momentum_fade),
             ("RESISTANCE", trade.check_resistance),
             ("TRAILING_STOP", trade.update_trailing_stop),

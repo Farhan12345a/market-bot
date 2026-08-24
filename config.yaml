@@ -173,7 +173,7 @@ trading:
   # without a loss, rather than waiting for it to reverse into one.
   momentum_fade_hour: 10                 # Start checking momentum fade at this hour (ET)
   momentum_fade_minute: 15               # ...and this minute. Combined: 10:15 AM ET by default.
-  momentum_fade_window_samples: 5        # Number of recent price samples used in the trend calc.
+  momentum_fade_window_samples: 6        # Number of recent price samples used in the trend calc.
                                           # One sample is taken per exit-check pass (~once per minute
                                           # live), so 5 samples ~= the trend over the last ~4-5 minutes.
   # Loosened 0.0001 -> -0.05. At 0.0001 anything not strictly RISING counted as
@@ -284,8 +284,34 @@ trading:
   # Compare take_profit_pct against the mfe_pct column in trade_history.csv
   # before keeping it past the 08-21 session.
   use_take_profit: true
-  take_profit_pct: 1.25        # gain % that triggers the scale-out
-  take_profit_fraction: 0.5   # fraction of the ORIGINAL position sold
+
+  # Tiered scale-out. Each tier fires AT MOST ONCE per position, and firing one
+  # retires every tier below it - otherwise a position that ran to +1.3% and
+  # pulled back to +1.0% would sell AGAIN on the way down, which is scaling into
+  # weakness rather than out of strength.
+  #
+  # sell_fraction is a fraction of the ORIGINAL position, so 0.33 + 0.40 means
+  # 73% of what was bought, regardless of what earlier tranches took. A fraction
+  # of 1.0 means "all remaining", which is how the top tier closes the position.
+  #
+  # If price gaps straight through several tiers the HIGHEST qualifying one
+  # fires: a jump to +1.6% sells the whole position rather than trickling out
+  # 33% and leaving the rest to a rule that may never trigger again.
+  #
+  # Evidence for this shape: on 2026-08-21 take-profit fired 7 times for 7
+  # winners (+$150.63 of $455 gross profit), but the single +1.0% tier clipped
+  # the two best trades - HOOD ran to +4.66% and SOFI to +3.46% AFTER selling
+  # half at ~+1%. Tiering keeps the early certainty while leaving a third of the
+  # position free to run past +1.5%.
+  take_profit_tiers:
+    - {gain_pct: 1.0,  sell_fraction: 0.33}   # take a third off early
+    - {gain_pct: 1.25, sell_fraction: 0.40}   # 40% more of the original
+    - {gain_pct: 1.5,  sell_fraction: 1.0}    # close out whatever is left
+
+  # Legacy single-tier form, used ONLY if take_profit_tiers is absent. Kept so
+  # an older config still works unchanged.
+  take_profit_pct: 1.25
+  take_profit_fraction: 0.5
 
   # --- Exposure caps ---
   # Checked BEFORE every entry attempt (see Executor.pre_entry_check) - the

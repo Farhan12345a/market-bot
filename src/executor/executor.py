@@ -34,6 +34,33 @@ STOP_LOSS_EXIT_REASONS = {"FINAL_EXIT_-1.0%", "FIRST_EXIT_-0.5%", "TRAILING_STOP
 # full close.
 PARTIAL_EXIT_REASONS = {"FIRST_EXIT_-0.5%", "TAKE_PROFIT"}
 
+# Take-profit reasons carry their tier ("TAKE_PROFIT_1.25%"), so membership has
+# to be a prefix test rather than an exact match. The TOP tier sells everything
+# remaining, so whether a take-profit is partial cannot be decided from the
+# reason alone - it depends on whether shares are left afterwards, which is why
+# is_partial_exit takes the quantities.
+TAKE_PROFIT_PREFIX = "TAKE_PROFIT"
+
+
+def is_partial_exit(reason, qty, qty_before):
+    """
+    True when this sale leaves the position OPEN.
+
+    Getting this wrong in either direction is expensive: calling a full exit
+    partial leaves a closed symbol counted against max_concurrent_positions for
+    the rest of the session, and calling a partial exit full frees a slot while
+    shares are still held, so the cap silently over-admits.
+    """
+    reason = str(reason or "")
+    if qty_before is not None and qty is not None:
+        try:
+            return int(qty) < int(qty_before)
+        except (TypeError, ValueError):
+            pass
+    if reason.startswith(TAKE_PROFIT_PREFIX):
+        return True
+    return reason in PARTIAL_EXIT_REASONS
+
 ANSI_GREEN = "\033[92m"
 ANSI_RED = "\033[91m"
 ANSI_YELLOW = "\033[93m"
@@ -361,7 +388,7 @@ class Executor:
         return order
 
     def submit_exit_order(self, symbol, qty, reason="", price=None, exit_rsi=None,
-                          mfe_pct=None, mae_pct=None):
+                          mfe_pct=None, mae_pct=None, qty_before=None):
         """
         Submit a market order to exit a position and record a documented
         trade row. Returns the order on success, or None on failure (does NOT
@@ -381,14 +408,14 @@ class Executor:
         # Mirror the immediate cache update in submit_entry_order, for the
         # same reason - keeps pre_entry_check() accurate for any entry
         # checked later in the SAME poll cycle, not just after the next
-        # refresh_account_snapshot(). Only FIRST_EXIT_-0.5% is ever a partial
-        # sale (see PARTIAL_EXIT_REASONS) - every other reason always sells
-        # the entire remaining position, so the open-position count only
-        # decrements for those.
+        # refresh_account_snapshot(). A partial sale leaves the symbol open, so
+        # the open-position count must NOT decrement for it; see
+        # is_partial_exit, which uses the quantities rather than the reason
+        # string because the top take-profit tier sells the whole position.
         if price:
             self._buying_power += qty * price
             self._total_exposure_usd = max(0.0, self._total_exposure_usd - qty * price)
-        if reason not in PARTIAL_EXIT_REASONS:
+        if not is_partial_exit(reason, qty, qty_before):
             self._open_symbols.discard(symbol)
             self._entry_recorded_at.pop(symbol, None)
             self._pending_cost.pop(symbol, None)
@@ -448,7 +475,7 @@ class Executor:
                 "order_id": trade_record["order_id"],
             })
 
-            color = ANSI_YELLOW if reason in PARTIAL_EXIT_REASONS else ANSI_RED
+            color = ANSI_YELLOW if is_partial_exit(reason, qty, qty_before) else ANSI_RED
             logger.info(
                 f"{color}Exit order submitted for {symbol}: {qty} shares at {price} ({reason}) - "
                 f"entry was {entry_price}, P&L: ${trade_record['pl']:.2f} ({trade_record['pl_pct']:+.2f}%){ANSI_RESET}"
