@@ -180,7 +180,7 @@ trading:
   # If this session is worse, revert to 0.75 and use breakeven_trigger_pct
   # instead (PENDING_WORK item 1c) - a floor at entry solves the same problem
   # without disabling the trail on positions that never go green.
-  trailing_stop_pct: 1.35      # Trailing stop: exit ALL remaining shares if price falls this % below the
+  trailing_stop_pct: 0.75      # Trailing stop: exit ALL remaining shares if price falls this % below the
                                 # HIGHEST price seen since entry (not below entry price - protects gains already made)
   time_stop_hour: 16           # Close all positions at this hour (ET) if nothing else has exited yet
 
