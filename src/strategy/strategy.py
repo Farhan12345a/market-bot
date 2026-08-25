@@ -42,6 +42,32 @@ class TradeState(Enum):
     LONG = "long"
     EXITING = "exiting"
 
+def _samples_for_minutes(config, minutes_key, samples_key, default_minutes, default_samples):
+    """
+    Convert a time window into a number of price samples at the CURRENT poll rate.
+
+    These windows used to be raw sample counts, which silently meant whatever
+    the poll interval happened to be. At a 60s poll, 6 samples was 6 minutes; at
+    a 10s poll the same 6 samples is 60 SECONDS - the identical config, six times
+    more sensitive, re-creating the hair-trigger exits fixed on 2026-08-20 where
+    RESISTANCE fired 14 times on moves as small as 0.08%.
+
+    Expressing the window in minutes makes it invariant to poll rate: change the
+    interval and the rule keeps meaning the same span of market time.
+
+    The sample-count key is still honoured when the minutes key is absent, so an
+    older config behaves exactly as before.
+    """
+    trading = config["trading"]
+    minutes = trading.get(minutes_key)
+    if minutes is None:
+        return trading.get(samples_key, default_samples)
+
+    interval = trading.get("entry_check_interval_seconds", 60) or 60
+    # At least 2 samples: a trend or a decline needs two points to exist at all.
+    return max(2, round(float(minutes) * 60.0 / float(interval)))
+
+
 class TradeManager:
     """Manages entry and exit logic for individual positions"""
 
@@ -178,6 +204,49 @@ class TradeManager:
 
         return 0, None
 
+    def check_breakeven_stop(self, current_price):
+        """
+        Once a position has proven itself, never let it become a loser.
+
+        Arms when the PEAK since entry reaches breakeven_trigger_pct - the peak,
+        not the current price, because a position that touched +0.5% has shown
+        something even if it has since fallen back. Once armed it stays armed.
+
+        The floor sits slightly ABOVE entry (breakeven_floor_pct) because a true
+        zero exits at the entry price and the bid-ask spread then makes that a
+        small loss.
+
+        Why this instead of a wider trailing stop, which was tried and reverted
+        on 2026-08-25: a trailing exit lands at roughly (MFE - trail), so a wider
+        leash mechanically gives back MORE of the peak, and it goes inert
+        entirely for positions peaking below the trail width. That day CHWY
+        peaked +0.98% and left at -0.41%, CRM +0.93% -> -0.67%, COIN +1.32% ->
+        -0.23%: three winners turned into losers by leash width. A floor fixes
+        exactly those without loosening anything for positions that never go
+        green.
+
+        Composed with the trail rather than replacing it - Strategy.check_exit
+        takes whichever fires - so a position that runs keeps its trailing stop.
+        """
+        trading = self.config["trading"]
+        if not trading.get("use_breakeven_floor", False):
+            return 0
+
+        trigger = trading.get("breakeven_trigger_pct", 0.5) / 100
+        peak_gain = (self.highest_since_entry - self.entry_price) / self.entry_price
+        # Epsilon for the same reason as the take-profit tiers: a peak computed
+        # as exactly +0.5% lands just under 0.005 in binary floating point, and
+        # a strict comparison would leave the position unarmed at precisely the
+        # level that is supposed to arm it.
+        if peak_gain < trigger - TIER_EPSILON:
+            return 0          # not armed yet
+
+        floor_pct = trading.get("breakeven_floor_pct", 0.05) / 100
+        floor_price = self.entry_price * (1 + floor_pct)
+        if current_price <= floor_price * (1 + TIER_EPSILON):
+            return self.qty_remaining
+        return 0
+
     def check_final_exit(self, current_price):
         """Check if we should sell all remaining at -1.0% loss"""
         loss_pct = (current_price - self.entry_price) / self.entry_price
@@ -219,7 +288,10 @@ class TradeManager:
         which only approximates $ per minute for as long as checks land close
         to every 60s.
         """
-        window = self.config["trading"].get("momentum_fade_window_samples", 5)
+        window = _samples_for_minutes(
+            self.config, "momentum_fade_window_minutes",
+            "momentum_fade_window_samples", 6, 6,
+        )
         if len(self.price_history) < window:
             return None
 
@@ -280,7 +352,10 @@ class TradeManager:
         two minutes in. Requiring a real decline is what separates "the
         breakout failed" from "the price wobbled".
         """
-        lookback = self.config["trading"].get("resistance_lookback_samples", 3)
+        lookback = _samples_for_minutes(
+            self.config, "resistance_lookback_minutes",
+            "resistance_lookback_samples", 3, 3,
+        )
         if len(self.price_history) < lookback:
             return 0
 
@@ -467,6 +542,7 @@ class Strategy:
             ("FINAL_EXIT_-1.0%", trade.check_final_exit),
             ("FIRST_EXIT_-0.5%", trade.check_first_exit),
             (tp_reason or "TAKE_PROFIT", (lambda _p: tp_qty)),
+            ("BREAKEVEN_STOP", trade.check_breakeven_stop),
             ("MOMENTUM_FADE", trade.check_momentum_fade),
             ("RESISTANCE", trade.check_resistance),
             ("TRAILING_STOP", trade.update_trailing_stop),

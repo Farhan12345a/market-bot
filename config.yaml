@@ -65,7 +65,16 @@ trading:
   # close whenever no trade has arrived in the last 30s.
   use_trade_ticks_for_entry: true
 
-  entry_check_interval_seconds: 60   # How often to re-check prices during the entry window, in seconds.
+  # 60 -> 10 on 2026-08-25. Reads are now free: the WebSocket has served ~80%
+  # of bars for two sessions running, so a faster loop costs no API calls for
+  # streamed symbols. The prize is gap risk on stops: RKLB's -1.0% stop fired at
+  # -1.49% on 2026-08-25 because price crossed the level BETWEEN two 60-second
+  # checks. Six times the checks is roughly six times less room for that.
+  #
+  # ONLY safe because momentum_fade and resistance are now expressed in MINUTES
+  # (below). As raw sample counts they would have become 6x more sensitive at
+  # this interval.
+  entry_check_interval_seconds: 10   # How often to re-check prices during the entry window, in seconds.
                                       # Kept at 60s (matches the 1-minute bar data we fetch) - polling faster
                                       # than that just re-reads the same bar and burns Alpaca's free-tier
                                       # data-request quota for no benefit.
@@ -180,6 +189,16 @@ trading:
   # If this session is worse, revert to 0.75 and use breakeven_trigger_pct
   # instead (PENDING_WORK item 1c) - a floor at entry solves the same problem
   # without disabling the trail on positions that never go green.
+  # Once the PEAK reaches breakeven_trigger_pct, the stop never goes below
+  # entry + breakeven_floor_pct. Added 2026-08-25 to fix what the 1.35% trail
+  # could not: CHWY peaked +0.98% and closed -0.41%, CRM +0.93% -> -0.67%, COIN
+  # +1.32% -> -0.23%. All three would have closed at ~breakeven with this on.
+  # The floor is slightly positive so the exit spread does not turn "breakeven"
+  # into a small loss.
+  use_breakeven_floor: true
+  breakeven_trigger_pct: 0.5
+  breakeven_floor_pct: 0.05
+
   trailing_stop_pct: 0.75      # Trailing stop: exit ALL remaining shares if price falls this % below the
                                 # HIGHEST price seen since entry (not below entry price - protects gains already made)
   time_stop_hour: 16           # Close all positions at this hour (ET) if nothing else has exited yet
@@ -188,6 +207,9 @@ trading:
   # without a loss, rather than waiting for it to reverse into one.
   momentum_fade_hour: 10                 # Start checking momentum fade at this hour (ET)
   momentum_fade_minute: 15               # ...and this minute. Combined: 10:15 AM ET by default.
+  # Expressed in MINUTES so the rule means the same span of market time at any
+  # poll rate. The sample-count key below is the fallback for older configs.
+  momentum_fade_window_minutes: 6
   momentum_fade_window_samples: 6        # Number of recent price samples used in the trend calc.
                                           # One sample is taken per exit-check pass (~once per minute
                                           # live), so 5 samples ~= the trend over the last ~4-5 minutes.
@@ -201,6 +223,7 @@ trading:
 
   # Resistance rejection: a "high, then two lower closes" pattern right at the
   # trade's peak is treated as a failed breakout and exits.
+  resistance_lookback_minutes: 3
   resistance_lookback_samples: 3   # Number of recent price samples checked for the failed-breakout
                                     # pattern (oldest sample = peak, must strictly decline from there)
   # Raised 0.3 -> 0.5 on 2026-08-21 from that day's split. RESISTANCE fired 13
