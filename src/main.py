@@ -57,6 +57,72 @@ def parse_hhmm_today(hhmm_str, et_tz):
     hour, minute = map(int, hhmm_str.split(":"))
     return datetime.now(et_tz).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
+def _benchmark_symbols(config, symbols):
+    """
+    Context symbols to stream alongside the watchlist: SPY plus whichever sector
+    ETFs today's names map to.
+
+    These are never traded. They exist so relative strength is measured against
+    a benchmark sampled the same way the symbol is - which was not true before:
+    SPY came over REST while streamed symbols came live, so the two sides of
+    `signal_pct - spy_pct` were minutes apart.
+
+    Returns [] when the stream is off or benchmarks are disabled, in which case
+    everything behaves exactly as it did.
+    """
+    if not config["trading"].get("stream_benchmarks", True):
+        return []
+    out = ["SPY"]
+    try:
+        from src.analytics import sectors as SEC
+        out += SEC.sectors_for(symbols)
+    except Exception as e:
+        logger.warning(f"Could not resolve sector benchmarks: {e}")
+    return [s for s in dict.fromkeys(out) if s not in set(symbols)]
+
+
+def _refresh_candidate_pool(config, screener):
+    """
+    Repoint the screener at a dynamically built candidate pool.
+
+    Deliberately mutates screener.candidates rather than adding a parallel path
+    through the screener: everything downstream - score_stock, the price band,
+    the merit ordering, last_scores, last_details - then works exactly as it did
+    on the static list, and the ONLY thing that changed is which symbols arrived.
+    A second code path would have meant two ways for a symbol to be selected and
+    two places for that to go wrong.
+
+    Silent on failure by design: select_candidates returns the static pool when
+    anything goes wrong, so a network problem in the universe build degrades to
+    the previous behaviour instead of emptying the watchlist.
+    """
+    if screener is None:
+        return None
+    if not config["trading"].get("use_dynamic_universe", False):
+        return None
+
+    try:
+        from src.screener import universe as U
+        static_pool = list(getattr(screener, "candidates", []) or [])
+        candidates, info = U.select_candidates(
+            screener.broker, config, static_pool=static_pool
+        )
+        if candidates and info.get("source") == "dynamic":
+            screener.candidates = candidates
+            logger.info(
+                f"===== DYNAMIC UNIVERSE: {info['universe']} liquid symbols -> "
+                f"top {info['shortlist']} -> {len(candidates)} candidates ====="
+            )
+            return info
+        logger.warning(
+            "Dynamic universe produced nothing usable - screening the static pool"
+        )
+    except Exception as e:
+        logger.error(f"Dynamic universe failed ({e}) - screening the static pool",
+                     exc_info=True)
+    return None
+
+
 def select_symbols(config, screener, market_data):
     """
     Run the daily screener (if enabled) and return the symbol list to trade,
@@ -95,6 +161,14 @@ def select_symbols(config, screener, market_data):
         logger.info("===== PRE-MARKET SCREENER =====")
         screener_ran = True
         timeout_seconds = config["trading"].get("screener_timeout_seconds", 420)
+
+        # Build the candidate pool before screening, not after: the expensive
+        # per-symbol scoring below runs over whatever this leaves in
+        # screener.candidates.
+        universe_info.clear()
+        info = _refresh_candidate_pool(config, screener)
+        if info:
+            universe_info.update(info)
 
         executor = ThreadPoolExecutor(max_workers=1)
         screener_started = time.monotonic()
@@ -262,6 +336,10 @@ stream_priority = {"symbols": []}
 # select_symbols and consumed deep in the trading loop, and threading it through
 # every call between the two would touch a lot of well-tested signatures.
 screener_details = {}
+# Set by _refresh_candidate_pool so the report can say where today's
+# candidates came from - a static list and a 1,000-name sweep produce very
+# different sessions and the log should not leave that ambiguous.
+universe_info = {}
 
 
 def _update_vwap(acc, symbol, bar):
@@ -289,7 +367,8 @@ def _vwap(acc, symbol):
 
 
 def _continuation_fields(config, symbol, price, signal_pct, spy_pct,
-                         prices, volumes, vwap, details, rvol=None, spread_pct=None):
+                         prices, volumes, vwap, details, rvol=None, spread_pct=None,
+                         sector_returns=None):
     """
     Compute every continuation factor available for this signal.
 
@@ -299,6 +378,7 @@ def _continuation_fields(config, symbol, price, signal_pct, spy_pct,
     weights from a guess into a fit.
     """
     from src.analytics import continuation as C
+    from src.analytics import sectors as SEC
 
     t = config["trading"]
     atr_pct = (details or {}).get("volatility_percentile")
@@ -315,10 +395,17 @@ def _continuation_fields(config, symbol, price, signal_pct, spy_pct,
         "breakout": C.breakout_quality(
             price, (details or {}).get("prior_high"), (details or {}).get("opening_high")
         ),
+        # Excess return over the symbol's OWN sector, not the index. A miner up
+        # 3% on a day the whole mining complex is up 3% has shown nothing about
+        # itself - it scores 50 here while scoring highly against SPY.
+        "sector_strength": SEC.sector_strength(symbol, signal_pct, sector_returns),
     }
 
     out = {f"cf_{k}": (round(v, 1) if v is not None else None) for k, v in factors.items()}
     out["cf_vwap"] = round(vwap, 4) if vwap else None
+    # Which benchmark the sector figure was measured against, so a journal row
+    # is self-describing: "50" means nothing without knowing 50 against what.
+    out["cf_sector_etf"] = SEC.sector_for(symbol)
 
     # Always scored, regardless of use_continuation_score. The flag controls
     # whether the score is ALLOWED TO DECIDE anything (see _rank_burst), not
@@ -1100,6 +1187,36 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     stream_warned = False
     volume_history = {symbol: deque(maxlen=20) for symbol in symbols}  # for intraday RVOL
     spy_history = deque()          # SPY samples, for excess-return-vs-market
+    # {etf: deque} - one benchmark per sector represented on the watchlist, so a
+    # symbol can be compared to what it actually moves with rather than only to
+    # the index. Built from the watchlist, so an all-semis day fetches one ETF
+    # and never touches the other eleven.
+    sector_history = {}
+    # Only the sectors this watchlist actually needs. Computed once here rather
+    # than per poll: the watchlist does not change during a session.
+    try:
+        from src.analytics import sectors as SEC
+        sector_etfs = SEC.sectors_for(symbols)
+        concentration = SEC.sector_concentration(symbols)
+        if sector_etfs:
+            logger.info(f"Sector benchmarks for today: {', '.join(sector_etfs)}")
+        unmapped = [s_ for s_ in symbols if not SEC.sector_for(s_)]
+        if unmapped:
+            logger.info(
+                f"No sector mapping for {len(unmapped)} symbol(s): "
+                f"{', '.join(sorted(unmapped))} - they score None on sector "
+                f"strength, which the continuation score drops rather than "
+                f"treating as weak"
+            )
+        for _etf, _members in concentration.items():
+            logger.warning(
+                f"SECTOR CONCENTRATION: {len(_members)} of {len(symbols)} watched "
+                f"symbols map to {_etf} ({', '.join(_members)}) - a burst across "
+                f"these is one bet held {len(_members)} times"
+            )
+    except Exception as e:
+        logger.error(f"Sector setup failed, continuing without it: {e}")
+        sector_etfs = []
     day_burst_notes = []           # one note per poll, summarised into the daily report
 
     while True:
@@ -1233,6 +1350,30 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         spy_history.popleft()
             except Exception as e:
                 logger.debug(f"SPY benchmark unavailable this poll: {e}")
+
+            # Sector ETFs, sampled exactly like SPY and for the same reason one
+            # step further in. Excess return over SPY separates "this stock is
+            # strong" from "the market went up"; excess over the SECTOR
+            # separates it from "the whole complex went up", which SPY cannot
+            # see. On 2026-08-26 seven of fourteen watched symbols mapped to the
+            # crypto complex - a burst across those is one bet held seven times,
+            # and against SPY every one of them looked independently strong.
+            #
+            # REST, not the stream: these cost no subscription slots, and the
+            # watchlist already wants every one of the 28 available.
+            for _etf in sector_etfs:
+                try:
+                    _bar = market_data.get_latest_bar(_etf, "1Min")
+                    if not _bar:
+                        continue
+                    _ts = _bar.get("timestamp", now)
+                    _hist = sector_history.setdefault(_etf, deque())
+                    _hist.append((_ts, _bar.get("close", 0)))
+                    _cut = _ts - lookback
+                    while _hist and _hist[0][0] < _cut:
+                        _hist.popleft()
+                except Exception as e:
+                    logger.debug(f"sector benchmark {_etf} unavailable: {e}")
 
             # PASS 1 - detect only. Signals are collected, not acted on, so
             # the number firing in THIS poll is known before any order is
@@ -1444,6 +1585,11 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             # Computed here, before the burst policy - the market's own move is
             # now an input to that decision, not just a journal column.
             spy_pct = _window_pct_change(spy_history)
+            # Same window as spy_pct and as the symbol's own signal_pct - a
+            # relative-strength number computed over a different window than the
+            # thing it is relative to is not a comparison.
+            sector_returns = {etf: _window_pct_change(hist)
+                              for etf, hist in sector_history.items()}
             burst_max, burst_size, burst_note = _burst_policy(config, burst_width, spy_pct)
 
             # Continuation factors, computed ONCE per candidate and BEFORE any
@@ -1463,6 +1609,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                      "opening_high": opening_high.get(cand["symbol"])},
                     rvol=cand["rvol"],
                     spread_pct=cand["spread_pct"],
+                    sector_returns=sector_returns,
                 )
 
             # Best-first, so the throttle keeps the best of a burst rather than
@@ -2010,7 +2157,32 @@ def main():
                 # here rather than at construction because the watchlist isn't
                 # decided until the screener has run.
                 if price_stream is not None:
-                    price_stream.start(symbols, priority=stream_priority["symbols"])
+                    # Benchmarks go on the stream too, and LAST in priority.
+                    #
+                    # SPY was never subscribed, so get_latest_bar("SPY") always
+                    # fell through to REST - which on the free tier is ~15
+                    # minutes delayed, per market_data.get_latest_bar's own
+                    # docstring. Every excess_vs_spy_pct therefore compared a
+                    # LIVE symbol move against a DELAYED market move, and
+                    # cf_rel_strength is built on that comparison. On 2026-08-26
+                    # cf_rel_strength measured rho -0.344 against forward
+                    # returns - the opposite sign to its +0.20 weight. A stale
+                    # benchmark is a strong candidate for why.
+                    #
+                    # The sector ETFs have the identical problem, so they are
+                    # subscribed for the identical reason.
+                    #
+                    # Last in priority on purpose: a benchmark must never
+                    # displace a symbol the bot can actually trade. With
+                    # num_stocks_to_trade at 15 against a 28-subscription
+                    # budget there is room, but if there ever is not, the
+                    # tradeable names win and the benchmarks fall back to REST
+                    # exactly as they do today.
+                    benchmarks = _benchmark_symbols(config, symbols)
+                    price_stream.start(
+                        list(dict.fromkeys(list(symbols) + benchmarks)),
+                        priority=stream_priority["symbols"],
+                    )
 
                 _set_run_context(config, email_notifier, symbols, price_stream)
 

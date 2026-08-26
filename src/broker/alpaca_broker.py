@@ -1,7 +1,11 @@
 import os
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetOrdersRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+from alpaca.trading.requests import (
+    MarketOrderRequest, LimitOrderRequest, GetOrdersRequest, GetAssetsRequest,
+)
+from alpaca.trading.enums import (
+    OrderSide, TimeInForce, QueryOrderStatus, AssetClass, AssetStatus,
+)
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -149,6 +153,51 @@ class AlpacaBroker:
         except Exception as e:
             logger.error(f"Error fetching sell orders for {symbol}: {e}")
             return []
+
+    def get_all_assets(self, tradable_only=True):
+        """
+        Every US equity Alpaca knows about, as a list of plain dicts.
+
+        One request returning ~11,000 rows, which is why the dynamic universe is
+        affordable at all: the alternative is discovering symbols one at a time.
+
+        Returns dicts rather than SDK objects so callers - and tests - do not
+        have to construct Alpaca types to work with a universe. Keys:
+        symbol, name, exchange, tradable, shortable, fractionable, marginable.
+
+        tradable_only filters to assets that can actually be bought. An asset
+        that is halted, delisted or otherwise untradable is not a candidate at
+        any score, and carrying it costs a screening slot.
+        """
+        try:
+            request = GetAssetsRequest(
+                status=AssetStatus.ACTIVE,
+                asset_class=AssetClass.US_EQUITY,
+            )
+            assets = self.trading_client.get_all_assets(request)
+        except Exception as e:
+            logger.error(f"Could not fetch asset list: {e}")
+            return []
+
+        out = []
+        for a in assets:
+            try:
+                if tradable_only and not getattr(a, "tradable", False):
+                    continue
+                out.append({
+                    "symbol": getattr(a, "symbol", None),
+                    "name": getattr(a, "name", "") or "",
+                    "exchange": str(getattr(a, "exchange", "") or ""),
+                    "tradable": bool(getattr(a, "tradable", False)),
+                    "shortable": bool(getattr(a, "shortable", False)),
+                    "fractionable": bool(getattr(a, "fractionable", False)),
+                    "marginable": bool(getattr(a, "marginable", False)),
+                })
+            except Exception:
+                continue
+        out = [a for a in out if a["symbol"]]
+        logger.info(f"Fetched {len(out)} tradable US equity assets")
+        return out
 
     def get_historical_bars(self, symbols, start, end, timeframe="1Day"):
         """Get historical bar data"""

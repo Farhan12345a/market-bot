@@ -50,11 +50,42 @@ JOURNAL_FIELDS = [
     # factors against forward returns for a couple of weeks is what turns them
     # from a guess into a fit. See src/analytics/continuation.py.
     "cf_efficiency", "cf_rel_strength", "cf_vol_accel", "cf_vwap_pos",
-    "cf_exhaustion", "cf_breakout", "cf_rvol", "cf_spread", "cf_vwap", "cf_score",
+    "cf_exhaustion", "cf_breakout", "cf_rvol", "cf_spread", "cf_vwap",
+    # Sector-relative strength, added 2026-08-26. Recorded whether or not it is
+    # weighted, like every other factor - and appended at the END of the cf_
+    # block on purpose, because repair_header remaps by name and a column
+    # inserted mid-schema is exactly the shape that made the old header rot
+    # unreadable.
+    "cf_sector_strength", "cf_sector_etf",
+    "cf_score",
     # --- what the bot decided ---
     "taken", "skip_reason", "qty", "size_multiplier",
     # --- what actually happened next (the label) ---
     "price_15min", "pct_15min", "price_30min", "pct_30min",
+]
+
+
+# Every past version of JOURNAL_FIELDS, oldest first.
+#
+# repair_header needs these to identify rows written under a schema that is
+# neither the file's original header nor the current one. Adding the sector
+# columns on 2026-08-26 put three generations in one file simultaneously, and
+# without this list the middle generation - that same morning's rows, carrying
+# every continuation factor - would have been left misaligned.
+#
+# APPEND a snapshot here whenever JOURNAL_FIELDS changes. A schema that is not
+# listed is a schema whose rows cannot be recovered by name.
+JOURNAL_FIELDS_HISTORY = [
+    # v1: before the opening-move and continuation columns (19)
+    [
+        "date", "signal_time", "symbol", "entry_method", "price",
+        "signal_pct", "excess_vs_spy_pct", "spy_pct", "rvol", "spread_pct",
+        "burst_width",
+        "taken", "skip_reason", "qty", "size_multiplier",
+        "price_15min", "pct_15min", "price_30min", "pct_30min",
+    ],
+    # v2: opening-move + continuation factors, before sector strength (32)
+    [c for c in JOURNAL_FIELDS if c not in ("cf_sector_strength", "cf_sector_etf")],
 ]
 
 
@@ -164,7 +195,8 @@ class SignalJournal:
             # The header is written once at file creation, so a schema that
             # grew since then leaves the new columns nameless - see
             # csv_schema.repair_header for what that cost on 2026-08-26.
-            repair_header(self.path, JOURNAL_FIELDS)
+            repair_header(self.path, JOURNAL_FIELDS,
+                          legacy_schemas=JOURNAL_FIELDS_HISTORY)
             write_header = not os.path.exists(self.path)
             with open(self.path, "a", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=JOURNAL_FIELDS)

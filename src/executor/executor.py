@@ -800,7 +800,14 @@ class Executor:
             # Same stale-header fault as the signal journal: this file was
             # created with 14 columns and has been writing 21 ever since, which
             # put the burst note under entry_rsi for every reader.
-            repair_header(str(path), fieldnames)
+            # Every past version of this schema, oldest first - see
+            # csv_schema. v1 predates the burst/excursion/post-exit columns.
+            legacy = [[
+                "date", "symbol", "entry_time", "entry_price", "entry_method",
+                "entry_rsi", "exit_time", "exit_price", "exit_reason",
+                "stop_loss_used", "exit_rsi", "qty", "pl", "pl_pct",
+            ]]
+            repair_header(str(path), fieldnames, legacy_schemas=legacy)
             write_header = not path.exists() or path.stat().st_size == 0
 
             with open(path, "a", newline="") as f:

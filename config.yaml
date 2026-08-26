@@ -48,6 +48,22 @@ trading:
   #
   # Priority goes to the screener's picks and the day's earnings/QQQ adds; the
   # static universe fills whatever is left.
+  # Stream SPY and the day's sector ETFs alongside the watchlist.
+  #
+  # SPY was never subscribed, so get_latest_bar("SPY") always fell through to
+  # REST - ~15 minutes delayed on the free tier. Every excess_vs_spy_pct has
+  # therefore compared a LIVE symbol move against a DELAYED market move, and
+  # cf_rel_strength (weighted +0.20) is built on that comparison. On 2026-08-26
+  # cf_rel_strength measured rho -0.344 against forward returns, the opposite
+  # sign to its weight. A stale benchmark is a strong candidate for why, and it
+  # is cheap to remove as a variable.
+  #
+  # Benchmarks are subscribed LAST, after every tradeable symbol, so they can
+  # never displace a name the bot could actually buy. num_stocks_to_trade is 15
+  # against the budget below, so there is room; if there ever is not, they fall
+  # back to REST exactly as they do today.
+  stream_benchmarks: true
+
   stream_max_subscriptions: 28
   websocket_feed: "iex"   # iex = free tier. sip requires a paid subscription.
 
@@ -99,9 +115,10 @@ trading:
   # column against the journal's forward returns and set the weights from what
   # actually predicted. Only then turn use_continuation_score on.
   #
-  # Sector confirmation and market regime are deliberately absent - those are
-  # the only factors needing data not already arriving, and they cost WebSocket
-  # slots. Decide those after the subscription-counting test.
+  # Sector confirmation landed 2026-08-26, over REST rather than the stream:
+  # the ETFs cost no subscription slots that way, so it did not have to wait on
+  # the subscription-counting test. It ships at zero weight (see below).
+  # Market regime is still absent.
   # Turned ON 2026-08-26 at the user's direction. Read what this now does
   # before reading the weights: the score RANKS a burst best-first so the
   # throttle keeps the best signals instead of whichever names sorted earliest.
@@ -124,6 +141,14 @@ trading:
     breakout: 0.10          # clearing a level that means something
     spread: 0.05            # the precise version of what min_stock_price approximates
     exhaustion: -0.15       # NEGATIVE: how much of the move already happened
+    # Added 2026-08-26 at ZERO weight on purpose. The factor is computed and
+    # written to the journal from day one, but it decides nothing until the
+    # ledger shows it keeping its sign across sessions. Every factor above was
+    # weighted from reasoning rather than evidence, and on 2026-08-26 two of them
+    # turned out to carry the WRONG sign (rel_strength weighted +0.20 against a
+    # measured rho of -0.344; vwap_pos +0.15 against -0.375). Weighting a new one
+    # by the same method would repeat that mistake knowingly.
+    sector_strength: 0.0
   opening_range_minutes: 5
 
   post_exit_track_minutes: 15
@@ -564,6 +589,63 @@ trading:
   # watchlist beats an empty one.
   merge_default_universe: false
 
+  # ---------------------------------------------------------------------
+  # Dynamic universe (added 2026-08-26)
+  # ---------------------------------------------------------------------
+  # Screen the market instead of a list someone typed once.
+  #
+  # Until now the candidate pool was candidates.txt (50 names) plus
+  # stock_universe (50 names), and the screener picked 15 from those. So the same
+  # tickers came back every session: on 2026-08-26 every symbol traded except
+  # ADBE and CMG was in the hardcoded list. The screener was not finding the best
+  # stocks, it was ranking a list.
+  #
+  # The funnel, and why it is affordable:
+  #
+  #     ~11,000 tradable assets    one request (get_all_assets)
+  #       -> liquidity+price cut   one BATCHED daily-bar sweep
+  #       -> universe_size         cheap scoring, no further requests
+  #       -> universe_shortlist    the expensive per-symbol scoring
+  #       -> num_stocks_to_trade   traded
+  #
+  # get_historical_bars already accepted a list and passed it to Alpaca's
+  # multi-symbol endpoint; the screener just never used it, looping one symbol at
+  # a time at ~6 calls each. Batched, a thousand symbols costs requests
+  # proportional to 1000/universe_chunk_size, not to 1000.
+  #
+  # This changes WHICH symbols get traded, not how many. The stream budget is
+  # still stream_max_subscriptions and the count is still num_stocks_to_trade.
+  # That is the intent - on 2026-08-26, 12 of 22 positions went the wrong way
+  # immediately - but it is not a route to more trades.
+  #
+  # Falls back to the static pool on ANY failure. An unfiltered watchlist beats
+  # an empty one.
+  use_dynamic_universe: true
+
+  # How many symbols survive the liquidity cut and get cheap-scored.
+  universe_size: 1000
+
+  # How many of those get the EXPENSIVE per-symbol scoring (minute bars for
+  # opening-move history). This is the setting that costs time: it multiplies
+  # against screener_timeout_seconds below. 100 roughly doubles what the old
+  # 50-name pool cost, which is why the timeout moved from 420s to 900s.
+  universe_shortlist_size: 100
+
+  # Minimum average daily dollar volume. Dollar, not share, volume: 10M shares
+  # of a $2 stock and 10M of a $200 one are not the same market and only one can
+  # absorb a position without moving it.
+  universe_min_dollar_volume: 20000000
+
+  # Symbols per batched bar request. A too-large request fails as a whole and
+  # takes its chunk with it, so this bounds the blast radius of one bad response.
+  universe_chunk_size: 200
+
+  # The liquidity cut answers "what is liquid enough to trade", which changes
+  # over weeks. Rebuilding it daily would spend the pre-open window re-deriving
+  # yesterday's answer. Cheap SCORES are never cached - those are today's tape.
+  universe_cache_file: "logs/universe.json"
+  universe_cache_days: 7
+
   use_daily_screener: true  # Set to true to dynamically select stocks each day
   screener_start_time: "09:05"  # ET. Screener runs PRE-MARKET so the symbol list is ready
                                  # at the bell. It previously waited for the market to open
@@ -603,7 +685,11 @@ trading:
                                      # 0 disables scoring but keeps the logging
 
   min_screener_score: 35  # Minimum score to trade (0-100)
-  screener_timeout_seconds: 420  # 7 min hard cap on the screener. With ~50+ candidates,
+  # 420 -> 900 for the dynamic universe: universe_shortlist_size is 100, roughly
+  # double the old 50-name pool, and the expensive stage scales with it. The
+  # window still fits - the screener starts at 09:05, so 900s finishes by 09:20,
+  # ahead of the 09:28 list build and the 09:33 entry window.
+  screener_timeout_seconds: 900  # hard cap on the screener. With ~50+ candidates,
                                   # each scored via several sequential API calls (including
                                   # a yfinance earnings lookup), the screener can run slow.
                                   # If it hasn't finished by this deadline, it's aborted and

@@ -32,9 +32,21 @@ what the stale header on disk is - and rewritten by column NAME into the new
 order. Any column the old schema lacked is written blank, which is honest: that
 data was never recorded.
 
-Rows already at the new width are passed through untouched. A row at neither
+Rows already at the new width are passed through untouched. A row at no known
 width is left alone and reported, because a row this code cannot identify is a
 row it must not rewrite.
+
+Why a schema HISTORY is needed
+------------------------------
+Knowing only the on-disk header and the current schema is not enough once a file
+has lived through more than one change. Adding the sector columns on 2026-08-26
+put three generations in one file at once: a 19-column header, 32-column rows
+from earlier that same day, and a 34-column schema. The 32-column rows matched
+neither end and would have been copied verbatim - silently reintroducing exactly
+the fault this module exists to fix, one day after fixing it.
+
+So callers pass every past version of their schema. Each row is matched by width
+against the on-disk header, then the known history, then the current schema.
 """
 
 import csv
@@ -64,9 +76,13 @@ def remap_row(row, old_fields, new_fields):
     return [values.get(name, "") for name in new_fields]
 
 
-def repair_header(path, fieldnames):
+def repair_header(path, fieldnames, legacy_schemas=()):
     """
     Make `path` match `fieldnames`, rewriting it in place if it does not.
+
+    legacy_schemas: past versions of this schema, oldest first. Needed whenever
+    a file may contain rows from more than one generation - see the module
+    docstring.
 
     Returns True if a repair happened. No-ops when the file is missing, empty,
     or already correct.
@@ -97,6 +113,23 @@ def repair_header(path, fieldnames):
             return False
 
         old_width, new_width = len(header), len(fieldnames)
+
+        # width -> the schema a row of that width was written under. Built
+        # oldest-first so a later generation wins any width collision: two
+        # schemas of equal width mean one replaced the other, and the newer
+        # one is what recent rows were written with.
+        by_width = {old_width: header}
+        for schema in legacy_schemas or ():
+            schema = list(schema)
+            if all(c in fieldnames for c in schema):
+                by_width[len(schema)] = schema
+            else:
+                logger.warning(
+                    f"{path}: ignoring a declared legacy schema with column(s) "
+                    f"absent from the current one"
+                )
+        by_width[new_width] = fieldnames
+
         remapped = passed = odd = 0
 
         backup = f"{path}.bak"
@@ -108,26 +141,28 @@ def repair_header(path, fieldnames):
             for row in rows[1:]:               # rows[0] is the stale header
                 if not row:
                     continue
-                if len(row) == old_width:
-                    writer.writerow(remap_row(row, header, fieldnames))
-                    remapped += 1
+                schema = by_width.get(len(row))
+                if schema is None:
+                    writer.writerow(row)       # unidentifiable - do not touch
+                    odd += 1
                 elif len(row) == new_width:
                     writer.writerow(row)       # already current
                     passed += 1
                 else:
-                    writer.writerow(row)       # unidentifiable - do not touch
-                    odd += 1
+                    writer.writerow(remap_row(row, schema, fieldnames))
+                    remapped += 1
 
         logger.info(
             f"{path}: header repaired {old_width} -> {new_width} columns "
-            f"({remapped} old rows remapped by name, {passed} already current"
+            f"({remapped} older rows remapped by name across "
+            f"{len(set(by_width)) - 1} generation(s), {passed} already current"
             + (f", {odd} of unrecognised width left as-is" if odd else "")
             + f"; previous file saved as {backup})"
         )
         if odd:
             logger.warning(
-                f"{path}: {odd} row(s) matched neither the old ({old_width}) "
-                f"nor the new ({new_width}) width and were copied verbatim - "
+                f"{path}: {odd} row(s) matched no known schema width "
+                f"(known: {sorted(by_width)}) and were copied verbatim - "
                 f"they will still misread. Inspect {backup} if that matters."
             )
         return True

@@ -663,56 +663,59 @@ build their own config explicitly so they test the code, and intent tests should
 assert the current decision with the reasoning attached. A test reading
 `config.yaml` is testing the config file, not the code.
 
-## 9. Sector confirmation + market regime — the last two continuation factors
+## 9. Sector confirmation — SHIPPED 2026-08-26. Market regime still open.
 
-**Not built. These are the ONLY factors from the 2026-08-26 continuation design
-that need data the bot is not already receiving, which is why they were left
-out while the other six shipped.**
+**Sector confirmation is built** (`src/analytics/sectors.py`), at ZERO weight in
+`continuation_weights`. It is computed, journalled as `cf_sector_strength` and
+`cf_sector_etf`, and decides nothing until the ledger shows it keeping its sign
+across sessions.
 
-**Sector confirmation** — is capital flowing into the whole group, or is this a
-single-stock event? NVDA +5% with SMH +3%, AMD +4%, AVGO +3% is a sector burst;
-NVDA +5% with SMH +0.2% and AMD -0.5% is one stock. Plus a breadth measure:
+What it answers: is capital flowing into the whole group, or is this a
+single-stock event? A miner up 3% on a day the whole mining complex is up 3% has
+shown nothing about itself — it scores 50 against its sector while scoring highly
+against SPY. `relative_strength` cannot see that distinction; this can.
 
-    SectorBreadth = advancing peers / peers in sector
+It also reports **watchlist concentration** at session start. On 2026-08-26 seven
+of fourteen watched symbols mapped to the crypto complex (MARA RIOT CLSK CIFR
+WULF COIN HOOD). That is one bet held seven times, arriving through the
+watchlist rather than through a poll — the same correlation the burst throttle
+exists to limit, at a layer the throttle never sees. Every one of those seven
+lost money that session.
 
-**Market regime** — SPY, QQQ, IWM up and VIX down. Better still is the
-hierarchy: stock > sector > index, capital concentrating into exactly the area
-being traded. SPY is already sampled every poll; the rest are not.
+**The blocker was removed, not worked around.** This item used to be blocked on
+the WebSocket budget: REST is ~15 minutes delayed on the free tier, so a sector
+read over REST would answer "was the sector moving a quarter of an hour ago".
+The resolution is that there was budget all along — `num_stocks_to_trade` is 15
+against `stream_max_subscriptions` of 28. SPY and the day's sector ETFs are now
+subscribed alongside the watchlist, LAST in priority so a benchmark can never
+displace a tradeable name. A 14-symbol watchlist needs 6 benchmarks: 20 of 28.
 
-**Why it is blocked, precisely.** REST on the free tier is ~15 minutes delayed,
-so a sector read over REST answers "was semis moving a quarter of an hour ago",
-which is useless for a burst decision. The data has to come over the WebSocket,
-and that means subscriptions against a 28-subscription cap.
+### The finding that came out of this, which matters more
 
-**The budget maths, and the way out:**
+**SPY was never subscribed to the stream.** Only the watchlist was. So
+`get_latest_bar("SPY")` always fell through to REST — the ~15-minute-delayed
+path that `market_data.get_latest_bar`'s own docstring warns about.
 
-| Config | Trading symbols | Context symbols |
-|--------|-----------------|-----------------|
-| ticks ON (current) | 14 with ticks | 0 |
-| ticks OFF | 14 on bars | **14** (SPY/QQQ/IWM + ~11 sector ETFs) |
+Which means **every `excess_vs_spy_pct` ever recorded compared a LIVE symbol
+move against a DELAYED market move**, and `cf_rel_strength` — weighted **+0.20**,
+the joint-largest weight in the continuation score — is built directly on that
+comparison.
 
-Sector ETFs do not need trade ticks - they are slow context, not entry timing -
-so turning `use_trade_ticks_for_entry` off buys the entire sector layer for
-nothing but tick precision on entries. On 2026-08-25 the stream had already cut
-mean adverse slippage from +0.42% to +0.205%; ticks shave the residue of a
-60-second bar lag, while sector confirmation is a whole new factor. That trade
-looks worth taking.
+On 2026-08-26 `cf_rel_strength` measured **rho -0.344** against 15-minute forward
+returns: the opposite sign to its weight. A stale benchmark is a strong
+candidate for why, though not a proven one — the alternative is that relative
+strength genuinely mean-reverts at this horizon.
 
-**Do the cheap test FIRST.** It is still unknown whether Alpaca counts
-SUBSCRIPTIONS or UNIQUE SYMBOLS. If unique symbols, 28 symbols fit WITH ticks
-and there is no trade-off at all. Set `stream_max_subscriptions: 56` and watch
-for `symbol limit exceeded` - the failure is now named within ~2 seconds, so the
-test costs seconds rather than a session.
+**This is now testable rather than arguable.** With SPY streamed, the next
+sessions produce `excess_vs_spy_pct` computed from two live series. If
+`cf_rel_strength` flips to a positive rho, staleness was the cause and the +0.20
+weight was defensible all along. If it stays negative, the factor is genuinely
+backwards and the weight must go. Either answer is worth having; neither was
+reachable while the benchmark was minutes behind the thing it benchmarked.
 
-**Paid alternative:** Alpaca Algo Trader Plus (~$99/month) gives the SIP feed,
-no 15-minute REST delay and no practical symbol cap, removing every constraint
-above. Not worth buying while the strategy has not had a green day.
-
-**Sequence:** subscription test -> decide ticks vs sector -> add the two
-factors as journal columns only -> fit weights with the other six after ~2
-weeks of data.
-
----
+**Market regime** (SPY/QQQ/IWM up, VIX down) is still not built. QQQ and IWM are
+now cheap to add for the same reason the sector ETFs were — spare subscription
+slots — but VIX is not a tradeable equity and does not arrive over this feed.
 
 ## 10. Data that is NOT obtainable on this plan — do not design around it
 
