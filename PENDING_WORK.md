@@ -621,10 +621,29 @@ rolls back if the service doesn't come up.
 
 ## Test suites
 
-**1,015 cases across 25 suites as of 2026-08-26.** Run them with the scratchpad's
-`runall.sh`, which fails loudly if a suite dies before printing its own summary -
-it previously counted PASS/FAIL lines only, so three stale suites reported "0
-fail" while silently skipping most of their cases.
+**1,066 cases across 26 suites as of 2026-08-26.** Run them with:
+
+    ./ops/runall.sh
+
+**They now live in `tests/`, in the repo.** Until 2026-08-26 they sat in the
+session scratchpad — outside version control, on an ephemeral container, and
+therefore one reclaim away from losing the whole safety net. They also hardcoded
+one machine's checkout path, so they only ran where they were written.
+`tests/_repo.py` derives the repo root from its own location instead.
+
+**Running the suite cannot touch the live logs.** Several suites exercise code
+that resolves paths relative to the CURRENT directory — `save_trades_log()`
+appends to `logs/trade_history.csv`, the signal journal writes
+`logs/signal_journal.csv` — and two of them used to `chdir` to the repo root
+first. Harmless on a dev box with throwaway logs; on the VPS those are the live
+files behind every report and behind ANALYSIS_LOG.md. `sandbox_cwd()` gives them
+a disposable directory of the same shape, and `runall.sh` independently runs
+each suite from a fresh temp cwd. Verified by checksumming `logs/*.csv` either
+side of a full run.
+
+The runner fails loudly if a suite dies before printing its own summary — it
+previously counted PASS/FAIL lines only, so three stale suites reported "0 fail"
+while silently skipping most of their cases.
 
 **Run a coverage audit when adding a feature**, not just the suite. On
 2026-08-26 an audit mapping each new feature to its tests found three with NO
@@ -632,22 +651,17 @@ coverage at all - the eight continuation factors, adaptive polling, and the
 post-exit note logic - despite the suite being green at 946 cases. Green means
 what is tested passes, never that everything is tested.
 
+The same gap reappeared the same day: `_rank_burst` and `csv_schema` shipped
+with no direct coverage until `test_schema.py` was written for them. That suite
+checks, among other things, that repairing a stale header does not land a legacy
+row's `taken` value under `opening_hit_rate` — the exact corruption the first
+implementation of the repair would have caused.
 
-
-Not in the repo — they live in the session scratchpad and will be lost when the
-container is reclaimed. **284 cases as of `55a6dd9`**, covering: broker-lag position
-reconciliation, three-bar acceleration, report save/retention, WebSocket
-routing/fallback/watchdog, burst throttle, signal journal, take-profit scale-out,
-the earnings/QQQ list builder, and an A–Z pass against the real `config.yaml`.
-
-Two harness traps worth knowing before re-running them: any suite that calls
-`check_exit` must pin `strategy._now_et`, or a run after 16:00 ET returns
-`TIME_STOP_4PM` for every position and masks the rule under test; and a mock
-broker must *decrement* on a sell rather than dropping the symbol, or every
-partial exit looks like a stale-position leak. Worth moving into `tests/` if any of this is to be
-maintained.
-
----
+**Tests that pin a live config value will break when you change it, by design.**
+Nine did on 2026-08-26. The fix is not to loosen them: mechanism tests should
+build their own config explicitly so they test the code, and intent tests should
+assert the current decision with the reasoning attached. A test reading
+`config.yaml` is testing the config file, not the code.
 
 ## 9. Sector confirmation + market regime — the last two continuation factors
 

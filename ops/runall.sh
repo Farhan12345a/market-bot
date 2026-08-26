@@ -1,12 +1,28 @@
 #!/usr/bin/env bash
-# Runs every suite. A suite is only OK if it reached its own summary line -
-# a logged traceback from deliberate failure-injection is normal, a suite that
-# died halfway is not, and the two are indistinguishable by grepping for
-# "Traceback". The summary line proves the file ran to the end.
-cd "$(dirname "$0")"
+# Runs every suite in tests/.
+#
+# A suite is only OK if it reached its own summary line - a logged traceback
+# from deliberate failure-injection is normal, a suite that died halfway is not,
+# and the two are indistinguishable by grepping for "Traceback". The summary
+# line proves the file ran to the end.
+#
+# Each suite runs with a THROWAWAY working directory. Several exercise code that
+# resolves paths relative to cwd - save_trades_log() appends to
+# logs/trade_history.csv, the signal journal writes logs/signal_journal.csv - and
+# on the VPS those are the live files behind every report and ANALYSIS_LOG.md.
+# Running the suite must never be able to touch them. tests/_repo.py handles
+# this from inside the suites too; this is the belt to that pair of braces.
+set -u
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(dirname "$here")"
+cd "$repo/tests" || { echo "no tests/ directory at $repo"; exit 1; }
+
 tot=0; fails=0; bad=""
 for x in test_*.py preflight.py; do
-  out=$(timeout 300 python3 "$x" 2>&1); rc=$?
+  [ -e "$x" ] || continue
+  sandbox=$(mktemp -d)
+  out=$(cd "$sandbox" && timeout 300 python3 "$repo/tests/$x" 2>&1); rc=$?
+  rm -rf "$sandbox"
   n=$(echo "$out" | grep -c "^PASS"); e=$(echo "$out" | grep -c "^FAIL")
   problem=""
   # Older suites end with "ALL PASSED" / "FAILURES: [...]"; newer ones with
