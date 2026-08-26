@@ -201,6 +201,51 @@ Kept deliberately — each one looked reasonable on the data available.
   on 2026-08-26: the 10 positions where the two could differ made +$524.88 and 7
   tiered out, so it would only ever have altered winners.
 
+## Signal-ceiling control group (daily check)
+
+`rapid_increase_max_pct` is 2.0 and applies only to streamed symbols. Skipped
+signals are still journalled with forward returns, so the ceiling can be judged
+rather than assumed.
+
+**2026-08-26: the ceiling did not fire once.** Largest signal all session was
+1.452%; nothing came near 2.0%. There is no control group yet because the
+threshold has never bound. That is the honest state — not "it is working".
+
+`cf_exhaustion` is the continuous version of the same measure and does have
+something to say. 15-minute forward return by band, 2026-08-26:
+
+| exhaustion | n | mean 15m | mean 30m | hit 15m |
+|---|---|---|---|---|
+| 0-19 | 47 | +0.206% | +0.477% | 66% |
+| 20-39 | 71 | +0.034% | +0.366% | 49% |
+| 40-59 | 39 | -0.269% | +0.320% | 38% |
+| 60-79 | 15 | -0.602% | +0.052% | 7% |
+| 80-100 | 4 | -0.183% | +0.279% | 0% |
+
+Monotonic across every band at 15 minutes, which is the horizon the strategy
+actually exits on. Exhaustion ~40 maps to signal_pct around 1.0%, so the cutoff
+worth testing is near 1.0 — not 2.0. **2026-08-19 said the same thing
+independently**: signals of 1.0% or more went 1-for-6 for -$531; under 1.0%,
+4-for-14 for -$181. Two sessions, same number, different measures.
+
+Where a lower ceiling would have bound on 2026-08-26 — mean forward return of
+the signals it would have REFUSED (negative means refusing was right):
+
+| ceiling | signals cut | mean 15m | mean 30m |
+|---|---|---|---|
+| 2.00% | 0 | - | - |
+| 1.25% | 4 | -0.955% | +0.070% |
+| 1.00% | 20 | -0.466% | +0.279% |
+| 0.80% | 60 | -0.361% | +0.145% |
+
+**Two caveats that stop this being a decision.** At 30 minutes every band is
+positive, including 60-79 — so this is short-horizon mean reversion followed by
+recovery, not a permanent penalty. And 176 signals across 13 symbols is one
+session; the 60-79 band is n=15 and 80-100 is n=4.
+
+**Recommendation, not yet applied:** lower `rapid_increase_max_pct` to 1.25 so
+the ceiling binds and starts producing the control group it was built for.
+
 ## Known data-quality problems
 
 - **`spread_pct` is unreliable.** 2026-08-26: COIN a constant 7.03-7.07%, ADBE a
@@ -210,6 +255,14 @@ Kept deliberately — each one looked reasonable on the data available.
 - **Signals are not independent observations.** The same symbol re-fires every
   poll: 2026-08-26 had 176 signals across 13 symbols, IONQ alone 34 times. Read
   every rho against the SYMBOL count.
+- **SPY was never streamed** (found and fixed 2026-08-26). Only the watchlist was
+  subscribed, so `get_latest_bar("SPY")` always took the ~15-minute-delayed REST
+  path. Every `excess_vs_spy_pct` before this fix compared a LIVE symbol move
+  against a DELAYED market move, and `cf_rel_strength` — weighted +0.20 — is
+  built on that comparison. Its measured rho of -0.344 may be an artefact of the
+  stale benchmark rather than a real reversal. Sessions from 2026-08-27 onward
+  have both sides live; sessions before it do not, and pooling the two would
+  average a broken measurement with a working one.
 - **Per-symbol constants masquerade as per-signal features.** `opening_hit_rate`,
   `opening_avg_gain` and `opening_sessions` are fixed per symbol for the whole
   session, so their correlation with forward returns is really a comparison
