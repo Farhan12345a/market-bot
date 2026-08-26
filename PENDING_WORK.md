@@ -621,6 +621,19 @@ rolls back if the service doesn't come up.
 
 ## Test suites
 
+**1,015 cases across 25 suites as of 2026-08-26.** Run them with the scratchpad's
+`runall.sh`, which fails loudly if a suite dies before printing its own summary -
+it previously counted PASS/FAIL lines only, so three stale suites reported "0
+fail" while silently skipping most of their cases.
+
+**Run a coverage audit when adding a feature**, not just the suite. On
+2026-08-26 an audit mapping each new feature to its tests found three with NO
+coverage at all - the eight continuation factors, adaptive polling, and the
+post-exit note logic - despite the suite being green at 946 cases. Green means
+what is tested passes, never that everything is tested.
+
+
+
 Not in the repo — they live in the session scratchpad and will be lost when the
 container is reclaimed. **284 cases as of `55a6dd9`**, covering: broker-lag position
 reconciliation, three-bar acceleration, report save/retention, WebSocket
