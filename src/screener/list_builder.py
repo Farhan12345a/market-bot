@@ -399,7 +399,7 @@ def _filter_earnings_candidates(screener, symbols, why, surprises, config):
     has not happened yet.
 
     Names whose surprise cannot be read are KEPT, not dropped. Nasdaq often
-    has not published EPS for a before-the-bell reporter by 09:20, and
+    has not published EPS for a before-the-bell reporter that early, and
     discarding every one of them would empty the list on most mornings. An
     unknown is an unknown, not a miss.
     """
@@ -419,7 +419,7 @@ def _filter_earnings_candidates(screener, symbols, why, surprises, config):
 
         if require_known and surprise is None:
             # Nasdaq often has not published EPS for a before-the-bell reporter
-            # by 09:20, so "unknown" usually means "too early", not "bad". This
+            # that early, so "unknown" usually means "too early", not "bad". This
             # setting trades coverage for certainty: on 2026-08-24 the only
             # earnings name added was PDD, logged "surprise unknown", and it was
             # the worst trade of the day at -$86.56 on a -$119.38 session.

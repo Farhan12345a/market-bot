@@ -697,3 +697,50 @@ above. Not worth buying while the strategy has not had a green day.
 **Sequence:** subscription test -> decide ticks vs sector -> add the two
 factors as journal columns only -> fit weights with the other six after ~2
 weeks of data.
+
+---
+
+## 10. Data that is NOT obtainable on this plan — do not design around it
+
+Recorded 2026-08-26 after a proposed opening-volatility model leaned on two
+inputs the account cannot get. Both are genuinely strong predictors; neither is
+available, and finding that out after building around them would be expensive.
+
+**Options implied volatility / expected move.** The `S x IV x sqrt(T/365)`
+expected-move calculation needs an options chain with ATM IV, ideally 0DTE/1DTE.
+Alpaca sells options market data on paid tiers only. Not available.
+
+**Opening auction imbalance.** Imbalance side, imbalance quantity, paired
+shares, indicative clearing price. These come from NYSE/Nasdaq proprietary
+auction feeds — institutional products, not something a retail plan carries, and
+not exposed by Alpaca at any tier. Not available at a realistic price.
+
+**What IS obtainable, roughly in order of cost:**
+
+| input | status |
+|---|---|
+| gap %, RVOL (daily), ATR, 5-day return | already built into the screener |
+| historical opening volatility | already built (`opening_hit_rate`) |
+| relative strength vs SPY | already built (`cf_rel_strength`) |
+| VWAP position, volume acceleration, efficiency, exhaustion | already built |
+| sector ETF relative strength | obtainable and cheap — item 9 |
+| pre-market range / pre-market RVOL | obtainable via extended-hours bars, but see caveat |
+| news / analyst changes | Alpaca news API is free; latency and unbacktestability are the problems |
+| options IV | **PAID — not available** |
+| auction imbalance | **NOT AVAILABLE at any realistic price** |
+
+**Caveat on pre-market data specifically.** This account is on the IEX feed,
+roughly 2% of consolidated volume. Pre-market liquidity is thin to begin with
+and thinner still on one venue's share of it, so pre-market RVOL and range here
+are weak, noisy signals rather than the strong ones the literature describes for
+consolidated data. Worth collecting; not worth weighting heavily.
+
+**The larger point, which matters more than the missing inputs.** A model that
+predicts |move| predicts VOLATILITY, not direction, and `score_stock`'s own
+docstring already reads "Score a stock 0-100 for likelihood of volatility in
+first 30 min." The entry signal then fires on `rapid_increase` — a stock that IS
+moving. Volatility is therefore already selected for twice. On 2026-08-26, 12 of
+22 positions went the wrong way immediately; those were not quiet stocks failing
+to move, they were stocks moving against a long-only book. **The gap is
+direction, and direction is the hard half.** More volatility modelling buys more
+of what the bot already has.

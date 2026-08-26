@@ -204,17 +204,61 @@ class TradeManager:
 
         return 0, None
 
+    def _breakeven_tiers(self):
+        """
+        [(trigger_pct, floor_pct)] highest trigger first.
+
+        Reads breakeven_tiers when present, otherwise synthesises the single
+        tier from breakeven_trigger_pct/breakeven_floor_pct so an older config
+        keeps its exact previous behaviour.
+        """
+        trading = self.config["trading"]
+        tiers = trading.get("breakeven_tiers")
+        if not tiers:
+            return [(trading.get("breakeven_trigger_pct", 0.5),
+                     trading.get("breakeven_floor_pct", 0.05))]
+        out = []
+        for tier in tiers:
+            try:
+                out.append((float(tier["trigger_pct"]), float(tier["floor_pct"])))
+            except (KeyError, TypeError, ValueError):
+                logger.warning(f"{self.symbol}: ignoring malformed breakeven tier {tier!r}")
+        if not out:
+            return [(trading.get("breakeven_trigger_pct", 0.5),
+                     trading.get("breakeven_floor_pct", 0.05))]
+        return sorted(out, reverse=True)
+
     def check_breakeven_stop(self, current_price):
         """
         Once a position has proven itself, never let it become a loser.
 
-        Arms when the PEAK since entry reaches breakeven_trigger_pct - the peak,
-        not the current price, because a position that touched +0.5% has shown
+        Arms when the PEAK since entry reaches a tier's trigger - the peak, not
+        the current price, because a position that touched the level has shown
         something even if it has since fallen back. Once armed it stays armed.
 
-        The floor sits slightly ABOVE entry (breakeven_floor_pct) because a true
-        zero exits at the entry price and the bid-ask spread then makes that a
-        small loss.
+        Tiers, added 2026-08-26. A single trigger at +0.5% only protects
+        positions that got that far, and on 2026-08-26 the positions that went
+        green but stopped short of +0.5% lost $293.10 across eight positions
+        with no winners among them - the single largest recoverable bucket in
+        the session. A lower tier arms earlier and takes those out flat instead.
+
+        The floor sits slightly ABOVE entry rather than at it. Exiting at
+        exactly the entry price is not a $0 trade: the sell crosses the spread,
+        so a true zero fills a few cents down. +0.05% is what makes "no loss"
+        actually mean no loss.
+
+        Where the tiers conflict - a peak past several triggers - the HIGHEST
+        floor wins, so adding a low tier can never loosen the protection a
+        higher one already gave.
+
+        The risk this carries, stated plainly: arming earlier means arming
+        inside the dip that momentum entries usually take before they run. On
+        2026-08-26 all seven tiered winners traded below entry at some point
+        (MAE -0.03% to -0.56%) and none was scratched, because their dip came
+        BEFORE the peak crossed +0.5%. A lower trigger moves the arm point
+        into that window. MFE/MAE do not record which came first, so this is
+        measurable only going forward - watch BREAKEVEN_STOP count and the MFE
+        of what it exits.
 
         Why this instead of a wider trailing stop, which was tried and reverted
         on 2026-08-25: a trailing exit lands at roughly (MFE - trail), so a wider
@@ -232,17 +276,18 @@ class TradeManager:
         if not trading.get("use_breakeven_floor", False):
             return 0
 
-        trigger = trading.get("breakeven_trigger_pct", 0.5) / 100
         peak_gain = (self.highest_since_entry - self.entry_price) / self.entry_price
+
         # Epsilon for the same reason as the take-profit tiers: a peak computed
         # as exactly +0.5% lands just under 0.005 in binary floating point, and
         # a strict comparison would leave the position unarmed at precisely the
         # level that is supposed to arm it.
-        if peak_gain < trigger - TIER_EPSILON:
-            return 0          # not armed yet
+        armed = [floor for trigger, floor in self._breakeven_tiers()
+                 if peak_gain >= trigger / 100 - TIER_EPSILON]
+        if not armed:
+            return 0
 
-        floor_pct = trading.get("breakeven_floor_pct", 0.05) / 100
-        floor_price = self.entry_price * (1 + floor_pct)
+        floor_price = self.entry_price * (1 + max(armed) / 100)
         if current_price <= floor_price * (1 + TIER_EPSILON):
             return self.qty_remaining
         return 0
@@ -381,6 +426,22 @@ class TradeManager:
         max_ups = int((len(recent) - 1) * self.config["trading"].get(
             "resistance_max_uptick_fraction", 0.34))
         falling = recent[-1] < recent[0] and ups <= max_ups
+
+        # Never sell into an upturn.
+        #
+        # The two conditions above describe the window as a whole, and a window
+        # can still be net-down while price is turning back up at its right-hand
+        # edge - which is exactly the case worth NOT exiting: the pullback ended
+        # and the position is recovering. Requiring the last tick to be
+        # non-rising costs nothing when the breakout has genuinely failed (price
+        # is still dropping, so the condition holds) and stops the rule firing at
+        # the bottom of a dip it should have held through.
+        #
+        # Deliberately only the most recent tick. A longer "is it recovering"
+        # test would re-introduce the poll-rate sensitivity that expressing the
+        # window in minutes was meant to remove.
+        if len(recent) >= 2 and recent[-1] > recent[-2]:
+            return 0
 
         if not (falling and recent[0] == self.highest_since_entry):
             return 0

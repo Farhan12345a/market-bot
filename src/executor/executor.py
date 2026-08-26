@@ -6,6 +6,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from src.analytics.csv_schema import repair_header
+
 logger = logging.getLogger(__name__)
 
 # How long a just-opened position is trusted as open even while the broker's
@@ -795,6 +797,10 @@ class Executor:
         try:
             path = Path(filepath)
             path.parent.mkdir(parents=True, exist_ok=True)
+            # Same stale-header fault as the signal journal: this file was
+            # created with 14 columns and has been writing 21 ever since, which
+            # put the burst note under entry_rsi for every reader.
+            repair_header(str(path), fieldnames)
             write_header = not path.exists() or path.stat().st_size == 0
 
             with open(path, "a", newline="") as f:

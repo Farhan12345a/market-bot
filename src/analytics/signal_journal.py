@@ -27,6 +27,8 @@ import logging
 import os
 from datetime import datetime, timedelta
 
+from src.analytics.csv_schema import repair_header
+
 logger = logging.getLogger(__name__)
 
 JOURNAL_FIELDS = [
@@ -159,6 +161,10 @@ class SignalJournal:
 
         try:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            # The header is written once at file creation, so a schema that
+            # grew since then leaves the new columns nameless - see
+            # csv_schema.repair_header for what that cost on 2026-08-26.
+            repair_header(self.path, JOURNAL_FIELDS)
             write_header = not os.path.exists(self.path)
             with open(self.path, "a", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=JOURNAL_FIELDS)

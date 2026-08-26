@@ -102,7 +102,19 @@ trading:
   # Sector confirmation and market regime are deliberately absent - those are
   # the only factors needing data not already arriving, and they cost WebSocket
   # slots. Decide those after the subscription-counting test.
-  use_continuation_score: false
+  # Turned ON 2026-08-26 at the user's direction. Read what this now does
+  # before reading the weights: the score RANKS a burst best-first so the
+  # throttle keeps the best signals instead of whichever names sorted earliest.
+  # It does NOT gate - no signal is refused for scoring low, because the weights
+  # below are still reasoned guesses rather than a fit, and a gate would delete
+  # trades on the strength of a guess. Ranking only reorders a cut that was
+  # already being made arbitrarily.
+  #
+  # Note this flag was inert until 2026-08-26 - both branches of the code that
+  # read it computed the same thing and nothing consumed the result. Sessions
+  # before that date have cf_score in the journal but it decided nothing, which
+  # is what makes them a clean control group.
+  use_continuation_score: true
   continuation_weights:
     efficiency: 0.20        # momentum persistence - trend, not whipsaw
     rel_strength: 0.20      # excess return over SPY
@@ -118,10 +130,14 @@ trading:
 
   entry_check_interval_seconds_rest: 60
 
-  entry_check_interval_seconds: 10   # How often to re-check prices during the entry window, in seconds.
-                                      # Kept at 60s (matches the 1-minute bar data we fetch) - polling faster
-                                      # than that just re-reads the same bar and burns Alpaca's free-tier
-                                      # data-request quota for no benefit.
+  # How often to re-check prices during the entry window, in seconds.
+  #
+  # 60 -> 10 once the WebSocket was working. The old 60s reasoning ("polling
+  # faster just re-reads the same 1-minute bar") only held while prices came
+  # from REST bars; a live stream carries every trade, so a 60s check meant a
+  # stop could be up to 59s late. The REST fallback keeps the old rate - see
+  # entry_check_interval_seconds_rest above.
+  entry_check_interval_seconds: 10
   # 0.5%/5min -> 0.3%/3min for 2026-08-21, moved TOGETHER and only because the
   # WebSocket is on. Holding 0.5% while shortening the window would demand a
   # FASTER move, selecting harder-running names - and the 2026-08-19 data says
@@ -265,8 +281,47 @@ trading:
   # The floor is slightly positive so the exit spread does not turn "breakeven"
   # into a small loss.
   use_breakeven_floor: true
+
+  # Fallbacks, used only when breakeven_tiers below is absent or unusable.
   breakeven_trigger_pct: 0.5
   breakeven_floor_pct: 0.05
+
+  # Tiered breakeven, added 2026-08-26.
+  #
+  # Each tier arms when the PEAK since entry reaches trigger_pct, and once armed
+  # exits the whole position if price falls back to entry + floor_pct. Where a
+  # peak has passed several triggers the HIGHEST floor wins, so adding a low
+  # tier can never loosen what a higher one already gave.
+  #
+  # Why the second tier exists. On 2026-08-26 the positions that went green but
+  # stopped short of +0.5% - the old single trigger - lost $293.10 across eight
+  # positions with zero winners among them. That was the largest recoverable
+  # bucket of the session. Sized against that day, by trigger:
+  #
+  #     0.40%  ->  2 positions,  $50.21
+  #     0.35%  ->  3 positions,  $97.33
+  #     0.30%  ->  4 positions, $132.78
+  #     0.20%  ->  6 positions, $179.54
+  #     0.10%  ->  8 positions, $293.10   (all of them)
+  #
+  # 0.30 is the chosen point: 0.25 catches nothing 0.30 does not, and below
+  # 0.20 the trigger is close enough to noise that nearly any position arms.
+  #
+  # THE RISK, because it is real and unmeasured. Arming earlier means arming
+  # inside the dip momentum entries usually take before they run. All seven
+  # tiered winners on 2026-08-26 traded below entry at some point (MAE -0.03%
+  # to -0.56%) and none was scratched - their dip came BEFORE the peak crossed
+  # +0.5%. A 0.30 trigger reaches into that window. MFE/MAE do not record which
+  # came first, so this can only be settled forward: watch the BREAKEVEN_STOP
+  # count and the MFE of what it exits. If it starts scratching positions whose
+  # MFE later exceeded +1%, raise this back toward 0.5.
+  #
+  # floor_pct stays at 0.05 rather than 0.0 on both tiers. Exiting at exactly
+  # the entry price is not a $0 trade - the sell crosses the spread, so a true
+  # zero fills a few cents down. +0.05% is what makes "no loss" mean no loss.
+  breakeven_tiers:
+    - {trigger_pct: 0.5,  floor_pct: 0.05}
+    - {trigger_pct: 0.30, floor_pct: 0.05}
 
   trailing_stop_pct: 0.75      # Trailing stop: exit ALL remaining shares if price falls this % below the
                                 # HIGHEST price seen since entry (not below entry price - protects gains already made)
@@ -308,7 +363,10 @@ trading:
   # With it off, those positions fall through to the trailing stop, the
   # breakeven floor, or the -1.0% final exit. Compare the day's TRAILING_STOP
   # and FINAL_EXIT counts against a session with it on.
-  use_resistance_exit: false
+  # Back ON 2026-08-26 after one session off. The session off did not settle
+  # anything: with the rule disabled its exits simply became TRAILING_STOP
+  # exits, which is not a measurement of whether it was right.
+  use_resistance_exit: true
 
   resistance_max_uptick_fraction: 0.34
   resistance_lookback_minutes: 3
@@ -562,7 +620,16 @@ trading:
   # Runs later than the screener on purpose. Earnings reactions need pre-market
   # prints to have accumulated, and the QQQ trend read is a read of TODAY's
   # tape; at 09:05 both would be measuring an empty book.
-  list_builder_start_time: "09:20"
+  #
+  # Moved 09:20 -> 09:28 on 2026-08-26. Two reasons, one for each list. The
+  # earnings list reads Nasdaq's published EPS surprise, and at 09:20 that
+  # figure is usually still blank for a before-the-bell reporter - on 2026-08-26
+  # all 15 candidates were dropped as "surprise not published yet". Eight more
+  # minutes is eight more minutes for the wire to land. The QQQ trend read and
+  # the pre-market gap measurement both also get a fuller book. The deadline is
+  # the 09:33 entry window, so 09:28 still leaves five minutes of slack for a
+  # slow calendar fetch (earnings_calendar_timeout_seconds: 20).
+  list_builder_start_time: "09:28"
 
   # Earnings list: today's before-the-bell reporters plus yesterday's
   # after-the-bell ones - i.e. only the names whose news is already priced-in
@@ -589,12 +656,21 @@ trading:
   # Also drop names whose EPS surprise cannot be read at all.
   #
   # Nasdaq frequently has not published EPS for a before-the-bell reporter by
-  # 09:20, so "unknown" usually means "too early", not "bad" - which is why this
-  # is separate from earnings_require_beat and why it will empty the list on
-  # some mornings. Turned on because the evidence so far points one way: on
-  # 2026-08-24 the single earnings name added was PDD, logged "surprise
-  # unknown", and it lost $86.56 on a day that lost $119.38 in total.
-  earnings_require_known_beat: true
+  # the time this runs, so "unknown" usually means "too early", not "bad" -
+  # which is why this is separate from earnings_require_beat.
+  #
+  # History: turned ON 2026-08-25 on the strength of a single data point (PDD,
+  # 2026-08-24, "surprise unknown", -$86.56). Turned back OFF 2026-08-26, when
+  # it became clear the filter is not selective but total: it dropped 15 of 15
+  # candidates that morning, and would drop essentially every morning's list,
+  # making the whole earnings feature permanently inert. One losing trade is not
+  # enough evidence to delete a feature outright.
+  #
+  # The gap filter below is the part of this that has real evidence behind it -
+  # it blocked XPEV +3.32%, NSSC +19.07% and GGR +8.99%, all names that had
+  # already spent their catalyst - so it stays at 3.0%. That, plus
+  # earnings_require_beat, is the screen; "unknown" is no longer a veto.
+  earnings_require_known_beat: false
   earnings_max_gap_pct: 3.0
   earnings_list_top_n: 3
   earnings_calendar_timeout_seconds: 20

@@ -320,11 +320,54 @@ def _continuation_fields(config, symbol, price, signal_pct, spy_pct,
     out = {f"cf_{k}": (round(v, 1) if v is not None else None) for k, v in factors.items()}
     out["cf_vwap"] = round(vwap, 4) if vwap else None
 
-    if t.get("use_continuation_score", False):
-        out["cf_score"] = C.continuation_score(factors, t.get("continuation_weights", {}))
-    else:
-        out["cf_score"] = C.continuation_score(factors, t.get("continuation_weights", {}))
+    # Always scored, regardless of use_continuation_score. The flag controls
+    # whether the score is ALLOWED TO DECIDE anything (see _rank_burst), not
+    # whether it is computed - the journal needs the column either way, and
+    # that is what makes the weights fittable rather than permanent guesses.
+    out["cf_score"] = C.continuation_score(factors, t.get("continuation_weights", {}))
     return out
+
+
+def _rank_burst(config, candidates):
+    """
+    Order a poll's simultaneous signals best-first by continuation score.
+
+    This is the only place the score is allowed to change a decision, and it
+    changes WHICH signals get taken, never HOW MANY. The burst throttle keeps
+    the first burst_max of the list; until now "first" meant list order, which
+    is the screener's alphabetical-ish ordering - i.e. the bot was picking
+    which of twenty correlated signals to buy by an accident of sorting.
+
+    Ranking is a weaker claim than gating, which is why it is what got built.
+    A minimum-score floor would REMOVE trades on the strength of weights that
+    are still guesses; ranking only reorders a cut that was already being made
+    arbitrarily, so the worst case is that the score is uninformative and the
+    order is no better than the accident it replaced.
+
+    Candidates whose score could not be computed sort last but are NOT dropped -
+    same reasoning as continuation_score renormalising over missing factors:
+    "not measurable" is not "bad".
+
+    Returns (ordered_candidates, note) - note is None when ranking is off.
+    """
+    if not config["trading"].get("use_continuation_score", False):
+        return candidates, None
+    if len(candidates) < 2:
+        return candidates, None
+
+    def key(cand):
+        score = (cand.get("cont") or {}).get("cf_score")
+        return (0, 0.0) if score is None else (1, score)
+
+    ordered = sorted(candidates, key=key, reverse=True)
+
+    shown = ", ".join(
+        f"{c['symbol']}={(c.get('cont') or {}).get('cf_score'):.0f}"
+        if (c.get("cont") or {}).get("cf_score") is not None
+        else f"{c['symbol']}=n/a"
+        for c in ordered
+    )
+    return ordered, f"ranked by continuation score: {shown}"
 
 
 def _opening_move_fields(details_by_symbol, symbol):
@@ -1402,6 +1445,32 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             # now an input to that decision, not just a journal column.
             spy_pct = _window_pct_change(spy_history)
             burst_max, burst_size, burst_note = _burst_policy(config, burst_width, spy_pct)
+
+            # Continuation factors, computed ONCE per candidate and BEFORE any
+            # entry decision. Two reasons for the move: ranking needs the score
+            # in hand before the throttle cuts the list, and the journal used to
+            # recompute the same factors (plus rvol and spread) a second time
+            # per signal further down.
+            for cand in burst_candidates:
+                cand["spread_pct"] = _spread_pct(market_data, cand["symbol"], cand["price"])
+                cand["rvol"] = _compute_rvol(cand["bar"], volume_history[cand["symbol"]])
+                cand["cont"] = _continuation_fields(
+                    config, cand["symbol"], cand["price"], cand["signal_pct"], spy_pct,
+                    [p for _, p in price_history[cand["symbol"]]],
+                    list(volume_history[cand["symbol"]]),
+                    _vwap(vwap_acc, cand["symbol"]),
+                    {**(screener_details.get(cand["symbol"]) or {}),
+                     "opening_high": opening_high.get(cand["symbol"])},
+                    rvol=cand["rvol"],
+                    spread_pct=cand["spread_pct"],
+                )
+
+            # Best-first, so the throttle keeps the best of a burst rather than
+            # whichever names happened to sort earliest. No-op unless
+            # use_continuation_score is on.
+            burst_candidates, rank_note = _rank_burst(config, burst_candidates)
+            if rank_note and burst_max is not None and burst_width > burst_max:
+                logger.info(f"BURST {rank_note} - keeping top {burst_max}")
             if burst_max is not None and burst_width >= config["trading"].get("burst_width_threshold", 5):
                 logger.warning(
                     f"BURST DETECTED: {burst_width} symbols signalled in one poll "
@@ -1439,20 +1508,11 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     spy_pct=spy_pct,
                     excess_vs_spy_pct=(round(sig_pct - spy_pct, 3)
                                        if sig_pct is not None and spy_pct is not None else None),
-                    rvol=_compute_rvol(cand["bar"], volume_history[symbol]),
-                    spread_pct=_spread_pct(market_data, symbol, price),
+                    rvol=cand["rvol"],
+                    spread_pct=cand["spread_pct"],
                     burst_width=burst_width,
                     **_opening_move_fields(screener_details, symbol),
-                    **_continuation_fields(
-                        config, symbol, price, sig_pct, spy_pct,
-                        [p for _, p in price_history[symbol]],
-                        list(volume_history[symbol]),
-                        _vwap(vwap_acc, symbol),
-                        {**(screener_details.get(symbol) or {}),
-                         "opening_high": opening_high.get(symbol)},
-                        rvol=_compute_rvol(cand["bar"], volume_history[symbol]),
-                        spread_pct=_spread_pct(market_data, symbol, price),
-                    ),
+                    **cand["cont"],
                     taken=taken, skip_reason=skip_reason,
                     qty=None, size_multiplier=burst_size,
                 )
@@ -1933,8 +1993,8 @@ def main():
                     pending_augmented = False
 
                 if not pending_augmented:
-                    # Either a late start, or the process came up after 09:20
-                    # and the scheduled slot never came round. Do it now: it
+                    # Either a late start, or the process came up after the
+                    # list_builder_start_time slot and it never came round. Do it now: it
                     # costs entry-window time but an unaugmented list is a
                     # silently different strategy from the configured one.
                     pending_selection = _augment_selection(
@@ -2012,6 +2072,19 @@ def main():
                     config, screener, market_data, pending_selection
                 )
                 pending_augmented = True
+
+                # The slot is deliberately tight (09:28, two minutes ahead of
+                # the bell) so the earnings surprise has had time to publish.
+                # That leaves little room for a slow Nasdaq fetch, so say so
+                # when the build overruns rather than letting it be invisible:
+                # entries begin at entry_window_start, and a list that lands
+                # after that has already cost the first trades of the day.
+                finished = datetime.now(et)
+                if finished >= market_open_today:
+                    logger.warning(
+                        f"List build ran past the open (finished {finished:%H:%M:%S} ET) - "
+                        f"move list_builder_start_time earlier than {augment_start}"
+                    )
                 continue
 
             time.sleep(30)
