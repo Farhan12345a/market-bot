@@ -264,6 +264,69 @@ stream_priority = {"symbols": []}
 screener_details = {}
 
 
+def _update_vwap(acc, symbol, bar):
+    """Accumulate session VWAP from a bar. No-op if the bar carries no volume."""
+    try:
+        vol = float(bar.get("volume") or 0)
+        if vol <= 0:
+            return
+        hi, lo, close = float(bar.get("high") or 0), float(bar.get("low") or 0), float(bar.get("close") or 0)
+        typical = (hi + lo + close) / 3 if (hi and lo and close) else close
+        if typical <= 0:
+            return
+        slot = acc.setdefault(symbol, [0.0, 0.0])
+        slot[0] += typical * vol
+        slot[1] += vol
+    except Exception:
+        pass
+
+
+def _vwap(acc, symbol):
+    slot = acc.get(symbol)
+    if not slot or slot[1] <= 0:
+        return None
+    return slot[0] / slot[1]
+
+
+def _continuation_fields(config, symbol, price, signal_pct, spy_pct,
+                         prices, volumes, vwap, details, rvol=None, spread_pct=None):
+    """
+    Compute every continuation factor available for this signal.
+
+    Returns a flat dict for the signal journal. Scored only if
+    use_continuation_score is on; the factors are recorded either way, which is
+    the point - two weeks of these against forward returns is what turns the
+    weights from a guess into a fit.
+    """
+    from src.analytics import continuation as C
+
+    t = config["trading"]
+    atr_pct = (details or {}).get("volatility_percentile")
+    atr_pct = None  # volatility_percentile is a rank, not a %; leave unscaled
+
+    factors = {
+        "efficiency": C.efficiency_ratio(list(prices) if prices else None),
+        "rel_strength": C.relative_strength(signal_pct, spy_pct),
+        "vol_accel": C.volume_acceleration(list(volumes) if volumes else None),
+        "vwap_pos": C.vwap_position(price, vwap, atr_pct),
+        "exhaustion": C.exhaustion(signal_pct, price, vwap, atr_pct),
+        "rvol": C.relative_volume(rvol),
+        "spread": C.spread_quality(spread_pct),
+        "breakout": C.breakout_quality(
+            price, (details or {}).get("prior_high"), (details or {}).get("opening_high")
+        ),
+    }
+
+    out = {f"cf_{k}": (round(v, 1) if v is not None else None) for k, v in factors.items()}
+    out["cf_vwap"] = round(vwap, 4) if vwap else None
+
+    if t.get("use_continuation_score", False):
+        out["cf_score"] = C.continuation_score(factors, t.get("continuation_weights", {}))
+    else:
+        out["cf_score"] = C.continuation_score(factors, t.get("continuation_weights", {}))
+    return out
+
+
 def _opening_move_fields(details_by_symbol, symbol):
     """Opening-move stats for the journal row, or blanks if unavailable."""
     d = (details_by_symbol or {}).get(symbol) or {}
@@ -387,6 +450,9 @@ def _set_run_context(config, email_notifier, symbols, price_stream):
             "price_source": "stream" if streamed else "REST",
             "feed": t.get("websocket_feed", "iex") if streamed else "",
             "symbols_note": f"cap {t.get('stream_max_subscriptions', 30)} subscriptions",
+            "use_resistance_exit": t.get("use_resistance_exit", True),
+            "rapid_increase_max_pct": t.get("rapid_increase_max_pct", 0),
+            "rapid_increase_pct": t.get("rapid_increase_pct"),
             "reentry_cooldown_minutes": t.get("reentry_cooldown_minutes", 0),
             "reentry_cooldown_after_loss_only": t.get("reentry_cooldown_after_loss_only", True),
         }
@@ -410,6 +476,42 @@ def _refresh_run_context(email_notifier, price_stream):
                 logger.info("Run context downgraded: the stream gave up, this session is REST")
     except Exception as e:
         logger.debug(f"Could not refresh run context: {e}")
+
+
+def _poll_interval(config, market_data, base_interval, rest_interval, state):
+    """
+    Poll fast on streamed prices, slowly on REST.
+
+    A 10-second loop is free while the WebSocket is serving: reads come from
+    memory. The moment it falls back, that same loop becomes ~6x the REST calls
+    and starts pushing at Alpaca's ~200/min ceiling - and being rate-limited
+    would degrade the very fallback the bot is depending on.
+
+    Rather than choose one interval for both worlds, choose per poll from what
+    the stream is actually doing. Logged once on each transition so the switch
+    is visible rather than something to infer from call volume.
+    """
+    stream = getattr(market_data, "stream", None)
+    healthy = False
+    try:
+        healthy = stream is not None and stream.is_healthy()
+    except Exception:
+        healthy = False
+
+    interval = base_interval if healthy else rest_interval
+    if state.get("last") != interval:
+        if healthy:
+            logger.info(
+                f"Polling every {interval}s (stream healthy - reads are free)"
+            )
+        else:
+            logger.warning(
+                f"Stream is not serving - slowing the poll to {interval}s so the "
+                f"REST fallback stays inside Alpaca's rate limit. Faster polling "
+                f"resumes automatically if the stream recovers."
+            )
+        state["last"] = interval
+    return interval
 
 
 def _flush_journal_safely(journal):
@@ -685,7 +787,7 @@ def _spread_pct(market_data, symbol, price):
         return None
 
 
-def _burst_policy(config, burst_width):
+def _burst_policy(config, burst_width, spy_pct=None):
     """
     Decide how many of this poll's simultaneous signals to act on, and at what
     size. Returns (max_entries, size_multiplier, description).
@@ -710,16 +812,39 @@ def _burst_policy(config, burst_width):
     if not trading.get("use_burst_throttle", False):
         return None, 1.0, f"disabled (burst={burst_width})"
 
+    # The market's own move is a better burst detector than counting signals.
+    # If SPY has lurched, you already know WHY twenty names fired - you do not
+    # need to count them, and the count is only a proxy for this anyway. It is
+    # free: SPY is sampled every poll for excess-return already.
+    #
+    # It also catches the case counting misses: three names firing during a
+    # sharp market move are just as correlated as twenty, and burst width alone
+    # would wave them through at full size.
+    market_move = trading.get("market_burst_spy_pct", 0)
+    market_event = bool(
+        market_move and spy_pct is not None and abs(spy_pct) >= market_move
+    )
+
     threshold = trading.get("burst_width_threshold", 5)
-    if burst_width < threshold:
+    if burst_width < threshold and not market_event:
         return None, 1.0, f"normal: burst={burst_width} < threshold {threshold}, full size"
+
+    if market_event and burst_width < threshold:
+        return (
+            trading.get("burst_max_entries", 3),
+            trading.get("burst_size_multiplier", 0.5),
+            f"MARKET MOVE: SPY {spy_pct:+.2f}% >= {market_move}% - these are one bet, "
+            f"not {burst_width} (burst width alone would have allowed full size)",
+        )
 
     max_entries = trading.get("burst_max_entries", 3)
     size_multiplier = trading.get("burst_size_multiplier", 0.5)
     return (
         max_entries,
         size_multiplier,
-        f"THROTTLED: burst={burst_width} >= {threshold}, took <= {max_entries} at {size_multiplier:g}x size",
+        f"THROTTLED: burst={burst_width} >= {threshold}"
+        + (f" AND SPY {spy_pct:+.2f}%" if market_event else "")
+        + f", took <= {max_entries} at {size_multiplier:g}x size",
     )
 
 
@@ -741,7 +866,7 @@ def _compute_rvol(bar, volume_history):
 
 
 def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi,
-                   size_multiplier=1.0, burst_note=None):
+                   size_multiplier=1.0, burst_note=None, signal_pct=None):
     """
     Shared entry path for all three entry signals (three-bar momentum, rapid
     increase immediate, pullback resumption). Returns True if a position was
@@ -817,6 +942,11 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     strategy.confirm_entry(symbol, price, qty)
     if burst_note:
         executor.entry_meta.setdefault(symbol, {})["burst_logic"] = burst_note
+        if signal_pct is not None:
+            # How big the move was when this entry fired - the number
+            # rapid_increase_max_pct gates on. On the report it shows where each
+            # trade sat relative to the ceiling.
+            executor.entry_meta[symbol]["signal_pct"] = round(signal_pct, 3)
     rsi_note = f", RSI={symbol_rsi:.1f}" if symbol_rsi is not None else ""
     size_note = f", {size_multiplier:g}x size" if size_multiplier != 1.0 else ""
     logger.info(
@@ -855,6 +985,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     entry_end = parse_hhmm_today(config["trading"]["entry_window_end"], et)
     time_stop_hour = config["trading"]["time_stop_hour"]
     check_interval = config["trading"]["entry_check_interval_seconds"]
+    rest_interval = config["trading"].get("entry_check_interval_seconds_rest", 60)
     lookback = timedelta(minutes=config["trading"]["rapid_increase_lookback_minutes"])
     use_rsi_filter = config["trading"].get("use_rsi_filter", False)
     rsi_max = config["trading"].get("rsi_max_for_entry", 50)
@@ -888,6 +1019,16 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     symbol_open_price = {}  # symbol -> first observed price this window, purely for the log message - only tracked when use_opening_reversal_entry is on
     symbol_price_log = {symbol: [] for symbol in symbols}  # full (untrimmed) history, for _write_price_log
     entries_triggered = 0
+    poll_state = {"last": None}   # remembers the interval, to log transitions only
+    # Session VWAP per symbol, accumulated from bars the loop already reads.
+    # symbol -> [sum(typical_price * volume), sum(volume)]. Costs nothing extra:
+    # every streamed bar already carries volume.
+    vwap_acc = {}
+    # First N minutes' high per symbol, for breakout quality.
+    opening_high = {}
+    # symbol -> signal % that was refused for being too extended, so the report
+    # can show what the ceiling actually turned away.
+    rejected_for_extension = {}
     had_any_trades = bool(strategy.get_open_trades())  # true if reconciliation adopted positions on startup
     starting_cash = None
     try:
@@ -940,6 +1081,12 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         # ended by crash, OOM or restart contributed nothing at all - which is
         # fatal for a dataset whose entire value is accumulating day over day.
         signal_journal.flush(final=False)
+        # What happened AFTER each exit. Same price source the loop already
+        # reads, so no extra API calls for symbols still on the watchlist.
+        executor.note_post_exit_prices(
+            lambda sym: (market_data.get_latest_bar(sym, "1Min") or {}).get("close"),
+            minutes=config["trading"].get("post_exit_track_minutes", 15),
+        )
         _refresh_run_context(email_notifier, getattr(market_data, "stream", None))
 
         stream = getattr(market_data, "stream", None)
@@ -1089,6 +1236,17 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     bar_history[symbol].append(bar)
                     symbol_price_log[symbol].append((ts, price))
                     volume_history[symbol].append(float(bar.get("volume") or 0))
+                    _update_vwap(vwap_acc, symbol, bar)
+                    # Opening-range high: the session's first
+                    # opening_range_minutes of bars, for breakout quality.
+                    try:
+                        or_end = entry_start + timedelta(
+                            minutes=config["trading"].get("opening_range_minutes", 5))
+                        if now <= or_end:
+                            hi = float(bar.get("high") or price)
+                            opening_high[symbol] = max(opening_high.get(symbol, 0), hi)
+                    except Exception:
+                        pass
 
                     # Drop samples older than the lookback window, measured from the latest
                     # BAR's own timestamp (not wall-clock `now`) - the feed can lag wall-clock
@@ -1167,6 +1325,47 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     qty, pct_change = strategy.check_rapid_increase_entry(symbol, price, price_then)
 
                     if qty > 0:
+                        # CEILING on the signal, not just a floor.
+                        #
+                        # rapid_increase_pct says how big a move must be to
+                        # qualify; this says how big is TOO big. A stock up 2%
+                        # in three minutes has already made its move, and the
+                        # -1.0% stop then sits exactly where the natural
+                        # pullback lands. Counterintuitive but measured: on
+                        # 2026-08-19 signals of 1.0%+ produced 1 winner in 6
+                        # for -$531, while signals under 1.0% produced 4
+                        # winners in 14 for -$181. The strongest-looking
+                        # signals were the worst.
+                        #
+                        # The skip is still recorded in the signal journal with
+                        # its forward returns, so skipping does not cost the
+                        # data needed to tell whether this threshold is right.
+                        max_signal = config["trading"].get("rapid_increase_max_pct", 0)
+                        # Optionally applied only to STREAMED symbols. On a REST
+                        # symbol the price is ~15 minutes delayed, so "+2% over
+                        # 3 minutes" describes a window that closed a quarter of
+                        # an hour ago - gating on a number that stale is acting
+                        # on noise in either direction. Streamed symbols carry a
+                        # signal % that is actually current, which is what makes
+                        # the ceiling meaningful.
+                        if max_signal and config["trading"].get(
+                                "rapid_increase_max_pct_streamed_only", False):
+                            stream = getattr(market_data, "stream", None)
+                            streamed = bool(
+                                stream is not None
+                                and symbol in getattr(stream, "_symbols", [])
+                            )
+                            if not streamed:
+                                max_signal = 0
+
+                        if max_signal and pct_change > max_signal:
+                            logger.info(
+                                f"{symbol}: signal skipped - +{pct_change:.2f}% is above "
+                                f"rapid_increase_max_pct {max_signal}% (the move is already made)"
+                            )
+                            rejected_for_extension[symbol] = round(pct_change, 3)
+                            continue
+
                         if use_pullback_entry:
                             pending_pullbacks[symbol] = {
                                 "qty": qty,
@@ -1199,15 +1398,16 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
 
             # PASS 2 - act. Burst width is now known for the whole poll.
             burst_width = len(burst_candidates)
-            burst_max, burst_size, burst_note = _burst_policy(config, burst_width)
+            # Computed here, before the burst policy - the market's own move is
+            # now an input to that decision, not just a journal column.
+            spy_pct = _window_pct_change(spy_history)
+            burst_max, burst_size, burst_note = _burst_policy(config, burst_width, spy_pct)
             if burst_max is not None and burst_width >= config["trading"].get("burst_width_threshold", 5):
                 logger.warning(
                     f"BURST DETECTED: {burst_width} symbols signalled in one poll "
                     f"({', '.join(c['symbol'] for c in burst_candidates)}) - {burst_note}"
                 )
             day_burst_notes.append(burst_note)
-
-            spy_pct = _window_pct_change(spy_history)
 
             for index, cand in enumerate(burst_candidates):
                 symbol, price = cand["symbol"], cand["price"]
@@ -1243,6 +1443,16 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     spread_pct=_spread_pct(market_data, symbol, price),
                     burst_width=burst_width,
                     **_opening_move_fields(screener_details, symbol),
+                    **_continuation_fields(
+                        config, symbol, price, sig_pct, spy_pct,
+                        [p for _, p in price_history[symbol]],
+                        list(volume_history[symbol]),
+                        _vwap(vwap_acc, symbol),
+                        {**(screener_details.get(symbol) or {}),
+                         "opening_high": opening_high.get(symbol)},
+                        rvol=_compute_rvol(cand["bar"], volume_history[symbol]),
+                        spread_pct=_spread_pct(market_data, symbol, price),
+                    ),
                     taken=taken, skip_reason=skip_reason,
                     qty=None, size_multiplier=burst_size,
                 )
@@ -1265,7 +1475,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             finish_day("time_stop")
             return entries_triggered
 
-        time.sleep(check_interval)
+        time.sleep(_poll_interval(
+            config, market_data, check_interval, rest_interval, poll_state
+        ))
 
 def _write_price_log(symbol_price_log, et):
     """

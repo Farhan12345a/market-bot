@@ -633,3 +633,54 @@ Two harness traps worth knowing before re-running them: any suite that calls
 broker must *decrement* on a sell rather than dropping the symbol, or every
 partial exit looks like a stale-position leak. Worth moving into `tests/` if any of this is to be
 maintained.
+
+---
+
+## 9. Sector confirmation + market regime — the last two continuation factors
+
+**Not built. These are the ONLY factors from the 2026-08-26 continuation design
+that need data the bot is not already receiving, which is why they were left
+out while the other six shipped.**
+
+**Sector confirmation** — is capital flowing into the whole group, or is this a
+single-stock event? NVDA +5% with SMH +3%, AMD +4%, AVGO +3% is a sector burst;
+NVDA +5% with SMH +0.2% and AMD -0.5% is one stock. Plus a breadth measure:
+
+    SectorBreadth = advancing peers / peers in sector
+
+**Market regime** — SPY, QQQ, IWM up and VIX down. Better still is the
+hierarchy: stock > sector > index, capital concentrating into exactly the area
+being traded. SPY is already sampled every poll; the rest are not.
+
+**Why it is blocked, precisely.** REST on the free tier is ~15 minutes delayed,
+so a sector read over REST answers "was semis moving a quarter of an hour ago",
+which is useless for a burst decision. The data has to come over the WebSocket,
+and that means subscriptions against a 28-subscription cap.
+
+**The budget maths, and the way out:**
+
+| Config | Trading symbols | Context symbols |
+|--------|-----------------|-----------------|
+| ticks ON (current) | 14 with ticks | 0 |
+| ticks OFF | 14 on bars | **14** (SPY/QQQ/IWM + ~11 sector ETFs) |
+
+Sector ETFs do not need trade ticks - they are slow context, not entry timing -
+so turning `use_trade_ticks_for_entry` off buys the entire sector layer for
+nothing but tick precision on entries. On 2026-08-25 the stream had already cut
+mean adverse slippage from +0.42% to +0.205%; ticks shave the residue of a
+60-second bar lag, while sector confirmation is a whole new factor. That trade
+looks worth taking.
+
+**Do the cheap test FIRST.** It is still unknown whether Alpaca counts
+SUBSCRIPTIONS or UNIQUE SYMBOLS. If unique symbols, 28 symbols fit WITH ticks
+and there is no trade-off at all. Set `stream_max_subscriptions: 56` and watch
+for `symbol limit exceeded` - the failure is now named within ~2 seconds, so the
+test costs seconds rather than a session.
+
+**Paid alternative:** Alpaca Algo Trader Plus (~$99/month) gives the SIP feed,
+no 15-minute REST delay and no practical symbol cap, removing every constraint
+above. Not worth buying while the strategy has not had a green day.
+
+**Sequence:** subscription test -> decide ticks vs sector -> add the two
+factors as journal columns only -> fit weights with the other six after ~2
+weeks of data.

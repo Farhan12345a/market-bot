@@ -43,6 +43,12 @@ JOURNAL_FIELDS = [
     # returns rather than assume it: with these columns, two weeks of journal
     # answers whether a high past hit-rate actually predicts anything.
     "opening_hit_rate", "opening_avg_gain", "opening_sessions",
+    # Continuation factors, recorded whether or not they are SCORED. The
+    # weights are the part nobody can know from five sessions - logging the
+    # factors against forward returns for a couple of weeks is what turns them
+    # from a guess into a fit. See src/analytics/continuation.py.
+    "cf_efficiency", "cf_rel_strength", "cf_vol_accel", "cf_vwap_pos",
+    "cf_exhaustion", "cf_breakout", "cf_rvol", "cf_spread", "cf_vwap", "cf_score",
     # --- what the bot decided ---
     "taken", "skip_reason", "qty", "size_multiplier",
     # --- what actually happened next (the label) ---

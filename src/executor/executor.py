@@ -76,6 +76,12 @@ class Executor:
         # Set by main to MarketDataManager.entry_price_source, so each fill
         # records whether it was priced live or from delayed REST data.
         self.entry_price_source = None
+        # Exits awaiting a post-exit price check: each is
+        # {row, symbol, exit_price, due_at}. See note_post_exit_prices - this is
+        # how "what happened AFTER we sold" becomes answerable at all. Until
+        # now the record stopped at the exit, so questions like "do stopped-out
+        # losers keep falling or bounce?" had no data behind them.
+        self._post_exit_pending = []
         self.broker = broker
         self.config = config
         # trades_log holds one row PER COMPLETED EXIT - self-contained with
@@ -233,6 +239,54 @@ class Executor:
             # never fail in.
             self._buying_power = 0.0
             self._total_exposure_usd = float("inf")
+
+    def note_post_exit_prices(self, price_lookup, minutes=15):
+        """
+        Fill in each closed trade's price `minutes` after it was sold.
+
+        price_lookup(symbol) -> float or None. Called once per poll with the
+        price source the bot is already reading, so this costs no extra API
+        calls for symbols still on the watchlist.
+
+        Writes two fields onto the trade row:
+            post_exit_pct   price change since the exit, in %
+            post_exit_note  "kept falling" / "bounced" / "flat", from the
+                            perspective of the trade - for a LOSER a rise after
+                            the exit means the stop was early, and for a winner
+                            a further rise means the exit was early.
+
+        Deliberately does not touch pl or pl_pct: this is observation, never a
+        restatement of what was actually booked.
+        """
+        if not self._post_exit_pending:
+            return
+        now = time.time()
+        still_pending = []
+        for item in self._post_exit_pending:
+            if now < item["due_at"]:
+                still_pending.append(item)
+                continue
+            try:
+                price = price_lookup(item["symbol"])
+            except Exception:
+                price = None
+            if not price:
+                continue          # drop it rather than guess
+            base = item["exit_price"]
+            if not base:
+                continue
+            pct = (price - base) / base * 100
+            row = item["row"]
+            row["post_exit_pct"] = round(pct, 3)
+            was_loss = (row.get("pl") or 0) < 0
+            if abs(pct) < 0.15:
+                note = "flat"
+            elif pct > 0:
+                note = "bounced - exit was early" if was_loss else "ran further"
+            else:
+                note = "kept falling - exit was right" if was_loss else "gave it back"
+            row["post_exit_note"] = note
+        self._post_exit_pending = still_pending
 
     def _note_position_closed(self, symbol, closed_at_loss):
         """Record when a position fully closed, to enforce the re-entry cooldown."""
@@ -457,6 +511,7 @@ class Executor:
                 "entry_method": meta.get("method"),
                 "burst_logic": meta.get("burst_logic") or "n/a",
                 "price_source": meta.get("price_source") or "unknown",
+                "signal_pct": meta.get("signal_pct"),
                 # Max favorable / adverse excursion: the best and worst
                 # unrealized moves this position saw before closing. Purely
                 # observational, but they answer a question the exit reason
@@ -481,6 +536,18 @@ class Executor:
                 trade_record["pl"] = 0
                 trade_record["pl_pct"] = 0
             self.trades_log.append(trade_record)
+            # Queue the post-exit price check. Holds a reference to the row, so
+            # filling it in later updates the report and the CSV in place.
+            try:
+                delay = self.config["trading"].get("post_exit_track_minutes", 15)
+                self._post_exit_pending.append({
+                    "row": trade_record,
+                    "symbol": symbol,
+                    "exit_price": price,
+                    "due_at": time.time() + delay * 60,
+                })
+            except Exception as e:
+                logger.debug(f"Could not queue the post-exit check for {symbol}: {e}")
             self._add_realized_pnl(trade_record["pl"])
 
             self.order_history.append({
@@ -675,7 +742,7 @@ class Executor:
             return
 
         fieldnames = [
-            "date", "symbol", "entry_time", "entry_price", "entry_method", "burst_logic", "price_source", "entry_rsi",
+            "date", "symbol", "entry_time", "entry_price", "entry_method", "burst_logic", "price_source", "signal_pct", "post_exit_pct", "post_exit_note", "entry_rsi",
             "mfe_pct", "mae_pct",
             "exit_time", "exit_price", "exit_reason", "stop_loss_used", "exit_rsi",
             "qty", "pl", "pl_pct",

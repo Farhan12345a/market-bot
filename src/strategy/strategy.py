@@ -352,6 +352,9 @@ class TradeManager:
         two minutes in. Requiring a real decline is what separates "the
         breakout failed" from "the price wobbled".
         """
+        if not self.config["trading"].get("use_resistance_exit", True):
+            return 0
+
         lookback = _samples_for_minutes(
             self.config, "resistance_lookback_minutes",
             "resistance_lookback_samples", 3, 3,
@@ -360,9 +363,26 @@ class TradeManager:
             return 0
 
         recent = self.price_history[-lookback:]
-        monotonic_decline = all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
 
-        if not (monotonic_decline and recent[0] == self.highest_since_entry):
+        # "Falling", not "fell on every single tick".
+        #
+        # This used to require recent[i] < recent[i-1] for EVERY sample. At a
+        # 60-second poll the window was 3 samples and that was a reasonable
+        # description of a failed breakout. Converting the window to minutes
+        # made it 18 samples at a 10-second poll - and 18 consecutive strictly
+        # lower prices essentially never occur, which would have switched this
+        # rule off silently rather than making it twitchier.
+        #
+        # The condition that actually matters is unchanged: the window opened at
+        # the position's peak and price is meaningfully below it now. Allowing a
+        # tolerance for up-ticks makes the rule mean the same thing at any poll
+        # rate, which is the whole point of expressing the window in minutes.
+        ups = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i - 1])
+        max_ups = int((len(recent) - 1) * self.config["trading"].get(
+            "resistance_max_uptick_fraction", 0.34))
+        falling = recent[-1] < recent[0] and ups <= max_ups
+
+        if not (falling and recent[0] == self.highest_since_entry):
             return 0
 
         peak = recent[0]

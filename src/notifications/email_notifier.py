@@ -356,6 +356,13 @@ class EmailNotifier:
             cell("Price source",
                  f'<span style="color:{source_color};">{source}</span>',
                  ctx.get("feed", "")),
+            cell("Signal ceiling",
+                 (f'{ctx.get("rapid_increase_max_pct")}%'
+                  if ctx.get("rapid_increase_max_pct") else "none"),
+                 f'floor {ctx.get("rapid_increase_pct", "?")}%'),
+            cell("Resistance exit",
+                 "ON" if ctx.get("use_resistance_exit") else '<span style="color:#ef4444;">OFF</span>',
+                 "failed-breakout rule" if ctx.get("use_resistance_exit") else "DISABLED for this test"),
             cell("Re-entry cooldown",
                  f'{ctx.get("reentry_cooldown_minutes", "?")} min',
                  "after losses only" if ctx.get("reentry_cooldown_after_loss_only") else "after any exit"),
@@ -510,8 +517,10 @@ class EmailNotifier:
                             <th>Symbol</th>
                             <th>Entry</th>
                             <th>Entry Method</th>
+                            <th>Signal %</th>
                             <th>Bursting Logic</th>
                             <th>Price Source</th>
+                            <th>After Exit</th>
                             <th>Entry RSI</th>
                             <th>Exit</th>
                             <th>Exit RSI</th>
@@ -539,8 +548,13 @@ class EmailNotifier:
             pl_pct = trade.get("pl_pct", 0)
             exit_reason = trade.get("exit_reason", "Unknown")
             entry_method = trade.get("entry_method") or "N/A"
+            sig = trade.get("signal_pct")
+            signal_str = f"{sig:+.2f}%" if isinstance(sig, (int, float)) else "n/a"
             burst_logic = trade.get("burst_logic") or "n/a"
             price_source = trade.get("price_source") or "unknown"
+            pe_pct, pe_note = trade.get("post_exit_pct"), trade.get("post_exit_note")
+            after_exit = (f"{pe_pct:+.2f}% - {pe_note}"
+                          if isinstance(pe_pct, (int, float)) else "n/a")
             mfe, mae = trade.get("mfe_pct"), trade.get("mae_pct")
             mfe_str = f"{mfe:+.2f}%" if isinstance(mfe, (int, float)) else "N/A"
             mae_str = f"{mae:+.2f}%" if isinstance(mae, (int, float)) else "N/A"
@@ -558,8 +572,10 @@ class EmailNotifier:
                             <td class="symbol">{symbol}</td>
                             <td>${entry_price:.2f}</td>
                             <td><span class="exit-reason">{entry_method}</span></td>
+                            <td>{signal_str}</td>
                             <td><span class="exit-reason">{burst_logic}</span></td>
                             <td><span class="exit-reason">{price_source}</span></td>
+                            <td><span class="exit-reason">{after_exit}</span></td>
                             <td>{entry_rsi_str}</td>
                             <td>${exit_price:.2f}</td>
                             <td>{exit_rsi_str}</td>

@@ -74,6 +74,50 @@ trading:
   # ONLY safe because momentum_fade and resistance are now expressed in MINUTES
   # (below). As raw sample counts they would have become 6x more sensitive at
   # this interval.
+  # Interval used when the stream is NOT serving. A 10s loop is free on streamed
+  # prices (reads come from memory) but becomes ~6x the REST calls without it,
+  # which at 15 symbols pushes toward Alpaca's ~200/min ceiling - and being
+  # throttled would degrade the very fallback being relied on. The bot switches
+  # between the two automatically, per poll, and logs each transition.
+  # How long after an exit to record what the price did. Answers the questions
+  # the record could not previously reach: did stopped-out losers keep falling
+  # or bounce (is -1.0% too tight?), and did the breakeven floor close positions
+  # that then ran (what does that floor actually cost?). Observation only - it
+  # never restates the P&L that was booked.
+  # ---------------------------------------------------------------------
+  # Continuation factors (2026-08-26)
+  # ---------------------------------------------------------------------
+  # Six factors describing whether a burst looks like a move that CONTINUES or
+  # one that has already happened. All computed from data the bot already
+  # collects - streamed bars carry volume, the exit rules already keep a price
+  # history, SPY is already sampled, and the screener already fetches daily
+  # bars. No new subscriptions and no new API calls.
+  #
+  # SCORING IS OFF. The factors are written to the signal journal every poll
+  # regardless, which is the entire point: weights fitted on five sessions would
+  # describe the past and predict nothing. After ~2 weeks, correlate each cf_*
+  # column against the journal's forward returns and set the weights from what
+  # actually predicted. Only then turn use_continuation_score on.
+  #
+  # Sector confirmation and market regime are deliberately absent - those are
+  # the only factors needing data not already arriving, and they cost WebSocket
+  # slots. Decide those after the subscription-counting test.
+  use_continuation_score: false
+  continuation_weights:
+    efficiency: 0.20        # momentum persistence - trend, not whipsaw
+    rel_strength: 0.20      # excess return over SPY
+    vol_accel: 0.20         # volume RISING as price rises
+    vwap_pos: 0.15          # buyers defending the session's average price
+    rvol: 0.15              # is anyone actually here? only measurable since 2026-08-20
+    breakout: 0.10          # clearing a level that means something
+    spread: 0.05            # the precise version of what min_stock_price approximates
+    exhaustion: -0.15       # NEGATIVE: how much of the move already happened
+  opening_range_minutes: 5
+
+  post_exit_track_minutes: 15
+
+  entry_check_interval_seconds_rest: 60
+
   entry_check_interval_seconds: 10   # How often to re-check prices during the entry window, in seconds.
                                       # Kept at 60s (matches the 1-minute bar data we fetch) - polling faster
                                       # than that just re-reads the same bar and burns Alpaca's free-tier
@@ -87,6 +131,31 @@ trading:
   # A shorter window is only useful on live data: with REST-delayed prices,
   # entry timing is dominated by feed lag, not window width.
   rapid_increase_pct: 0.3            # Minimum % price gain within the lookback window to trigger a buy
+  # CEILING on the entry signal. rapid_increase_pct is the floor - how big a
+  # move must be to qualify. This is how big is TOO big: a signal above this is
+  # SKIPPED, because the move has already happened and the -1.0% stop then sits
+  # exactly where the natural pullback lands.
+  #
+  # Measured, not assumed. 2026-08-19: signals of 1.0%+ produced 1 winner in 6
+  # for -$531; signals under 1.0% produced 4 winners in 14 for -$181. The
+  # strongest-looking signals were the worst ones.
+  #
+  # 0 disables the ceiling. Skipped signals are still written to the signal
+  # journal with their forward returns, so this can be re-tuned from evidence
+  # rather than re-guessed.
+  rapid_increase_max_pct: 2.0
+
+  # Apply the ceiling ONLY to symbols on the WebSocket. A REST symbol's price is
+  # ~15 minutes delayed, so its "+2% over 3 minutes" describes a window that
+  # closed a quarter of an hour ago - refusing a trade on a number that stale is
+  # acting on noise. Streamed symbols carry a signal % that is genuinely
+  # current, which is what makes the ceiling mean anything.
+  #
+  # Near enough a no-op at today's sizing: ~15 watched against 14 streamed, so
+  # it exempts one or two symbols. It matters if the watchlist grows or the
+  # stream drops.
+  rapid_increase_max_pct_streamed_only: true
+
   rapid_increase_lookback_minutes: 3 # Rolling window, in minutes, that the % gain above is measured over.
                                       # Widened from 2min: the free IEX feed lags wall-clock by ~2-3min, and the
                                       # lookback cutoff is computed against wall-clock time, so a window shorter
@@ -223,6 +292,25 @@ trading:
 
   # Resistance rejection: a "high, then two lower closes" pattern right at the
   # trade's peak is treated as a failed breakout and exits.
+  # Fraction of the lookback window allowed to tick UP and still count as a
+  # failed breakout. The old rule demanded every sample be strictly lower, which
+  # described a 3-sample window well and an 18-sample one (3 min at a 10s poll)
+  # not at all - 18 consecutive down-ticks essentially never happen, so the rule
+  # would have gone silent. 0.34 keeps it meaning "clearly falling" at any rate.
+  # OFF for the 2026-08-26 session, to measure what this rule is actually worth.
+  # The case for looking: it exits the FULL position on a signal that fires very
+  # readily, because price_history is seeded with the entry price - so for any
+  # position that never trades above its fill (common, since this strategy buys
+  # thrusts) the "window opened at the peak" test passes by default. Results so
+  # far are mixed rather than bad: -$70.46 over 13 fires on 2026-08-21 but
+  # carrying HOOD's +$100.07, and -$38.16 over 4 on 2026-08-24.
+  #
+  # With it off, those positions fall through to the trailing stop, the
+  # breakeven floor, or the -1.0% final exit. Compare the day's TRAILING_STOP
+  # and FINAL_EXIT counts against a session with it on.
+  use_resistance_exit: false
+
+  resistance_max_uptick_fraction: 0.34
   resistance_lookback_minutes: 3
   resistance_lookback_samples: 3   # Number of recent price samples checked for the failed-breakout
                                     # pattern (oldest sample = peak, must strictly decline from there)
@@ -305,6 +393,16 @@ trading:
   # polls instead of nine seconds. Staggering is itself worth something -
   # each later poll is a fresh look at whether the move is still intact.
   use_burst_throttle: true
+  # The market's own move as a burst detector, which is strictly better than
+  # counting signals and costs nothing - SPY is already sampled every poll.
+  # If SPY has moved this much over the signal window, the poll is treated as a
+  # market event and throttled regardless of how many symbols fired.
+  #
+  # Counting misses the case this catches: three names firing during a sharp
+  # market lurch are exactly as correlated as twenty, and burst width alone
+  # would wave them through at full size. 0 disables it.
+  market_burst_spy_pct: 0.4
+
   burst_width_threshold: 5    # this many simultaneous signals counts as a burst
   burst_max_entries: 3        # take at most this many of them
   burst_size_multiplier: 0.5  # and size each at this fraction of normal
