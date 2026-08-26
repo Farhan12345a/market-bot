@@ -370,6 +370,16 @@ trading:
   max_risk_per_trade_fraction: 0.005 # Max fraction of equity a single stop-out may cost (0.005 = 0.5%).
                                       # Dormant while final_exit_loss_pct is tight (a 1% stop puts this
                                       # well above ceiling 1); it binds once the stop is widened.
+  # Pattern-day-trader floor. Below $25,000 equity a margin account is capped at
+  # 3 day trades per 5 business days, and this bot does 20-30 in a morning - so
+  # below this level it stops OPENING positions. Existing ones are still managed
+  # to their own exits; forced selling on an equity dip is the worse outcome,
+  # and the rule governs opening trades, not holding them.
+  #
+  # Inert on a paper account, which is not subject to PDT. It is here so that
+  # setting paper_trading: false cannot quietly put the account in violation.
+  min_account_equity_usd: 25000
+
   max_daily_loss_usd: 2000  # Stop trading if daily loss exceeds this. Raised 1000 -> 2000 to let a
                              # test session run further before halting - at 1000 the limit would have
                              # ended 2026-08-19 at exit 17 of 71, collecting little data.

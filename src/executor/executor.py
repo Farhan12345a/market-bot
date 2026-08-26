@@ -76,6 +76,9 @@ class Executor:
         # Set by main to MarketDataManager.entry_price_source, so each fill
         # records whether it was priced live or from delayed REST data.
         self.entry_price_source = None
+        # Set by main to Strategy.correct_entry_qty - see that method for why a
+        # partially filled entry must reach the strategy, not just the executor.
+        self.on_entry_qty_corrected = None
         # Exits awaiting a post-exit price check: each is
         # {row, symbol, exit_price, due_at}. See note_post_exit_prices - this is
         # how "what happened AFTER we sold" becomes answerable at all. Until
@@ -222,6 +225,26 @@ class Executor:
                                 f"Could not rebase {symbol} onto its fill price: {e}"
                             )
 
+            # Reconcile SHARE COUNT as well as price. A market order can fill
+            # partially, and the bot would otherwise keep believing it holds the
+            # quantity it asked for. Skipped inside the entry grace window,
+            # where the broker's list is simply lagging a fill rather than
+            # reporting a short one.
+            if self.on_entry_qty_corrected is not None:
+                for symbol, position in positions.items():
+                    if now - self._entry_recorded_at.get(symbol, 0.0) < ENTRY_CONFIRM_GRACE_SECONDS:
+                        continue
+                    try:
+                        held = int(float(getattr(position, "qty", 0) or 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if held <= 0:
+                        continue
+                    try:
+                        self.on_entry_qty_corrected(symbol, held)
+                    except Exception as e:
+                        logger.error(f"Could not reconcile share count for {symbol}: {e}")
+
             self.daily_pnl = self._compute_daily_pnl(account, positions)
         except Exception as e:
             logger.error(f"Error refreshing account snapshot: {e}")
@@ -347,6 +370,28 @@ class Executor:
              max_total_exposure_fraction of current equity.
         """
         cost = qty * price
+
+        # PDT floor. Under $25,000 equity, FINRA's pattern-day-trader rule caps
+        # a margin account at 3 day trades per 5 business days - and this bot
+        # does 20-30 in a single morning. Below the threshold the strategy
+        # cannot legally be run as designed, so it stops OPENING positions.
+        #
+        # Deliberately does not flatten what is already open: forced selling on
+        # an equity dip is a worse outcome than letting existing positions reach
+        # their own exits, and the rule is about opening trades, not holding
+        # them.
+        #
+        # Paper accounts are not subject to PDT, so this is inert today - it
+        # exists so that switching paper_trading to false does not quietly put
+        # the account in violation.
+        min_equity = self.config["trading"].get("min_account_equity_usd", 0)
+        if min_equity and self._equity and self._equity < min_equity:
+            return False, (
+                f"account equity ${self._equity:,.2f} is below "
+                f"min_account_equity_usd ${min_equity:,.2f} - no new entries "
+                f"(pattern-day-trader rule allows only 3 day trades per 5 days "
+                f"below this level; open positions are still managed normally)"
+            )
 
         if cost > self._buying_power:
             return False, f"insufficient buying power (need ${cost:.2f}, have ${self._buying_power:.2f})"

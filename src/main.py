@@ -1851,6 +1851,7 @@ def main():
         # executor's own bookkeeping.
         executor.on_entry_price_corrected = strategy.correct_entry_price
         executor.entry_price_source = market_data.entry_price_source
+        executor.on_entry_qty_corrected = strategy.correct_entry_qty
         reconcile_existing_positions(broker, strategy, executor)
         email_notifier = EmailNotifier(config)
         signal_journal = SignalJournal(config)

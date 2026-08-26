@@ -532,6 +532,54 @@ class Strategy:
         )
         return True
 
+    def correct_entry_qty(self, symbol, actual_qty):
+        """
+        Rebase an open position onto the share count the broker ACTUALLY holds.
+
+        submit_entry_order records the quantity it ASKED for. A market order can
+        fill partially - it happened repeatedly on 2026-08-24, where HOOD's
+        average entry price moved across four consecutive polls as the order
+        filled in pieces - and until now nothing reconciled the count. The bot
+        would then believe it held 79 shares while the broker held 40.
+
+        Two concrete harms that fixes. Exit orders sized to a position that does
+        not exist get rejected or partially filled, leaving shares stranded. And
+        every fraction-based rule - the take-profit tiers, the -0.5% first exit -
+        sizes off entry_qty, so a 33% tranche of a phantom position is wrong in
+        the same proportion.
+
+        Only ever reduces. A broker count HIGHER than tracked usually means an
+        exit has been submitted but not yet settled, and trusting that number
+        would resurrect shares the strategy has already sold.
+        """
+        if symbol not in self.trades:
+            return False
+        try:
+            actual_qty = int(actual_qty)
+        except (TypeError, ValueError):
+            return False
+        if actual_qty < 0:
+            return False
+
+        trade = self.trades[symbol]
+        if actual_qty >= trade.qty_remaining:
+            return False
+
+        old_remaining, old_entry = trade.qty_remaining, trade.entry_qty
+        # Shrink the original size by the same proportion, so fraction-based
+        # rules keep sizing off something real.
+        if old_remaining > 0:
+            trade.entry_qty = max(1, int(trade.entry_qty * actual_qty / old_remaining))
+        trade.qty_remaining = actual_qty
+
+        logger.warning(
+            f"{symbol}: PARTIAL FILL reconciled - tracking said {old_remaining} "
+            f"shares, broker holds {actual_qty}. Original size {old_entry} -> "
+            f"{trade.entry_qty} so tiers and the first exit size off what is "
+            f"actually held."
+        )
+        return True
+
     def check_exit(self, symbol, current_bar):
         """
         Check whether `symbol`'s open position should exit, in priority order.
