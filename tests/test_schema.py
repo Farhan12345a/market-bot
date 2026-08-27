@@ -188,5 +188,46 @@ check("throttle kept the first 3 by list order when not",
       [x["symbol"] for x in plain[:BURST_MAX]] == ["A", "B", "C"])
 
 shutil.rmtree(TMP, ignore_errors=True)
+print("\n=== 7. THE ANALYSIS SCRIPTS TRACK THE REAL SCHEMA ===")
+# ops/session-metrics.py and ops/analyze-journal.py restate the field lists so
+# they can run on a VPS checkout older than themselves. That duplication drifts
+# silently: on 2026-08-28 adding two columns left session-metrics with the same
+# 34 names in a DIFFERENT order, which maps every value after index 23 to the
+# wrong column while parsing without error.
+import importlib.util
+def _load(path, name):
+    spec = importlib.util.spec_from_file_location(name, repo_file("ops", path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+sm = _load("session-metrics.py", "sm")
+aj = _load("analyze-journal.py", "aj")
+check("session-metrics journal schema matches src exactly",
+      sm.JOURNAL_FIELDS == list(JOURNAL_FIELDS),
+      [i for i, (x, y) in enumerate(zip(sm.JOURNAL_FIELDS, JOURNAL_FIELDS)) if x != y][:3])
+check("analyze-journal schema matches src exactly",
+      aj.JOURNAL_FIELDS == list(JOURNAL_FIELDS),
+      [i for i, (x, y) in enumerate(zip(aj.JOURNAL_FIELDS, JOURNAL_FIELDS)) if x != y][:3])
+check("session-metrics declares a trade-schema history",
+      len(sm.TRADE_FIELDS_HISTORY) >= 1)
+check("every historic trade column still exists",
+      all(c in sm.TRADE_FIELDS for h in sm.TRADE_FIELDS_HISTORY for c in h))
+check("list_source is the LAST trade column (appended, never inserted)",
+      sm.TRADE_FIELDS[-1] == "list_source")
+
+# A row one column short must still map, not vanish.
+import tempfile as _tf, csv as _csv, os as _os
+_d = _tf.mkdtemp()
+_p = _os.path.join(_d, "t.csv")
+with open(_p, "w", newline="") as f:
+    w = _csv.writer(f)
+    w.writerow(sm.TRADE_FIELDS[:-1])                      # old header
+    w.writerow(["2026-08-26", "AAA"] + [""] * (len(sm.TRADE_FIELDS) - 3) + ["1.0"])
+rows, widths = sm.read_rows(_p, sm.TRADE_FIELDS, sm.TRADE_FIELDS_HISTORY)
+check("a pre-list_source row is not dropped", len(rows) == 1, widths)
+check("...and its symbol still reads", rows and rows[0]["symbol"] == "AAA")
+shutil.rmtree(_d, ignore_errors=True)
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

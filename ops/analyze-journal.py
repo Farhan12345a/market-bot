@@ -29,7 +29,9 @@ JOURNAL_FIELDS = [
     "burst_width",
     "opening_hit_rate", "opening_avg_gain", "opening_sessions",
     "cf_efficiency", "cf_rel_strength", "cf_vol_accel", "cf_vwap_pos",
-    "cf_exhaustion", "cf_breakout", "cf_rvol", "cf_spread", "cf_vwap", "cf_score",
+    "cf_exhaustion", "cf_breakout", "cf_rvol", "cf_spread", "cf_vwap",
+    "cf_sector_strength", "cf_sector_etf",
+    "cf_score",
     "taken", "skip_reason", "qty", "size_multiplier",
     "price_15min", "pct_15min", "price_30min", "pct_30min",
 ]
@@ -46,6 +48,7 @@ FACTORS = [
     ("cf_breakout", "breakout quality"),
     ("cf_spread", "spread quality"),
     ("cf_exhaustion", "exhaustion (NEGATIVE is good)"),
+    ("cf_sector_strength", "sector strength"),
     ("cf_score", "*** COMPOSITE cf_score ***"),
 ]
 

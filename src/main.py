@@ -306,6 +306,13 @@ def _augment_selection(config, screener, market_data, selection, stages=("earnin
     # static universe for a stream slot.
     stream_priority["symbols"] = list(dict.fromkeys(stream_priority["symbols"] + added))
 
+    # Remember WHERE each symbol came from, so P&L can be attributed to the
+    # thing that found it. On 2026-08-27 the earnings and QQQ lists produced
+    # $337 of a $535 day from three names, and establishing that took a manual
+    # cross-reference against the log. A stage label makes it a column.
+    for sym in added:
+        symbol_source[sym] = stages[0] if len(stages) == 1 else "list"
+
     if added and config["trading"].get("use_rsi_filter", False):
         rsi_period = config["trading"].get("rsi_period", 14)
         rsi_values = dict(rsi_values)
@@ -329,6 +336,9 @@ report_state = {"sent": set(), "seeded": False}
 # default universe sits untouched all session. Everything not streamed still
 # gets prices over REST - the per-symbol fallback was built for exactly this.
 stream_priority = {"symbols": []}
+# symbol -> which stage put it on the watchlist ("earnings", "qqq"); anything
+# absent came from the screener. Reporting only - never read by a trading rule.
+symbol_source = {}
 
 # Per-symbol screener detail from this session's run, so the signal journal can
 # record what the screener SAW about a symbol next to what the signal did. Held
@@ -1344,6 +1354,7 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
         return False  # broker rejected/failed - already logged by submit_entry_order, nothing committed
 
     strategy.confirm_entry(symbol, price, qty, config_override=exit_config)
+    executor.entry_meta.setdefault(symbol, {})["list_source"] = symbol_source.get(symbol, "screener")
     if burst_note:
         executor.entry_meta.setdefault(symbol, {})["burst_logic"] = burst_note
         if signal_pct is not None:

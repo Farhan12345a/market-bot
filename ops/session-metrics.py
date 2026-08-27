@@ -34,6 +34,7 @@ TRADE_FIELDS = [
     "price_source", "signal_pct", "post_exit_pct", "post_exit_note", "entry_rsi",
     "mfe_pct", "mae_pct", "exit_time", "exit_price", "exit_reason",
     "stop_loss_used", "exit_rsi", "qty", "pl", "pl_pct",
+    "list_source",
 ]
 
 JOURNAL_FIELDS = [
@@ -42,15 +43,29 @@ JOURNAL_FIELDS = [
     "burst_width",
     "opening_hit_rate", "opening_avg_gain", "opening_sessions",
     "cf_efficiency", "cf_rel_strength", "cf_vol_accel", "cf_vwap_pos",
-    "cf_exhaustion", "cf_breakout", "cf_rvol", "cf_spread", "cf_vwap", "cf_score",
+    "cf_exhaustion", "cf_breakout", "cf_rvol", "cf_spread", "cf_vwap",
+    "cf_sector_strength", "cf_sector_etf",
+    "cf_score",
     "taken", "skip_reason", "qty", "size_multiplier",
     "price_15min", "pct_15min", "price_30min", "pct_30min",
+]
+
+# Past versions of each schema, so rows written before a column existed still
+# map. Without these, adding one column silently drops every older row - which
+# is the same class of fault the header repair exists to fix, arriving through
+# the reader instead of the writer.
+TRADE_FIELDS_HISTORY = [
+    [c for c in TRADE_FIELDS if c != "list_source"],
+]
+JOURNAL_FIELDS_HISTORY = [
+    [c for c in JOURNAL_FIELDS
+     if c not in ("cf_sector_strength", "cf_sector_etf")],
 ]
 
 MARKERS = ("<!-- BEGIN GENERATED -->", "<!-- END GENERATED -->")
 
 
-def read_rows(path, fields):
+def read_rows(path, fields, legacy=()):
     """
     Rows keyed by name, tolerating a stale header.
 
@@ -74,15 +89,23 @@ def read_rows(path, fields):
     body = raw[1:] if is_header else raw
     old = header if is_header else None
 
+    # width -> schema. Current wins, then declared legacy versions, then the
+    # on-disk header. Built widest-last so the current schema is never shadowed.
+    by_width = {}
+    if old:
+        by_width[len(old)] = old
+    for sch in legacy or ():
+        by_width.setdefault(len(sch), list(sch))
+    by_width[len(fields)] = list(fields)
+
     rows, widths = [], collections.Counter()
     for row in body:
         if not row:
             continue
         widths[len(row)] += 1
-        if len(row) == len(fields):
-            rows.append(dict(zip(fields, row)))
-        elif old and len(row) == len(old):
-            rows.append(dict(zip(old, row)))
+        schema = by_width.get(len(row))
+        if schema:
+            rows.append(dict(zip(schema, row)))
         # any other width is unidentifiable: counted, never guessed at
     return rows, widths
 
@@ -143,6 +166,7 @@ def positions(trades):
         out.append({
             "date": rows[0].get("date"),
             "symbol": symbol,
+            "source": rows[0].get("list_source") or None,
             "entry_time": entry_time,
             "pl": sum(num(r, "pl") or 0.0 for r in rows),
             "mfe": max(mfes) if mfes else None,
@@ -181,6 +205,125 @@ def ceiling_table(journal, ceiling):
     lines.append("`over ceiling` is how many signals the ceiling actually refused. "
                  "A run of zeros means the threshold is inert and the number cannot "
                  "be evaluated from this data at all.")
+    return lines
+
+
+def market_table(journal, pos_by_date):
+    """
+    The market's own move beside the day's result, and the do-nothing benchmark.
+
+    Without this, "was that a good day or a good strategy?" is unanswerable after
+    the fact - 2026-08-27 made $534 and separating tide from selection took a
+    manual argument.
+
+    `all signals` is the mean forward return of EVERY signal, taken or not: what
+    a coin flip taking everything would have earned, and therefore the benchmark
+    selection has to beat. `edge` is taken minus that. It is the one number that
+    self-adjusts for the tide, so it stays honest on a rising day and a falling
+    one alike.
+    """
+    lines = ["| date | SPY drift | all signals | taken | edge | breadth |",
+             "|---|---|---|---|---|---|"]
+    for date in sorted({r["date"] for r in journal if r.get("date")}):
+        day = [r for r in journal if r["date"] == date]
+        spy = [v for v in (num(r, "spy_pct") for r in day) if v is not None]
+        lab = [r for r in day if num(r, "pct_15min") is not None]
+        if not lab:
+            continue
+        allr = [num(r, "pct_15min") for r in lab]
+        taken = [num(r, "pct_15min") for r in lab
+                 if str(r.get("taken", "")).lower() == "true"]
+        m_all = sum(allr) / len(allr)
+        m_tak = (sum(taken) / len(taken)) if taken else None
+        edge = (m_tak - m_all) if m_tak is not None else None
+        lines.append(
+            f"| {date} | {(sum(spy) / len(spy)) if spy else 0:+.3f}% | {m_all:+.3f}% "
+            f"| {(f'{m_tak:+.3f}%' if m_tak is not None else '-')} "
+            f"| {(f'**{edge:+.3f}pp**' if edge is not None else '-')} "
+            f"| {len(day)} sig / {len({r['symbol'] for r in day})} sym |"
+        )
+    lines.append("")
+    lines.append("`SPY drift` is the mean market move over the same windows the "
+                 "signals were measured on. `breadth` is how much was moving at "
+                 "all - 2026-08-26 produced 176 signals, 2026-08-27 produced 653, "
+                 "and that difference is the market, not a setting.")
+    lines.append("")
+    lines.append("**`edge` is the number to watch.** Positive on a flat or down "
+                 "day is the only thing that separates selection from a rising "
+                 "tide, and no single session can supply it.")
+    return lines
+
+
+def source_table(pos_by_date):
+    """
+    P&L by the list that FOUND each symbol.
+
+    On 2026-08-27 the earnings and QQQ lists produced $337 of a $535 day from
+    three names; establishing that meant cross-referencing the log by hand.
+    """
+    per = collections.defaultdict(lambda: collections.defaultdict(lambda: [0, 0, 0.0]))
+    sources = set()
+    for date, ps in pos_by_date.items():
+        for p in ps:
+            src = p.get("source") or "(unrecorded)"
+            sources.add(src)
+            c = per[date][src]
+            c[0] += 1
+            c[1] += 1 if p["pl"] > 0 else 0
+            c[2] += p["pl"]
+    if sources <= {"(unrecorded)"}:
+        return ["_No `list_source` recorded yet - it starts with the next session._"]
+    lines = ["| date | " + " | ".join(sorted(sources)) + " |",
+             "|---|" + "---|" * len(sources)]
+    for date in sorted(per):
+        cells = []
+        for src in sorted(sources):
+            n, w, pl = per[date][src]
+            cells.append(f"{pl:+.0f} ({w}/{n})" if n else "-")
+        lines.append(f"| {date} | " + " | ".join(cells) + " |")
+    lines.append("")
+    lines.append("P&L (winners/positions) by the stage that put the symbol on the "
+                 "watchlist. `screener` is the daily screen; `earnings` and `qqq` "
+                 "are the pre-open lists.")
+    return lines
+
+
+def sector_table(pos_by_date):
+    """
+    P&L by sector complex - the actual market-versus-selection question.
+
+    On 2026-08-27 crypto (MSTR, COIN) and fintech (SOFI, UPST) contributed $655
+    of $880 gross. Recording it lets a later session say "we won because crypto
+    ran" or "we won despite it" instead of leaving that to memory.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from src.analytics.sectors import sector_for
+    except Exception:
+        return ["_Sector map unavailable._"]
+
+    per = collections.defaultdict(lambda: collections.defaultdict(lambda: [0, 0, 0.0]))
+    etfs = set()
+    for date, ps in pos_by_date.items():
+        for p in ps:
+            etf = sector_for(p["symbol"]) or "(unmapped)"
+            etfs.add(etf)
+            c = per[date][etf]
+            c[0] += 1
+            c[1] += 1 if p["pl"] > 0 else 0
+            c[2] += p["pl"]
+    lines = ["| date | " + " | ".join(sorted(etfs)) + " |",
+             "|---|" + "---|" * len(etfs)]
+    for date in sorted(per):
+        cells = []
+        for etf in sorted(etfs):
+            n, w, pl = per[date][etf]
+            cells.append(f"{pl:+.0f} ({w}/{n})" if n else "-")
+        lines.append(f"| {date} | " + " | ".join(cells) + " |")
+    lines.append("")
+    lines.append("A day carried by one complex is a sector call that happened to "
+                 "be right, not stock selection. Read the concentration, not the "
+                 "totals.")
     return lines
 
 
@@ -366,6 +509,18 @@ def build(trades, journal, tw, jw, ceiling=1.25):
                "tranches is ONE position. Counting rows would inflate both the "
                "trade count and the win rate.")
     out.append("")
+    out.append("## Market context, and the do-nothing benchmark")
+    out.append("")
+    out += market_table(journal, by_date)
+    out.append("")
+    out.append("## P&L by list source")
+    out.append("")
+    out += source_table(by_date)
+    out.append("")
+    out.append("## P&L by sector complex")
+    out.append("")
+    out += sector_table(by_date)
+    out.append("")
     out.append("## Signal ceiling")
     out.append("")
     out += ceiling_table(journal, ceiling)
@@ -424,8 +579,8 @@ def main():
                     help="rewrite the generated block of --out in place")
     args = ap.parse_args()
 
-    trades, tw = read_rows(args.trades, TRADE_FIELDS)
-    journal, jw = read_rows(args.journal, JOURNAL_FIELDS)
+    trades, tw = read_rows(args.trades, TRADE_FIELDS, TRADE_FIELDS_HISTORY)
+    journal, jw = read_rows(args.journal, JOURNAL_FIELDS, JOURNAL_FIELDS_HISTORY)
     if not trades and not journal:
         sys.exit(f"no data in {args.trades} or {args.journal}")
     if args.since:

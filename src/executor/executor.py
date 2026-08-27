@@ -559,6 +559,7 @@ class Executor:
                 "burst_logic": meta.get("burst_logic") or "n/a",
                 "price_source": meta.get("price_source") or "unknown",
                 "signal_pct": meta.get("signal_pct"),
+                "list_source": meta.get("list_source"),
                 # Max favorable / adverse excursion: the best and worst
                 # unrealized moves this position saw before closing. Purely
                 # observational, but they answer a question the exit reason
@@ -793,6 +794,10 @@ class Executor:
             "mfe_pct", "mae_pct",
             "exit_time", "exit_price", "exit_reason", "stop_loss_used", "exit_rsi",
             "qty", "pl", "pl_pct",
+            # Appended at the END, never inserted - repair_header remaps by name
+            # and a column added mid-schema is what made the old header rot
+            # unreadable. Any new column goes here.
+            "list_source",
         ]
         try:
             path = Path(filepath)
@@ -802,11 +807,16 @@ class Executor:
             # put the burst note under entry_rsi for every reader.
             # Every past version of this schema, oldest first - see
             # csv_schema. v1 predates the burst/excursion/post-exit columns.
-            legacy = [[
-                "date", "symbol", "entry_time", "entry_price", "entry_method",
-                "entry_rsi", "exit_time", "exit_price", "exit_reason",
-                "stop_loss_used", "exit_rsi", "qty", "pl", "pl_pct",
-            ]]
+            legacy = [
+                # v1: before the burst/excursion/post-exit columns
+                [
+                    "date", "symbol", "entry_time", "entry_price", "entry_method",
+                    "entry_rsi", "exit_time", "exit_price", "exit_reason",
+                    "stop_loss_used", "exit_rsi", "qty", "pl", "pl_pct",
+                ],
+                # v2: before list_source
+                [c for c in fieldnames if c != "list_source"],
+            ]
             repair_header(str(path), fieldnames, legacy_schemas=legacy)
             write_header = not path.exists() or path.stat().st_size == 0
 
