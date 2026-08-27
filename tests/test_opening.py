@@ -87,12 +87,14 @@ ob = CFG["trading"]["opening_burst"]
 check("enabled for tomorrow", ob["enabled"] is True)
 check("baseline is the bell", ob["baseline_time"] == "09:30")
 check("decides by 09:32", ob["decide_by"] == "09:32")
-check("has its OWN position budget", ob["max_positions"] == 4)
+check("has its OWN position budget", ob["max_positions"] == 7, ob["max_positions"])
 check("budget leaves room for the normal session",
       ob["max_positions"] < CFG["trading"]["max_concurrent_positions"], ob["max_positions"])
 check("half size", ob["size_multiplier"] == 0.5)
 check("streamed only", ob["streamed_only"] is True)
-check("skips the continuation score (blind this early)", ob["skip_continuation_score"] is True)
+# There is deliberately no skip_continuation_score flag: the mode never
+# consults the score at all, and a flag nothing reads is worse than no flag.
+check("no inert continuation flag", "skip_continuation_score" not in ob, list(ob))
 check("ignores the signal ceiling", ob["ignore_max_pct"] is True)
 check("does not arm the re-entry cooldown", ob["skip_reentry_cooldown"] is True)
 check("normal entry window is UNCHANGED at 09:33",
@@ -111,17 +113,30 @@ check("first price at/after the baseline IS the baseline", st["baseline"]["AAA"]
 check("the baseline poll does not also buy", e_.orders == [])
 
 print("\n=== 3. IT BUYS WHAT WENT UP ===")
+# Tomorrow's live threshold is 0.5%, so this uses the live config rather than a
+# zeroed one - a test that only passes at a threshold nobody runs is not testing
+# what ships.
 st = {"baseline": {}, "taken": [], "done": False}
-md = MD({"UP": [100.0, 101.0], "DOWN": [50.0, 49.0], "FLAT": [20.0, 20.0]})
+md = MD({"UP": [100.0, 101.0], "DOWN": [50.0, 49.0], "FLAT": [20.0, 20.0],
+         "TINY": [40.0, 40.08]})            # +0.2%, under the 0.5% threshold
 s_, e_ = Strat(), Exec()
 c = cfg()
-run(c, md, s_, e_, ["UP", "DOWN", "FLAT"], st, at("09:30"))
-run(c, md, s_, e_, ["UP", "DOWN", "FLAT"], st, at("09:31"))
+run(c, md, s_, e_, ["UP", "DOWN", "FLAT", "TINY"], st, at("09:30"))
+run(c, md, s_, e_, ["UP", "DOWN", "FLAT", "TINY"], st, at("09:31"))
 bought = [o["symbol"] for o in e_.orders]
-check("a riser is bought", "UP" in bought, bought)
+check("a +1% riser is bought", "UP" in bought, bought)
 check("a faller is NOT bought", "DOWN" not in bought, bought)
-check("flat at min_move_pct 0.0 still qualifies (any increase)", "FLAT" in bought, bought)
+check("a flat symbol is NOT bought at a 0.5% threshold", "FLAT" not in bought, bought)
+check("a +0.2% move is under the threshold and skipped", "TINY" not in bought, bought)
 check("tagged as OPENING_MOVE", all(o["method"] == M.OPENING_METHOD for o in e_.orders))
+# ...and with the threshold at zero, "any increase" is what it means.
+st0 = {"baseline": {}, "taken": [], "done": False}
+md0 = MD({"FLAT": [20.0, 20.0], "TINY": [40.0, 40.08]})
+e0 = Exec(); c0 = cfg(min_move_pct=0.0)
+run(c0, md0, Strat(), e0, ["FLAT", "TINY"], st0, at("09:30"))
+run(c0, md0, Strat(), e0, ["FLAT", "TINY"], st0, at("09:31"))
+check("min_move_pct 0.0 takes any non-negative move",
+      {o["symbol"] for o in e0.orders} == {"FLAT", "TINY"}, [o["symbol"] for o in e0.orders])
 
 print("\n=== 4. min_move_pct RAISES THE BAR ===")
 st = {"baseline": {}, "taken": [], "done": False}
@@ -288,6 +303,74 @@ check("win/loss counts shown", "1W / 1L" in html, html[:600])
 check("no opening trades -> no section",
       n._opening_burst_html([{"symbol": "X", "entry_method": "RAPID_INCREASE_IMMEDIATE", "pl": 1}]) == "")
 check("empty input -> no section", n._opening_burst_html([]) == "")
+
+print("\n=== 14. THE THREE SILENT FAILURES ===")
+# Each of these would have produced NO error and NO opening trades - the mode
+# would simply have done nothing while the logs looked normal. They are tested
+# by reading the code paths that caused them, because the failure mode is an
+# absence and an absence is what a passing test suite is worst at noticing.
+msrc = open(repo_file("src", "main.py")).read()
+
+# (a) The loop slept until entry_start, so 09:30-09:33 never executed.
+check("the loop starts at the EARLIER of entry_start and the baseline",
+      "loop_start = entry_start" in msrc and "min(entry_start, parse_hhmm_today" in msrc)
+check("...and the sleep waits on loop_start, not entry_start",
+      "while now < loop_start:" in msrc and "while now < entry_start:" not in msrc)
+_ob = CFG["trading"]["opening_burst"]
+check("with tomorrow's config that means 09:30, not 09:33",
+      min(CFG["trading"]["entry_window_start"], _ob["baseline_time"]) == "09:30")
+
+# (b) The stream subscribed only after the bell, so no price existed at 09:30:00.
+check("the stream is subscribed pre-open", "PRE-OPEN: subscribing the stream" in msrc)
+check("...gated on stream_prestart_minutes", "stream_prestart_minutes" in msrc)
+check("...and only once the watchlist is final",
+      "and pending_augmented" in msrc)
+check("...without double-starting at the open",
+      "price_stream is not None and not price_stream.is_running()" in msrc)
+from src.data.stream import PriceStream
+check("is_running exists for that guard", hasattr(PriceStream, "is_running"))
+check("prestart is early enough to beat the bell",
+      CFG["trading"]["stream_prestart_minutes"] >= 1)
+
+# (c) Refused symbols were not journalled, leaving the experiment untestable.
+check("refusals are journalled at window close",
+      "opening_burst_not_taken" in msrc)
+check("...using the price they FINISHED on", "last_price" in msrc)
+
+print("\n=== 15. THE FLAGS ARE REAL, NOT DECORATIVE ===")
+# use_continuation_score sat inert for five sessions while appearing to gate
+# entries. Any flag added since has to be readable in the code that uses it.
+check("ignore_max_pct is actually consulted", "ignore_max_pct" in msrc)
+st = {"baseline": {}, "taken": [], "done": False}
+md = MD({"HOT": [100.0, 103.0]})          # +3%, far above the 1.25% ceiling
+e_ = Exec()
+c_on = cfg(ignore_max_pct=True, min_move_pct=0.5)
+run(c_on, md, Strat(), e_, ["HOT"], st, at("09:30"))
+run(c_on, md, Strat(), e_, ["HOT"], st, at("09:31"))
+check("ignore_max_pct=True buys a move above the ceiling", len(e_.orders) == 1, e_.orders)
+st2 = {"baseline": {}, "taken": [], "done": False}
+md2 = MD({"HOT": [100.0, 103.0]})
+e2 = Exec()
+c_off = cfg(ignore_max_pct=False, min_move_pct=0.5)
+run(c_off, md2, Strat(), e2, ["HOT"], st2, at("09:30"))
+run(c_off, md2, Strat(), e2, ["HOT"], st2, at("09:31"))
+check("ignore_max_pct=False refuses it", e2.orders == [], e2.orders)
+check("no inert skip_continuation_score flag remains",
+      "skip_continuation_score" not in CFG["trading"]["opening_burst"],
+      list(CFG["trading"]["opening_burst"]))
+
+print("\n=== 16. TOMORROW'S SETTINGS ===")
+check("threshold is 0.5% over the window", _ob["min_move_pct"] == 0.5, _ob["min_move_pct"])
+check("threshold clears the median spread (0.126% on 2026-08-26)",
+      _ob["min_move_pct"] > 0.126 * 3)
+check("7 of the 10 concurrent slots", _ob["max_positions"] == 7)
+check("3 slots left for the normal session",
+      CFG["trading"]["max_concurrent_positions"] - _ob["max_positions"] == 3)
+check("the ceiling does not apply", _ob["ignore_max_pct"] is True)
+check("rapid_increase_pct is irrelevant here - the mode uses its own threshold",
+      "min_move_pct" in msrc and _ob["min_move_pct"] != CFG["trading"]["rapid_increase_pct"])
+check("heavily-traded universe floor raised to $50M",
+      CFG["trading"]["universe_min_dollar_volume"] == 50_000_000)
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

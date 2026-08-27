@@ -104,13 +104,15 @@ stats = {
     "CHEAP": {"price": 2.0,   "dollar_volume": 9e8, "return_5d": 1, "volume_ratio": 1, "atr_pct": 3},
     "THIN":  {"price": 50.0,  "dollar_volume": 1e6, "return_5d": 1, "volume_ratio": 1, "atr_pct": 3},
     "GOOD":  {"price": 50.0,  "dollar_volume": 5e8, "return_5d": 1, "volume_ratio": 1, "atr_pct": 3},
-    "OK":    {"price": 80.0,  "dollar_volume": 3e7, "return_5d": 1, "volume_ratio": 1, "atr_pct": 3},
+    "OK":    {"price": 80.0,  "dollar_volume": 6e7, "return_5d": 1, "volume_ratio": 1, "atr_pct": 3},
+    "THIN2": {"price": 80.0,  "dollar_volume": 3e7, "return_5d": 1, "volume_ratio": 1, "atr_pct": 3},
 }
 out = U.liquidity_cut(stats, CFG)
 check("above max_stock_price dropped", "RICH" not in out, out)
 check("below min_stock_price dropped", "CHEAP" not in out, out)
 check("illiquid dropped", "THIN" not in out, out)
 check("liquid in-band kept", set(out) == {"GOOD", "OK"}, out)
+check("a $30M name is below the $50M floor", "THIN2" not in out, out)
 check("ordered by dollar volume", out == ["GOOD", "OK"], out)
 small = copy.deepcopy(CFG); small["trading"]["universe_size"] = 1
 check("universe_size caps the list", U.liquidity_cut(stats, small) == ["GOOD"])

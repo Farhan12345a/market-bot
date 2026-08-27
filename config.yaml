@@ -50,12 +50,28 @@ trading:
     # Minimum move from the baseline to qualify. 0.0 means "any increase",
     # which is what the strategy as described asks for. Raise it to require a
     # real move rather than a tick above the open.
-    min_move_pct: 0.0
+    # 0.5% from the open. Chosen against the measured spread rather than picked
+    # round: median bid-ask across the plausible symbols on 2026-08-26 was
+    # 0.126%, so 0.5% is ~4x the noise floor and cannot be produced by a single
+    # bid/ask bounce. It is still loose enough to fill the budget - signals over
+    # a 3-minute window that session had a median of 0.63%.
+    #
+    # One symbol to watch: HOOD quoted a 0.593% median spread, WIDER than this
+    # threshold, so for names like it a "+0.5% move" can still be one print
+    # crossing the spread. If the opening trades cluster in wide-spread symbols,
+    # raise this rather than blaming the strategy.
+    min_move_pct: 0.5
 
     # Its OWN position budget, deliberately small. These do not get to consume
     # max_concurrent_positions and starve the normal session; they are an
     # experiment running alongside it.
-    max_positions: 4
+    # 7 of the 10 concurrent slots, leaving 3 for the normal session. These
+    # trades are expected to be short-lived, so slots should free up well before
+    # the 09:33 window matters - but if the opening book is still full when the
+    # normal session starts, the constraint that bites is
+    # max_concurrent_positions, NOT the re-entry cooldown (which is 5 minutes
+    # and only applies after a LOSING exit on the same symbol).
+    max_positions: 7
 
     # Half size for the same reason - this is a test, not a conviction.
     size_multiplier: 0.5
@@ -64,11 +80,12 @@ trading:
     # its "move since the open" describes a window that has not happened yet.
     streamed_only: true
 
-    # The continuation score is BLIND this early: opening_range_minutes is 5 so
-    # there is no opening high, VWAP has a minute of data, and sector returns
-    # need a window. Ranking on a score built mostly from None is worse than not
-    # ranking, so this mode skips it.
-    skip_continuation_score: true
+    # NOTE: this mode never consults the continuation score, and there is no
+    # flag for it because there is nothing to switch. The score is BLIND this
+    # early - opening_range_minutes is 5 so there is no opening high, VWAP has a
+    # minute of data, and sector returns need a window, so cf_score would be
+    # built almost entirely from None. The mode takes qualifying symbols in
+    # watchlist order until its budget is spent.
 
     # rapid_increase_max_pct does not apply here. That ceiling exists to refuse
     # a move that has already spent itself over a 3-minute window; this mode is
@@ -745,7 +762,18 @@ trading:
   # Minimum average daily dollar volume. Dollar, not share, volume: 10M shares
   # of a $2 stock and 10M of a $200 one are not the same market and only one can
   # absorb a position without moving it.
-  universe_min_dollar_volume: 20000000
+  # 20M -> 50M for 2026-08-27. The opening-move experiment needs names that
+  # actually trade in the first minutes: on the IEX feed, which carries ~2% of
+  # consolidated volume, a thin symbol may not print for tens of seconds, and a
+  # symbol that does not print reads as FLAT - which reads as "do not buy". That
+  # would skip names for a data reason rather than a market one.
+  #
+  # Note this raises the floor, not the ranking. cheap_score already weights
+  # atr_pct at 35 and the volume surge at 25, so movement is what ORDERS the
+  # universe; this only decides what is allowed into it. Roughly 600-900 US
+  # equities clear $50M/day against ~1200-1500 at $20M, so at this floor
+  # universe_size (1000) stops being the binding constraint and liquidity does.
+  universe_min_dollar_volume: 50000000
 
   # Symbols per batched bar request. A too-large request fails as a whole and
   # takes its chunk with it, so this bounds the blast radius of one bad response.

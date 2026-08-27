@@ -1098,6 +1098,23 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
             if move < ob.get("min_move_pct", 0.0):
                 continue
 
+            # The signal ceiling, only if this mode is told to honour it.
+            # rapid_increase_max_pct exists to refuse a move that has already
+            # spent itself over a 3-minute window; this mode is explicitly
+            # buying the strongest openers, so by default it does not apply and
+            # ignore_max_pct ships true. The flag is READ rather than merely
+            # documented - a config switch that nothing consults is worse than
+            # no switch, which use_continuation_score demonstrated by sitting
+            # inert for five sessions while appearing to gate entries.
+            if not ob.get("ignore_max_pct", True):
+                ceiling = config["trading"].get("rapid_increase_max_pct") or 0
+                if ceiling and move > ceiling:
+                    logger.info(
+                        f"{symbol}: opening move +{move:.3f}% refused - above "
+                        f"rapid_increase_max_pct {ceiling}%"
+                    )
+                    continue
+
             note = (f"OPENING_BURST: +{move:.3f}% from the {ob.get('baseline_time','09:30')} "
                     f"baseline {base:.4f}, decided {now:%H:%M:%S}")
             entered = _attempt_entry(
