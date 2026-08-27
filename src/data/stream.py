@@ -207,6 +207,19 @@ class PriceStream:
         channels = 2 if self._subscribe_trades else 1
         return max(1, self._max_subscriptions // channels)
 
+    def is_running(self):
+        """
+        True if the socket thread is alive.
+
+        Distinct from is_healthy(), which asks whether the feed is DELIVERING.
+        This asks only whether start() has already been called and taken - which
+        is what a caller needs before deciding to start it again. The stream is
+        now started pre-market and would otherwise be started a second time at
+        the open; start() already refuses that, but refusing with a warning
+        every session reads like a fault when it is the normal path.
+        """
+        return bool(self._thread and self._thread.is_alive())
+
     def start(self, symbols, priority=()):
         """
         Connect and subscribe to 1-minute bars for `symbols`.

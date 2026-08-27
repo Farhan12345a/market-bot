@@ -146,6 +146,27 @@ class MarketDataManager:
             logger.error(f"Error fetching latest bar for {symbol}: {e}")
             return None
 
+    def is_streamed(self, symbol):
+        """
+        Is this symbol currently being served live, rather than by REST?
+
+        Asked by anything whose answer is only meaningful on live prices. The
+        opening-burst mode is the first: a REST price is ~15 minutes delayed, so
+        its "move since the 09:30 open" describes a window that has not happened
+        yet, and buying on it would be acting on a number from before the bell.
+
+        Deliberately checks for a usable BAR rather than trusting the
+        subscription list: a symbol can be subscribed and still have delivered
+        nothing (no trades yet, or the socket dropped), and for this question
+        "subscribed" is not the same as "has a live price".
+        """
+        if self.stream is None:
+            return False
+        try:
+            return self.stream.get_bar(symbol) is not None
+        except Exception:
+            return False
+
     def get_entry_price(self, symbol, bar):
         """
         Price to use for ENTRY DETECTION: the freshest live trade if the stream

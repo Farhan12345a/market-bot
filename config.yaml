@@ -10,6 +10,87 @@ trading:
   # high-beta name clears rapid_increase_pct at once, so the signal selects
   # "the market opened" rather than any individual stock's strength.
   entry_window_start: "09:33"        # Start watching candidates for a rapid price rise (HH:MM ET)
+
+  # ---------------------------------------------------------------------
+  # Opening-move experiment (added 2026-08-27)
+  # ---------------------------------------------------------------------
+  # A SEPARATE entry mode for the first minutes after the bell, running BEFORE
+  # and independently of the normal entry window above.
+  #
+  # The idea being tested: measure each streamed symbol from the 09:30 open,
+  # and buy the ones that are up by 09:31/09:32. Decide fast, then hold.
+  #
+  # WHY IT IS A SEPARATE MODE RATHER THAN entry_window_start: "09:30".
+  # Simply moving the window earlier would run the NORMAL rule (0.3% over 3
+  # minutes) at the open, where nearly every high-beta name clears 0.3% at
+  # once. max_concurrent_positions would fill within seconds and the rest of
+  # the session would have no capacity left - which is exactly the 2026-08-19
+  # shape, 20 entries inside 9 seconds for 1 winner in 23 and -$1,307. Keeping
+  # it separate is what allows a normal testing day AND this experiment on the
+  # same session.
+  #
+  # WHAT THE EVIDENCE SAYS, because it is not encouraging and should be visible
+  # right here rather than in a commit message. On 2026-08-19 entries in the
+  # 9:34 and 9:46 bursts went 1 win / 30 trades for -$1,884, while entries from
+  # 9:51 onward went 6 wins / 12 trades for +$356. That measurement is why
+  # entry_window_start was moved to 09:33 in the first place. In the opening
+  # minutes "it went up" largely selects THE MARKET OPENED rather than any
+  # individual stock's strength. This mode is a deliberate, budgeted retest of
+  # that conclusion with better instrumentation - not a reversal of it.
+  opening_burst:
+    enabled: true
+
+    # Measure from this instant. The stream is subscribed BEFORE the open (see
+    # stream_prestart_minutes) so a price actually exists at 09:30:00.
+    baseline_time: "09:30"
+
+    # No opening entry after this. The whole point is an early decision.
+    decide_by: "09:32"
+
+    # Minimum move from the baseline to qualify. 0.0 means "any increase",
+    # which is what the strategy as described asks for. Raise it to require a
+    # real move rather than a tick above the open.
+    min_move_pct: 0.0
+
+    # Its OWN position budget, deliberately small. These do not get to consume
+    # max_concurrent_positions and starve the normal session; they are an
+    # experiment running alongside it.
+    max_positions: 4
+
+    # Half size for the same reason - this is a test, not a conviction.
+    size_multiplier: 0.5
+
+    # Streamed symbols only. A REST symbol's price is ~15 minutes delayed, so
+    # its "move since the open" describes a window that has not happened yet.
+    streamed_only: true
+
+    # The continuation score is BLIND this early: opening_range_minutes is 5 so
+    # there is no opening high, VWAP has a minute of data, and sector returns
+    # need a window. Ranking on a score built mostly from None is worse than not
+    # ranking, so this mode skips it.
+    skip_continuation_score: true
+
+    # rapid_increase_max_pct does not apply here. That ceiling exists to refuse
+    # a move that has already spent itself over a 3-minute window; this mode is
+    # explicitly buying the strongest openers, so applying it would refuse the
+    # exact candidates the experiment is about.
+    ignore_max_pct: true
+
+    # An opening trade must not block the normal session from re-entering the
+    # same symbol later - that would make the experiment change the control.
+    skip_reentry_cooldown: true
+
+  # Subscribe the WebSocket this many minutes BEFORE the open.
+  #
+  # The stream used to start only once is_market_open() went true, and the
+  # pre-market loop sleeps 30s per iteration - so the socket could open up to
+  # 30 seconds after the bell, then still had to connect, authenticate,
+  # subscribe and receive. The first usable price realistically landed
+  # 09:30:35-09:31:00. Harmless for a 09:33 entry window; fatal for a mode that
+  # measures from 09:30:00 and decides by 09:32. Alpaca accepts pre-market
+  # subscriptions, so connecting early costs nothing and means a price exists
+  # when the bell rings.
+  stream_prestart_minutes: 2
   entry_window_end: "09:55"          # Stop looking for NEW entries after this time (HH:MM ET). Widened from 09:45.
   # --- Real-time price stream ---
   # Alpaca's free tier delays the REST historical endpoint by ~15 minutes but

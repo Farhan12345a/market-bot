@@ -442,6 +442,83 @@ class EmailNotifier:
             '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
         )
 
+    def _opening_burst_html(self, trades):
+        """
+        The opening-move experiment, reported entirely on its own.
+
+        Separated from the main table on purpose. These trades are taken under
+        different rules (measured from the 09:30 open, decided by 09:32, half
+        size, no continuation ranking, no ceiling), so folding them into the
+        session totals would make BOTH numbers unreadable - the experiment would
+        be diluted by the normal session and the normal session's win rate would
+        move for reasons that have nothing to do with its own settings.
+
+        Returns "" when no opening trades were taken, so a normal day's report
+        is unchanged.
+        """
+        ob = [t for t in (trades or []) if (t.get("entry_method") or "") == "OPENING_MOVE"]
+        if not ob:
+            return ""
+
+        total = sum(t.get("pl", 0) or 0 for t in ob)
+        wins = [t for t in ob if (t.get("pl", 0) or 0) > 0]
+        losses = [t for t in ob if (t.get("pl", 0) or 0) < 0]
+        gross_win = sum(t.get("pl", 0) or 0 for t in wins)
+        gross_loss = sum(t.get("pl", 0) or 0 for t in losses)
+        wr = (len(wins) / len(ob) * 100) if ob else 0
+        pl_color = "#10b981" if total >= 0 else "#ef4444"
+
+        def pct(t):
+            v = t.get("pl_pct")
+            return f"{v:+.2f}%" if isinstance(v, (int, float)) else "N/A"
+
+        def num(t, key, suffix="%"):
+            v = t.get(key)
+            return f"{v:+.2f}{suffix}" if isinstance(v, (int, float)) else "N/A"
+
+        rows = []
+        for t in sorted(ob, key=lambda x: x.get("entry_time") or ""):
+            pl = t.get("pl", 0) or 0
+            c = "#10b981" if pl >= 0 else "#ef4444"
+            rows.append(
+                f"<tr><td><strong>{t.get('symbol','?')}</strong></td>"
+                f"<td>{(t.get('entry_time') or '')[11:19]}</td>"
+                f"<td>{(t.get('exit_time') or '')[11:19]}</td>"
+                f"<td>${t.get('entry_price', 0):.2f}</td>"
+                f"<td>${t.get('exit_price', 0):.2f}</td>"
+                f"<td>{t.get('qty', 0)}</td>"
+                f"<td>{num(t, 'signal_pct')}</td>"
+                f"<td style='color:{c};font-weight:600;'>${pl:,.2f}</td>"
+                f"<td style='color:{c};font-weight:600;'>{pct(t)}</td>"
+                f"<td>{num(t, 'mfe_pct')}</td><td>{num(t, 'mae_pct')}</td>"
+                f"<td class='exit-reason'>{t.get('exit_reason','?')}</td>"
+                f"<td class='exit-reason'>{t.get('post_exit_note') or 'N/A'}</td></tr>"
+            )
+
+        return (
+            '<h2 style="margin-top:30px;border-bottom:2px solid #6366f1;'
+            'padding-bottom:10px;">Opening-Move Experiment (09:30-09:32)</h2>'
+            '<div style="background:#eef2ff;border-left:4px solid #6366f1;'
+            'padding:12px 15px;border-radius:8px;margin-bottom:14px;">'
+            f'<div style="font-size:22px;font-weight:700;color:{pl_color};">'
+            f'${total:,.2f}</div>'
+            f'<div style="font-size:13px;color:#3730a3;margin-top:4px;">'
+            f'{len(ob)} trade(s) &middot; {len(wins)}W / {len(losses)}L &middot; '
+            f'{wr:.0f}% win rate &middot; gross +${gross_win:,.2f} / ${gross_loss:,.2f}</div>'
+            '<div style="font-size:11px;color:#4338ca;margin-top:6px;">'
+            'Measured from the 09:30 open, decided by 09:32, half size, streamed '
+            'symbols only. Reported separately because these run under different '
+            'rules than the rest of the session - mixing them would make both '
+            'numbers unreadable.</div>'
+            '</div>'
+            '<table class="trades-table"><thead><tr>'
+            '<th>Symbol</th><th>Entry</th><th>Exit</th><th>Entry $</th><th>Exit $</th>'
+            '<th>Qty</th><th>Move at entry</th><th>P&L</th><th>P&L %</th>'
+            '<th>Peak (MFE)</th><th>Trough (MAE)</th><th>Exit Reason</th>'
+            '<th>After Exit</th>'
+            '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        )
+
     def _generate_html_summary(self, trades, burst_summary="", label="Daily Summary",
                                open_positions=None):
         """Generate the HTML report: closed trades, and any still-open positions."""
@@ -455,6 +532,7 @@ class EmailNotifier:
         pl_color = "#10b981" if total_pl >= 0 else "#ef4444"
 
         run_context_html = self._run_context_html()
+        opening_burst_html = self._opening_burst_html(trades)
         open_positions_html = self._open_positions_html(open_positions)
         unrealized_pl = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
 
@@ -529,6 +607,8 @@ class EmailNotifier:
                     <h3 style="margin:0 0 4px 0;font-size:13px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;">Bursting Logic</h3>
                     <div style="font-size:14px;">{burst_summary or 'Not recorded for this session.'}</div>
                 </div>
+
+                {opening_burst_html}
 
                 {open_positions_html}
 

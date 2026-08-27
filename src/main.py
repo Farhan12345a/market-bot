@@ -995,8 +995,145 @@ def _compute_rvol(bar, volume_history):
         return None
 
 
+OPENING_METHOD = "OPENING_MOVE"
+
+
+def _opening_burst_config(config):
+    """The opening_burst block, or None when it is off."""
+    ob = (config.get("trading") or {}).get("opening_burst") or {}
+    return ob if ob.get("enabled") else None
+
+
+def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_values,
+                       state, now, et, signal_journal=None, spy_pct=None):
+    """
+    The opening-move experiment: measure each streamed symbol from the 09:30
+    baseline and buy the ones that are up, deciding by 09:32.
+
+    Separate from the normal entry path on purpose. Widening entry_window_start
+    to 09:30 instead would run the standard 0.3%/3min rule at the open, where
+    nearly every high-beta name clears it simultaneously - max_concurrent_positions
+    fills in seconds and the rest of the session has no capacity. This mode
+    carries its own budget so both can run on the same day.
+
+    `state` persists across polls: {"baseline": {sym: price}, "taken": [...],
+    "done": bool, "skipped": {...}}.
+    """
+    ob = _opening_burst_config(config)
+    if not ob or state.get("done"):
+        return 0
+
+    baseline_at = parse_hhmm_today(ob.get("baseline_time", "09:30"), et)
+    decide_by = parse_hhmm_today(ob.get("decide_by", "09:32"), et)
+
+    if now < baseline_at:
+        return 0
+    if now >= decide_by:
+        if not state.get("done"):
+            state["done"] = True
+            # Journal every symbol that was MEASURED but not taken, once, with
+            # the move it finished the window on. These refused symbols are the
+            # control group: without them "buy what went up at 09:31" is an
+            # untestable claim, because nothing records what the ones you passed
+            # on went on to do. Written at window close rather than per poll so
+            # each symbol contributes one row instead of twelve.
+            if signal_journal is not None:
+                for sym, base in (state.get("baseline") or {}).items():
+                    if sym in state.get("taken", []):
+                        continue
+                    last = state.get("last_price", {}).get(sym)
+                    move = ((last - base) / base * 100) if (last and base) else None
+                    try:
+                        signal_journal.record(
+                            symbol=sym, entry_method=OPENING_METHOD, price=last,
+                            signal_pct=round(move, 3) if move is not None else None,
+                            spy_pct=spy_pct, taken=False,
+                            skip_reason="opening_burst_not_taken",
+                            size_multiplier=ob.get("size_multiplier", 0.5),
+                        )
+                    except Exception:
+                        pass
+            logger.info(
+                f"===== OPENING BURST CLOSED at {now:%H:%M:%S} ET - "
+                f"{len(state.get('taken', []))} entered, "
+                f"{len(state.get('baseline', {}))} symbols measured ====="
+            )
+        return 0
+
+    streamed_only = ob.get("streamed_only", True)
+    baseline = state.setdefault("baseline", {})
+    taken = state.setdefault("taken", [])
+    max_positions = ob.get("max_positions", 4)
+    entries = 0
+
+    for symbol in symbols:
+        try:
+            # Streamed only. A REST price is ~15 minutes delayed, so its "move
+            # since the open" describes a window that has not happened yet.
+            if streamed_only and not market_data.is_streamed(symbol):
+                continue
+
+            bar = market_data.get_latest_bar(symbol, "1Min")
+            if not bar:
+                continue
+            price = market_data.get_entry_price(symbol, bar)
+            if not price:
+                continue
+
+            # First price seen at or after the baseline instant IS the baseline.
+            if symbol not in baseline:
+                baseline[symbol] = price
+                continue
+            # Latest price per symbol, so the window-close journal can record
+            # what each refused symbol actually finished at.
+            state.setdefault("last_price", {})[symbol] = price
+
+            if symbol in taken or symbol in strategy.get_open_trades():
+                continue
+            if len(taken) >= max_positions:
+                continue
+
+            base = baseline[symbol]
+            move = (price - base) / base * 100 if base else 0.0
+            if move < ob.get("min_move_pct", 0.0):
+                continue
+
+            note = (f"OPENING_BURST: +{move:.3f}% from the {ob.get('baseline_time','09:30')} "
+                    f"baseline {base:.4f}, decided {now:%H:%M:%S}")
+            entered = _attempt_entry(
+                config, strategy, executor, symbol, price, OPENING_METHOD,
+                rsi_values.get(symbol),
+                size_multiplier=ob.get("size_multiplier", 0.5),
+                burst_note=note, signal_pct=round(move, 3),
+                skip_cooldown=ob.get("skip_reentry_cooldown", True),
+            )
+            if entered:
+                taken.append(symbol)
+                entries += 1
+                logger.info(
+                    f"{symbol}: OPENING MOVE entry - {move:+.3f}% from the open "
+                    f"({base:.2f} -> {price:.2f}), {len(taken)}/{max_positions} used"
+                )
+            if entered and signal_journal is not None:
+                # Only the TAKEN ones here. Refusals are journalled once at
+                # window close with their final move, so a symbol that is down
+                # at 09:30:10 and up at 09:31:50 is recorded as what it ended
+                # the window at rather than twelve times as it wavered.
+                signal_journal.record(
+                    symbol=symbol, entry_method=OPENING_METHOD, price=price,
+                    signal_pct=round(move, 3), spy_pct=spy_pct, taken=True,
+                    size_multiplier=ob.get("size_multiplier", 0.5),
+                )
+        except Exception as e:
+            logger.error(f"Opening burst check failed for {symbol}: {e}")
+            continue
+
+    return entries
+
+
 def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi,
-                   size_multiplier=1.0, burst_note=None, signal_pct=None):
+                   size_multiplier=1.0, burst_note=None, signal_pct=None,
+                   skip_cooldown=False):
     """
     Shared entry path for all three entry signals (three-bar momentum, rapid
     increase immediate, pullback resumption). Returns True if a position was
@@ -1052,7 +1189,10 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
         )
         return False
 
-    cooldown_left = executor.reentry_cooldown_remaining(symbol)
+    # skip_cooldown is for the opening-burst mode. An opening trade must not
+    # block the normal session from re-entering the same symbol later - that
+    # would let the experiment change the control it is being measured against.
+    cooldown_left = 0 if skip_cooldown else executor.reentry_cooldown_remaining(symbol)
     if cooldown_left > 0:
         logger.info(
             f"{symbol}: entry skipped - re-entry cooldown, {cooldown_left / 60:.1f} min left "
@@ -1130,11 +1270,28 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     opening_reversal_confirm_bars = config["trading"].get("opening_reversal_confirm_bars", 5)
     rsi_period = config["trading"].get("rsi_period", 14)
 
+    # The loop must be running before the NORMAL entry window opens whenever the
+    # opening-burst experiment is on: it measures from its baseline instant
+    # (09:30) and must decide by 09:32, so sleeping until entry_start (09:33)
+    # would mean the mode never ran at all and would fail silently - the loop
+    # would simply wake up after its whole window had passed.
+    loop_start = entry_start
+    ob = _opening_burst_config(config)
+    if ob:
+        loop_start = min(entry_start, parse_hhmm_today(ob.get("baseline_time", "09:30"), et))
+
     now = datetime.now(et)
-    while now < entry_start:
-        time.sleep(min(5, (entry_start - now).total_seconds()))
+    while now < loop_start:
+        time.sleep(min(5, (loop_start - now).total_seconds()))
         now = datetime.now(et)
 
+    if ob:
+        logger.info(
+            f"===== OPENING BURST ARMED: measuring from "
+            f"{ob.get('baseline_time', '09:30')}, deciding by {ob.get('decide_by', '09:32')} ET, "
+            f"max {ob.get('max_positions', 4)} positions at "
+            f"{ob.get('size_multiplier', 0.5)}x size, streamed symbols only ====="
+        )
     logger.info(
         f"===== TRADING DAY START: entries watched {entry_start.strftime('%H:%M')}-"
         f"{entry_end.strftime('%H:%M')} ET, exits watched continuously from the moment "
@@ -1193,6 +1350,8 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     # and never touches the other eleven.
     # Session peak signal, for the ceiling report - see the update below.
     day_peak_signal = {"value": 0.0, "symbol": None, "at": None}
+    # Opening-burst state, persisting across polls within the session.
+    opening_state = {"baseline": {}, "taken": [], "done": False}
     sector_history = {}
     # Only the sectors this watchlist actually needs. Computed once here rather
     # than per poll: the watchlist does not change during a session.
@@ -1313,6 +1472,25 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             except Exception as e:
                 logger.error(f"Error checking exits for {symbol}: {e}")
                 continue
+
+        # ---- OPENING BURST: runs BEFORE and independently of the normal window ----
+        # Its own budget, its own settings, its own entry-method tag. Kept
+        # separate so a normal testing session and this experiment can share a
+        # day without the experiment consuming the day's position capacity at
+        # the bell - which is what widening entry_window_start to 09:30 would
+        # have done.
+        try:
+            opened = _run_opening_burst(
+                config, market_data, strategy, executor, symbols, rsi_values,
+                opening_state, now, et, signal_journal=signal_journal,
+                spy_pct=_window_pct_change(spy_history),
+            )
+            if opened:
+                entries_triggered += opened
+                had_any_trades = True
+        except Exception as e:
+            logger.error(f"Opening burst failed, continuing with the normal session: {e}",
+                         exc_info=True)
 
         # ---- ENTRY CHECKS: only within the window, only for symbols not already open ----
         # max_daily_entries is a separate limit from max_concurrent_positions
@@ -2173,7 +2351,7 @@ def main():
                 # Subscribe only once the day's symbol list is known. Started
                 # here rather than at construction because the watchlist isn't
                 # decided until the screener has run.
-                if price_stream is not None:
+                if price_stream is not None and not price_stream.is_running():
                     # Benchmarks go on the stream too, and LAST in priority.
                     #
                     # SPY was never subscribed, so get_latest_bar("SPY") always
@@ -2242,6 +2420,41 @@ def main():
                         f"move screener_start_time earlier than {screener_start}"
                     )
                 continue
+
+            # Subscribe the stream BEFORE the open.
+            #
+            # It used to start only once is_market_open() went true, and this
+            # loop sleeps 30s per iteration - so the socket could open up to 30
+            # seconds after the bell and then still had to connect,
+            # authenticate, subscribe and receive its first bars. The first
+            # usable price realistically landed 09:30:35-09:31:00. That is
+            # harmless for an entry window opening at 09:33 and fatal for the
+            # opening-burst mode, which measures from 09:30:00 and must decide
+            # by 09:32. Alpaca accepts pre-market subscriptions, so connecting
+            # early costs nothing.
+            prestart = config["trading"].get("stream_prestart_minutes", 0)
+            if (
+                price_stream is not None
+                and prestart
+                and pending_selection is not None
+                and pending_augmented
+                and market_data.is_trading_day(now)
+                and market_open_today - timedelta(minutes=prestart) <= now < market_open_today
+                and not price_stream.is_running()
+            ):
+                symbols_now = pending_selection[0]
+                bench = _benchmark_symbols(config, symbols_now)
+                logger.info(
+                    f"===== PRE-OPEN: subscribing the stream {(market_open_today - now).total_seconds():.0f}s "
+                    f"before the bell ({len(symbols_now)} symbols + {len(bench)} benchmarks) ====="
+                )
+                try:
+                    price_stream.start(
+                        list(dict.fromkeys(list(symbols_now) + bench)),
+                        priority=stream_priority["symbols"],
+                    )
+                except Exception as e:
+                    logger.error(f"Pre-open stream start failed ({e}) - it will start at the open instead")
 
             augment_time_today = now.replace(
                 hour=augment_hour, minute=augment_minute, second=0, microsecond=0
