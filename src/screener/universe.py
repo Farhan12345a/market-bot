@@ -144,6 +144,15 @@ def daily_snapshot(broker, symbols, config=None, lookback_days=30, chunk=None):
             if s:
                 stats[symbol] = s
 
+    # An empty result with no failures means the bars arrived and PARSING
+    # rejected them, which is a different fault from a network problem and needs
+    # to say so - that distinction is what took a day to find on 2026-08-27.
+    if not stats and not failed_chunks and symbols:
+        logger.error(
+            "universe: every chunk returned data but not one symbol produced "
+            "usable statistics. That is a PARSING failure, not a fetch failure - "
+            "check the shape get_historical_bars returns against _series()."
+        )
     if failed_chunks:
         logger.warning(
             f"universe: {failed_chunks} chunk(s) returned nothing - the snapshot "
@@ -153,20 +162,44 @@ def daily_snapshot(broker, symbols, config=None, lookback_days=30, chunk=None):
     return stats
 
 
+def _series(rows, name):
+    """
+    One column out of whatever get_historical_bars returned.
+
+    It returns {symbol: pandas.DataFrame}, and iterating a DataFrame yields
+    COLUMN NAMES, not rows. The first version of this function looped over
+    `rows` expecting dicts or objects, so every symbol produced an empty list
+    and was discarded - silently, with no exception, because a string simply
+    has no `.close`. On 2026-08-27 that turned 11,413 candidates into "daily
+    stats for 0 symbols" and the dynamic universe fell back to the static pool
+    without a single error line naming the cause.
+
+    Lists of dicts and lists of objects are still accepted so this works against
+    a fixture as well as the live broker.
+    """
+    cols = getattr(rows, "columns", None)
+    if cols is not None:                      # pandas DataFrame
+        if name not in cols:
+            return []
+        return [float(x) for x in rows[name].tolist() if x is not None]
+    out = []
+    for b in rows or []:
+        v = b.get(name) if isinstance(b, dict) else getattr(b, name, None)
+        if v is not None:
+            out.append(float(v))
+    return out
+
+
 def _stats_from_bars(rows):
     """Per-symbol statistics from one symbol's daily bars, or None."""
     try:
-        closes, volumes, highs, lows = [], [], [], []
-        for b in rows:
-            c = b.get("close") if isinstance(b, dict) else getattr(b, "close", None)
-            v = b.get("volume") if isinstance(b, dict) else getattr(b, "volume", None)
-            h = b.get("high") if isinstance(b, dict) else getattr(b, "high", None)
-            l = b.get("low") if isinstance(b, dict) else getattr(b, "low", None)
-            if c is None or v is None:
-                continue
-            closes.append(float(c)); volumes.append(float(v))
-            highs.append(float(h if h is not None else c))
-            lows.append(float(l if l is not None else c))
+        closes = _series(rows, "close")
+        volumes = _series(rows, "volume")
+        highs = _series(rows, "high") or list(closes)
+        lows = _series(rows, "low") or list(closes)
+        n = min(len(closes), len(volumes))
+        closes, volumes = closes[:n], volumes[:n]
+        highs, lows = (highs + closes)[:n], (lows + closes)[:n]
         if len(closes) < 5:
             return None
 

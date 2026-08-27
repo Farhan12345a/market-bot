@@ -457,8 +457,13 @@ class EmailNotifier:
         is unchanged.
         """
         ob = [t for t in (trades or []) if (t.get("entry_method") or "") == "OPENING_MOVE"]
+        summary = (getattr(self, "run_context", None) or {}).get("opening_burst_summary")
         if not ob:
-            return ""
+            # No trades is a RESULT, not an absence. Rendering nothing made a
+            # starved experiment look identical to a disabled one on 2026-08-27.
+            if not summary:
+                return ""
+            return self._opening_burst_empty_html(summary)
 
         total = sum(t.get("pl", 0) or 0 for t in ob)
         wins = [t for t in ob if (t.get("pl", 0) or 0) > 0]
@@ -518,6 +523,43 @@ class EmailNotifier:
             '<th>Peak (MFE)</th><th>Trough (MAE)</th><th>Exit Reason</th>'
             '<th>After Exit</th>'
             '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        )
+
+    def _opening_burst_empty_html(self, s):
+        """
+        The experiment ran and took nothing - say which kind of nothing.
+
+        "Threshold too high" and "could not measure" need opposite responses, and
+        a blank section says neither.
+        """
+        measured, thresh = s.get("measured") or 0, s.get("threshold")
+        best = s.get("best_move")
+        if measured:
+            verdict = (
+                f"Ran and measured {measured} symbol(s); {s.get('qualified', 0)} cleared "
+                f"the {thresh}% threshold. Best move {best:+.3f}%. "
+                + ("This is a THRESHOLD result - the mechanism worked."
+                   if best is not None and best < (thresh or 0)
+                   else "Qualifying symbols existed but no entry completed.")
+            )
+            colour = "#92400e"
+        else:
+            verdict = (
+                "Measured NOTHING - no symbol produced a baseline price. This is not a "
+                "threshold result: the stream was not serving live prices at the "
+                "baseline instant, so every symbol was skipped by streamed_only."
+            )
+            colour = "#b91c1c"
+        return (
+            '<h2 style="margin-top:30px;border-bottom:2px solid #6366f1;'
+            'padding-bottom:10px;">Opening-Move Experiment '
+            f'({s.get("window", "09:30-09:32")})</h2>'
+            '<div style="background:#fffbeb;border-left:4px solid #f59e0b;'
+            'padding:12px 15px;border-radius:8px;margin-bottom:20px;">'
+            f'<div style="font-size:20px;font-weight:700;color:{colour};">No trades</div>'
+            f'<div style="font-size:13px;color:#78350f;margin-top:5px;">{verdict}</div>'
+            + self._opening_exit_profile_html() +
+            '</div>'
         )
 
     def _opening_exit_profile_html(self):

@@ -539,5 +539,55 @@ check("the loop still starts early for the burst", "while now < loop_start:" in 
 check("the two windows are distinct",
       CFG["trading"]["opening_burst"]["baseline_time"] < CFG["trading"]["entry_window_start"])
 
+print("\n=== 25. THE REPORT ALWAYS STATES THE OUTCOME ===")
+# Rendering nothing when there were no opening trades made a STARVED experiment
+# look identical to a disabled one on 2026-08-27.
+n4 = EmailNotifier.__new__(EmailNotifier)
+n4.run_context = {"opening_burst_summary": {
+    "enabled": True, "closed": True, "measured": 14, "taken": 0,
+    "threshold": 0.5, "window": "09:30-09:32", "best_move": 0.31, "qualified": 0}}
+h = n4._opening_burst_html([])
+check("a zero-trade session still renders a section", bool(h))
+check("it names it a THRESHOLD result", "THRESHOLD result" in h, h[:400])
+check("it reports what was measured", "14 symbol" in h)
+check("it reports the best move", "+0.310%" in h)
+
+n5 = EmailNotifier.__new__(EmailNotifier)
+n5.run_context = {"opening_burst_summary": {
+    "enabled": True, "closed": True, "measured": 0, "taken": 0,
+    "threshold": 0.5, "window": "09:30-09:32", "best_move": None, "qualified": 0}}
+h2 = n5._opening_burst_html([])
+check("measuring nothing renders a DIFFERENT diagnosis", "Measured NOTHING" in h2)
+check("...and points at the stream, not the threshold",
+      "stream was not serving" in h2 and "THRESHOLD result" not in h2)
+
+n6 = EmailNotifier.__new__(EmailNotifier)
+n6.run_context = {}
+check("no summary and no trades -> still nothing (experiment off)",
+      n6._opening_burst_html([]) == "")
+
+print("\n=== 26. END TO END: MEASURE, QUALIFY, ENTER, REPORT ===")
+st = {"baseline": {}, "taken": [], "done": False}
+md = MD({"WIN": [100.0, 100.8], "FLAT": [50.0, 50.05], "DOWN": [20.0, 19.8]})
+rs2, ex2 = Strat(), Exec()
+c = cfg()
+run(c, md, rs2, ex2, ["WIN", "FLAT", "DOWN"], st, at("09:30"))
+check("all three get a baseline", len(st["baseline"]) == 3, st["baseline"])
+run(c, md, rs2, ex2, ["WIN", "FLAT", "DOWN"], st, at("09:31"))
+check("only the +0.8% mover is bought", [o["symbol"] for o in ex2.orders] == ["WIN"],
+      [o["symbol"] for o in ex2.orders])
+check("it carries the opening exit profile",
+      rs2.trades["WIN"]["cfg"] is not None and
+      rs2.trades["WIN"]["cfg"]["trading"]["first_exit_loss_pct"] == -0.3)
+j2 = Journal()
+run(c, md, rs2, ex2, ["WIN", "FLAT", "DOWN"], st, at("09:32"), journal=j2)
+check("the window closes", st["done"] is True)
+check("the two refused symbols are journalled at close",
+      sorted(r["symbol"] for r in j2.rows) == ["DOWN", "FLAT"],
+      [r["symbol"] for r in j2.rows])
+check("their final moves are recorded",
+      all(r["signal_pct"] is not None for r in j2.rows),
+      [r["signal_pct"] for r in j2.rows])
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

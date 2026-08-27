@@ -98,7 +98,21 @@ def _refresh_candidate_pool(config, screener):
     """
     if screener is None:
         return None
+
+    cap = config["trading"].get("max_screen_candidates", 0)
+
     if not config["trading"].get("use_dynamic_universe", False):
+        # Even with the dynamic universe off, the static pool now runs to ~360
+        # names and the screener costs ~1.65s each - measured 2026-08-27, 92
+        # candidates in 151.8s. Left uncapped that is ten minutes of a
+        # twenty-five minute pre-open window, and every minute it overruns is a
+        # minute the QQQ list and the stream subscription do not get.
+        if cap and len(screener.candidates) > cap:
+            logger.info(
+                f"Capping the static candidate pool at {cap} "
+                f"(of {len(screener.candidates)}) to keep the screener inside its window"
+            )
+            screener.candidates = screener.candidates[:cap]
         return None
 
     try:
@@ -108,6 +122,12 @@ def _refresh_candidate_pool(config, screener):
             screener.broker, config, static_pool=static_pool
         )
         if candidates and info.get("source") == "dynamic":
+            if cap and len(candidates) > cap:
+                logger.info(
+                    f"Capping the candidate pool at {cap} of {len(candidates)} "
+                    f"(shortlist {info.get('shortlist')} + static pool)"
+                )
+                candidates = candidates[:cap]
             screener.candidates = candidates
             logger.info(
                 f"===== DYNAMIC UNIVERSE: {info['universe']} liquid symbols -> "
@@ -2014,6 +2034,30 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         if email_notifier is not None and getattr(email_notifier, "run_context", None):
             email_notifier.run_context["peak_signal_pct"] = day_peak_signal["value"]
             email_notifier.run_context["peak_signal_symbol"] = day_peak_signal["symbol"]
+            # Always report the experiment's OUTCOME, including "it ran and took
+            # nothing" and "it could not measure anything". On 2026-08-27 the
+            # section rendered as nothing at all because it keyed off the trade
+            # list, so a mode that had been starved looked identical to a mode
+            # that was switched off.
+            ob_cfg = _opening_burst_config(config)
+            if ob_cfg:
+                base = opening_state.get("baseline") or {}
+                last = opening_state.get("last_price") or {}
+                moves = sorted(
+                    ((last[k] - base[k]) / base[k] * 100
+                     for k in base if base.get(k) and last.get(k)),
+                    reverse=True,
+                )
+                email_notifier.run_context["opening_burst_summary"] = {
+                    "enabled": True,
+                    "closed": bool(opening_state.get("done")),
+                    "measured": len(base),
+                    "taken": len(opening_state.get("taken") or []),
+                    "threshold": ob_cfg.get("min_move_pct"),
+                    "window": f"{ob_cfg.get('baseline_time')}-{ob_cfg.get('decide_by')}",
+                    "best_move": moves[0] if moves else None,
+                    "qualified": sum(1 for m in moves if m >= ob_cfg.get("min_move_pct", 0)),
+                }
 
         # ---- scheduled reports (10:35 status, 16:00 close) ----
         _maybe_send_scheduled_reports(config, email_notifier, strategy, executor, market_data, et)

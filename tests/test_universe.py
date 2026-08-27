@@ -304,5 +304,59 @@ _up.highest_since_entry = 100.0
 check("resistance still refuses to sell into an upturn",
       _up.check_resistance(_up.price_history[-1]) == 0)
 
+print("\n=== 18. THE 2026-08-27 PARSING FAILURE ===")
+# get_historical_bars returns {symbol: pandas.DataFrame}. Iterating a DataFrame
+# yields COLUMN NAMES, so the first _stats_from_bars looped over strings, found
+# no .close on any of them, and returned None for every symbol - silently, with
+# no exception. 11,413 candidates became "daily stats for 0 symbols" and the
+# dynamic universe fell back to the static pool with nothing naming the cause.
+import pandas as _pd
+_df = _pd.DataFrame([{"timestamp": i, "open": 100 + i, "high": 102 + i,
+                      "low": 99 + i, "close": 101 + i, "volume": 1_000_000 + i}
+                     for i in range(30)])
+_st = U._stats_from_bars(_df)
+check("a DataFrame parses (this is what the broker actually returns)", _st is not None)
+check("price is the last close", _st and abs(_st["price"] - 130.0) < 0.01, _st and _st["price"])
+check("dollar volume is computed", _st and _st["dollar_volume"] > 1e8)
+check("atr_pct is computed", _st and _st["atr_pct"] > 0)
+check("a list of dicts still parses", U._stats_from_bars(_df.to_dict("records")) is not None)
+check("too few rows -> None", U._stats_from_bars(_df.head(3)) is None)
+check("empty DataFrame -> None", U._stats_from_bars(_pd.DataFrame()) is None)
+check("a DataFrame missing volume -> None",
+      U._stats_from_bars(_pd.DataFrame({"close": list(range(30))})) is None)
+
+class DFBroker(FakeBroker):
+    def get_historical_bars(self, symbols, start, end, timeframe="1Day"):
+        self.bar_calls.append(list(symbols))
+        return {s: _df.copy() for s in symbols if s in self._bars}
+
+_syms = [f"A{chr(65+i//26)}{chr(65+i%26)}" for i in range(40)]
+_b = DFBroker(assets=[asset(x) for x in _syms], bars={x: 1 for x in _syms})
+_stats = U.daily_snapshot(_b, _syms, CFG)
+check("a full snapshot works against DataFrames", len(_stats) == 40, len(_stats))
+
+print("\n=== 19. A PARSING FAILURE IS REPORTED AS ONE ===")
+src_u = open(repo_file("src", "screener", "universe.py")).read()
+check("empty-but-no-failures is called out as PARSING",
+      "PARSING failure, not a fetch failure" in src_u)
+
+print("\n=== 20. THE WIDER STATIC POOL, AND ITS COST ===")
+t = CFG["trading"]
+pool = t["stock_universe"]
+check("the fallback pool is ~300 names", 280 <= len(pool) <= 340, len(pool))
+check("no duplicates", len(pool) == len(set(pool)))
+check("all plain tickers", all(x.isalpha() and x.isupper() for x in pool),
+      [x for x in pool if not (x.isalpha() and x.isupper())][:5])
+for must in ("NVDA", "AAPL", "TSLA", "COIN", "MSTR", "HOOD", "SOFI", "UPST"):
+    check(f"{must} is in the pool", must in pool)
+check("the screener has a hard candidate cap", t["max_screen_candidates"] > 0)
+# 92 candidates took 151.8s on 2026-08-27 => ~1.65s each.
+_est = t["max_screen_candidates"] * 1.65
+check("the cap fits inside the screener timeout", _est < t["screener_timeout_seconds"], _est)
+check("...and finishes before the QQQ slot needs the loop",
+      5 + _est / 60 < 30 - t["stream_prestart_minutes"], 5 + _est / 60)
+check("the cap is applied whether the dynamic universe is on or off",
+      "Capping the static candidate pool" in open(repo_file("src", "main.py")).read())
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)
