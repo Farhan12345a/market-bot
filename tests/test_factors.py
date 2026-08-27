@@ -133,7 +133,17 @@ check("compares the signal against it", "pct_change > max_signal" in src)
 check("skips rather than entering", "signal skipped" in src)
 check("streamed-only mode exempts REST symbols", 'rapid_increase_max_pct_streamed_only' in src)
 check("exemption works by zeroing the ceiling", "max_signal = 0" in src)
-check("live ceiling is 2.0", CFG["trading"]["rapid_increase_max_pct"]==2.0)
+# 2.0 -> 1.25 for 2026-08-27. The 2.0 setting never bound once: the largest
+# signal on 2026-08-26 was 1.452%, so it had refused nothing since it shipped
+# and could not be evaluated at all. What the ceiling must satisfy - that it
+# sits above the entry floor, and below the top of the observed distribution
+# so it actually produces a control group - is asserted rather than the literal.
+check("live ceiling is 1.25", CFG["trading"]["rapid_increase_max_pct"]==1.25,
+      CFG["trading"]["rapid_increase_max_pct"])
+check("ceiling is above the entry floor",
+      CFG["trading"]["rapid_increase_max_pct"] > CFG["trading"]["rapid_increase_pct"])
+check("ceiling is low enough to bind on a normal session (2026-08-26 peak 1.452%)",
+      CFG["trading"]["rapid_increase_max_pct"] < 1.452)
 check("streamed-only is on", CFG["trading"]["rapid_increase_max_pct_streamed_only"] is True)
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

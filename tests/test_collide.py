@@ -82,8 +82,17 @@ c=copy.deepcopy(CFG)
 check("SPY calm + small burst -> full size", M._burst_policy(c,2,0.1)[0] is None)
 check("SPY lurch + small burst -> throttled anyway", M._burst_policy(c,3,0.55)[0]==c["trading"]["burst_max_entries"])
 check("big burst -> throttled", M._burst_policy(c,12,0.1)[0]==c["trading"]["burst_max_entries"])
-check("ceiling is independent of burst logic (different gate)",
-      c["trading"]["rapid_increase_max_pct"]==2.0 and c["trading"]["burst_width_threshold"]==5)
+# The claim here is INDEPENDENCE - that the ceiling and the burst throttle are
+# separate gates - not the particular value of either. Pinning the literal made
+# this break when the ceiling moved 2.0 -> 1.25 on 2026-08-27, which told us
+# nothing about whether the two gates still compose.
+_ceil = c["trading"]["rapid_increase_max_pct"]
+_c2 = copy.deepcopy(c); _c2["trading"]["rapid_increase_max_pct"] = _ceil * 2
+check("changing the ceiling does not change burst decisions",
+      M._burst_policy(_c2, 12, 0.1)[0] == M._burst_policy(c, 12, 0.1)[0]
+      and M._burst_policy(_c2, 2, 0.1)[0] == M._burst_policy(c, 2, 0.1)[0])
+check("both gates are configured and distinct",
+      _ceil > 0 and c["trading"]["burst_width_threshold"] == 5)
 
 print("\n=== 7. ENTRY PACE AT A 10s POLL ===")
 t_=CFG["trading"]

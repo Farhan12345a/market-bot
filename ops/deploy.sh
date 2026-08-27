@@ -46,32 +46,10 @@ echo "    reading the unit file..."
 # of its dependencies - checking imports with the wrong interpreter reports a
 # ModuleNotFoundError that says nothing about whether the deploy is safe.
 # Ask systemd what it runs, and only fall back to guessing if that fails.
-PY_BIN=""
-# Read the unit into a variable FIRST, then parse it.
-#
-# The previous one-liner piped systemctl straight into `grep -m1`. grep exits
-# the instant it matches, closing the pipe; systemctl then takes SIGPIPE and
-# returns non-zero; `pipefail` propagates that; and `set -e` kills the script
-# without printing anything. Whether systemctl finished writing before grep quit
-# is a RACE, which is why this succeeded once and then died twice at exactly
-# this line - leaving the old code running while the pull looked successful.
-UNIT_TEXT=$(systemctl --no-pager cat market-bot 2>/dev/null || true)
-UNIT_EXEC=$(printf '%s\n' "$UNIT_TEXT" | grep -m1 '^ExecStart=' | sed 's/^ExecStart=//' || true)
-for cand in \
-  "$(printf '%s\n' "$UNIT_EXEC" | tr ' ' '\n' | grep -m1 -E '(python|python3)$' || true)" \
-  "$(dirname "$(printf '%s\n' "$UNIT_EXEC" | awk '{print $1}')")/python" \
-  ./venv/bin/python ./venv/bin/python3 \
-  ./.venv/bin/python ./.venv/bin/python3 \
-  ./env/bin/python /usr/bin/python3
-do
-  [ -n "$cand" ] && [ -x "$cand" ] || continue
-  if "$cand" -c "import alpaca" >/dev/null 2>&1; then PY_BIN="$cand"; break; fi
-done
-
-if [ -z "$PY_BIN" ]; then
-  printf '\n\033[1;31m[FAIL] Could not find an interpreter with the bot deps installed.\033[0m\n'
-  echo "  systemd ExecStart: ${UNIT_EXEC:-<not found>}"
-  echo "  Find it by hand and re-run:   systemctl --no-pager cat market-bot | grep ExecStart"
+# Shared with ops/runall.sh - see ops/_python.sh for why this is not `python3`.
+# shellcheck source=ops/_python.sh
+. "$(dirname "$0")/_python.sh"
+if ! find_bot_python; then
   echo "  Nothing was restarted."
   exit 1
 fi

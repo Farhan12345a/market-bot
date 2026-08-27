@@ -15,13 +15,27 @@
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(dirname "$here")"
+cd "$repo" || { echo "no repo at $repo"; exit 1; }
+
+# The bot runs from a virtualenv, so bare `python3` has none of its
+# dependencies. Running the suite with the wrong interpreter produced 20
+# "problem suites" on 2026-08-26 on a VPS where every one of them passes - a
+# wall of ModuleNotFoundError that says nothing about whether the code works.
+# Same detection deploy.sh uses, shared so the two cannot drift.
+# shellcheck source=ops/_python.sh
+. "$here/_python.sh"
+find_bot_python || exit 1
+echo "interpreter: $PY_BIN"
+echo "             $("$PY_BIN" --version 2>&1)"
+echo
+
 cd "$repo/tests" || { echo "no tests/ directory at $repo"; exit 1; }
 
 tot=0; fails=0; bad=""
 for x in test_*.py preflight.py; do
   [ -e "$x" ] || continue
   sandbox=$(mktemp -d)
-  out=$(cd "$sandbox" && timeout 300 python3 "$repo/tests/$x" 2>&1); rc=$?
+  out=$(cd "$sandbox" && timeout 300 "$PY_BIN" "$repo/tests/$x" 2>&1); rc=$?
   rm -rf "$sandbox"
   n=$(echo "$out" | grep -c "^PASS"); e=$(echo "$out" | grep -c "^FAIL")
   problem=""

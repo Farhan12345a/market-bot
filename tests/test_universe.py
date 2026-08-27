@@ -267,5 +267,40 @@ check("an all-unmapped watchlist still streams SPY",
 check("an empty watchlist is safe", M._benchmark_symbols(CFG, []) == ["SPY"])
 check("live config has benchmarks on", CFG["trading"]["stream_benchmarks"] is True)
 
+print("\n=== 16. SIGNAL CEILING REPORTING ===")
+from src.notifications.email_notifier import _peak_signal_note
+check("bound is reported as bound",
+      "BOUND" in _peak_signal_note({"peak_signal_pct": 1.9, "rapid_increase_max_pct": 1.25,
+                                    "peak_signal_symbol": "XYZ"}))
+check("never-bound is reported as never-bound",
+      "never bound" in _peak_signal_note({"peak_signal_pct": 1.452,
+                                          "rapid_increase_max_pct": 2.0}))
+check("no signals is not reported as a pass",
+      _peak_signal_note({"peak_signal_pct": 0, "rapid_increase_max_pct": 2.0}) == "no signals")
+check("no ceiling set is stated plainly",
+      "no ceiling" in _peak_signal_note({"peak_signal_pct": 1.0, "rapid_increase_max_pct": 0}))
+check("the symbol is named", "XYZ" in _peak_signal_note(
+      {"peak_signal_pct": 1.9, "rapid_increase_max_pct": 1.25, "peak_signal_symbol": "XYZ"}))
+check("empty context does not raise", _peak_signal_note({}) == "no signals")
+
+print("\n=== 17. THE 2026-08-27 CONFIG DECISIONS ===")
+t = CFG["trading"]
+check("ceiling lowered to 1.25 so it actually binds", t["rapid_increase_max_pct"] == 1.25, t["rapid_increase_max_pct"])
+check("ceiling still applies to streamed symbols only",
+      t["rapid_increase_max_pct_streamed_only"] is True)
+check("ceiling sits above the entry floor",
+      t["rapid_increase_max_pct"] > t["rapid_increase_pct"])
+check("resistance is ON", t["use_resistance_exit"] is True)
+check("resistance still needs a real decline", t["resistance_min_decline_pct"] == 0.5)
+check("dynamic universe stays ON", t["use_dynamic_universe"] is True)
+# The dip guard the user asked to keep: a rising last tick must block the exit.
+from src.strategy.strategy import TradeManager
+_rl2 = 18
+_up = TradeManager("U", 100.0, 10, CFG)
+_up.price_history = [100.0 - 1.0 * i / (_rl2 - 1) for i in range(_rl2 - 1)] + [100.0]
+_up.highest_since_entry = 100.0
+check("resistance still refuses to sell into an upturn",
+      _up.check_resistance(_up.price_history[-1]) == 0)
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

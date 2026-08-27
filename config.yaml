@@ -184,7 +184,37 @@ trading:
   # 0 disables the ceiling. Skipped signals are still written to the signal
   # journal with their forward returns, so this can be re-tuned from evidence
   # rather than re-guessed.
-  rapid_increase_max_pct: 2.0
+  # 2.0 -> 1.25 for 2026-08-27, because 2.0 never once bound.
+  #
+  # The ceiling shipped at 2.0 as a deliberately loose first setting, on the
+  # theory that the journal would record what it refused and the number could be
+  # tuned from that. It refused NOTHING: on 2026-08-26 the largest signal all
+  # session was 1.452% and only one exceeded 1.4%. A threshold that never fires
+  # produces no control group and cannot be evaluated - it is not "working", it
+  # is absent.
+  #
+  # 1.25 is where the evidence points, from two independent measurements:
+  #
+  #   cf_exhaustion, the continuous form of the same idea, falls monotonically
+  #   against 15-minute forward return across every band on 2026-08-26 -
+  #   0-19 returns +0.206% at a 66% hit rate, 40-59 turns negative at -0.269%,
+  #   60-79 reaches -0.602% at a 7% hit rate. Exhaustion ~40 maps to a signal
+  #   around 1.0%.
+  #
+  #   2026-08-19, separately: signals of 1.0% or more went 1-for-6 for -$531,
+  #   while signals under 1.0% went 4-for-14 for -$181.
+  #
+  # 1.25 rather than 1.0 because it is the point that starts producing evidence
+  # without cutting deeply into the distribution - on 2026-08-26 it would have
+  # refused 4 signals whose mean 15-minute return was -0.955%, where 1.0 would
+  # have refused 20 and 0.8 would have refused 60 of 176.
+  #
+  # THE CAVEAT, because it is real: at the 30-MINUTE horizon every exhaustion
+  # band is positive, including 60-79. So this is short-horizon mean reversion
+  # followed by recovery, not a permanent penalty. It is the right call only
+  # because this strategy's exits fire within minutes, making 15 minutes the
+  # horizon that decides the trade. If holding times ever lengthen, revisit it.
+  rapid_increase_max_pct: 1.25
 
   # Apply the ceiling ONLY to symbols on the WebSocket. A REST symbol's price is
   # ~15 minutes delayed, so its "+2% over 3 minutes" describes a window that

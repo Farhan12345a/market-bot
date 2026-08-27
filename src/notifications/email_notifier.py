@@ -17,6 +17,21 @@ REPORT_RETENTION_DAYS = 7
 _REPORT_NAME_RE = re.compile(r"^trading-report-(\d{4}-\d{2}-\d{2})\.html$")
 
 
+def _peak_signal_note(ctx):
+    """Whether the ceiling actually bound today, in words."""
+    peak = ctx.get("peak_signal_pct") or 0
+    ceiling = ctx.get("rapid_increase_max_pct") or 0
+    sym = ctx.get("peak_signal_symbol")
+    if not peak:
+        return "no signals"
+    who = f"{sym} " if sym else ""
+    if not ceiling:
+        return f"{who}(no ceiling set)"
+    if peak > ceiling:
+        return f"{who}- ceiling BOUND"
+    return f"{who}- ceiling never bound"
+
+
 class EmailNotifier:
     """
     Builds the daily trading report, saves it to disk, and (if configured)
@@ -360,6 +375,13 @@ class EmailNotifier:
                  (f'{ctx.get("rapid_increase_max_pct")}%'
                   if ctx.get("rapid_increase_max_pct") else "none"),
                  f'floor {ctx.get("rapid_increase_pct", "?")}%'),
+            # The peak sits next to the ceiling on purpose. A ceiling that never
+            # binds reads exactly like one that is working, and on 2026-08-26 the
+            # 2.0% setting had refused nothing since it shipped.
+            cell("Peak signal today",
+                 (f'{ctx.get("peak_signal_pct"):.3f}%'
+                  if ctx.get("peak_signal_pct") else "-"),
+                 _peak_signal_note(ctx)),
             cell("Resistance exit",
                  "ON" if ctx.get("use_resistance_exit") else '<span style="color:#ef4444;">OFF</span>',
                  "failed-breakout rule" if ctx.get("use_resistance_exit") else "DISABLED for this test"),

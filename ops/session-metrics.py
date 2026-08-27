@@ -153,6 +153,37 @@ def positions(trades):
     return out
 
 
+def ceiling_table(journal, ceiling):
+    """
+    The highest signal each session reached, against the ceiling meant to cut it.
+
+    Tracked daily because a ceiling that never binds produces no evidence and
+    cannot be judged. On 2026-08-26 rapid_increase_max_pct was 2.0 and the
+    largest signal all day was 1.452% - the threshold had refused nothing since
+    it shipped, which is indistinguishable in the logs from it working.
+    """
+    dates = sorted({r["date"] for r in journal if r.get("date")})
+    lines = [f"Ceiling in force: **{ceiling}%** (`rapid_increase_max_pct`)", "",
+             "| date | signals | peak signal | over ceiling | p90 | median |",
+             "|---|---|---|---|---|---|"]
+    for d in dates:
+        vals = [num(r, "signal_pct") for r in journal if r["date"] == d]
+        vals = sorted(v for v in vals if v is not None)
+        if not vals:
+            continue
+        over = sum(1 for v in vals if v > ceiling)
+        p90 = vals[min(len(vals) - 1, int(len(vals) * 0.9))]
+        med = vals[len(vals) // 2]
+        flag = "" if over else "  <- never bound"
+        lines.append(f"| {d} | {len(vals)} | **{vals[-1]:.3f}%** | {over}{flag} "
+                     f"| {p90:.2f}% | {med:.2f}% |")
+    lines.append("")
+    lines.append("`over ceiling` is how many signals the ceiling actually refused. "
+                 "A run of zeros means the threshold is inert and the number cannot "
+                 "be evaluated from this data at all.")
+    return lines
+
+
 def session_table(pos_by_date):
     lines = [
         "| date | P&L | pos | win rate | avg win | avg loss | payoff | breakeven WR |",
@@ -320,7 +351,7 @@ def recurring_symbols(pos_by_date):
     return lines
 
 
-def build(trades, journal, tw, jw):
+def build(trades, journal, tw, jw, ceiling=1.25):
     pos = positions(trades)
     by_date = collections.defaultdict(list)
     for p in pos:
@@ -334,6 +365,10 @@ def build(trades, journal, tw, jw):
     out.append("Positions, not exit rows: a tiered winner scaling out in three "
                "tranches is ONE position. Counting rows would inflate both the "
                "trade count and the win rate.")
+    out.append("")
+    out.append("## Signal ceiling")
+    out.append("")
+    out += ceiling_table(journal, ceiling)
     out.append("")
     out.append("## Outcome by peak (MFE)")
     out.append("")
@@ -397,7 +432,18 @@ def main():
         trades = [t for t in trades if (t.get("date") or "") >= args.since]
         journal = [j for j in journal if (j.get("date") or "") >= args.since]
 
-    body = "\n".join(build(trades, journal, tw, jw))
+    # Read the live ceiling so the table is measured against what is actually
+    # in force, not a number frozen into this script.
+    ceiling = 1.25
+    try:
+        import yaml
+        cfg_path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "config.yaml")
+        ceiling = yaml.safe_load(open(cfg_path))["trading"]["rapid_increase_max_pct"]
+    except Exception:
+        pass
+
+    body = "\n".join(build(trades, journal, tw, jw, ceiling=ceiling))
 
     if not args.write:
         print(body)

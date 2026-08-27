@@ -1191,6 +1191,8 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     # symbol can be compared to what it actually moves with rather than only to
     # the index. Built from the watchlist, so an all-semis day fetches one ETF
     # and never touches the other eleven.
+    # Session peak signal, for the ceiling report - see the update below.
+    day_peak_signal = {"value": 0.0, "symbol": None, "at": None}
     sector_history = {}
     # Only the sectors this watchlist actually needs. Computed once here rather
     # than per poll: the watchlist does not change during a session.
@@ -1585,6 +1587,17 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             # Computed here, before the burst policy - the market's own move is
             # now an input to that decision, not just a journal column.
             spy_pct = _window_pct_change(spy_history)
+            # Highest signal of the session, recorded whether or not the ceiling
+            # cut it. A ceiling that never binds is indistinguishable in the
+            # logs from one that is working, and on 2026-08-26 the 2.0% setting
+            # had refused nothing since it shipped - the largest signal all day
+            # was 1.452%. Reporting the peak beside the threshold makes that
+            # visible on the day rather than on a later audit.
+            for _c in burst_candidates:
+                _sp = _c.get("signal_pct")
+                if _sp is not None and _sp > day_peak_signal["value"]:
+                    day_peak_signal.update(value=_sp, symbol=_c["symbol"],
+                                           at=now.strftime("%H:%M:%S"))
             # Same window as spy_pct and as the symbol's own signal_pct - a
             # relative-strength number computed over a different window than the
             # thing it is relative to is not a comparison.
@@ -1663,6 +1676,10 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     taken=taken, skip_reason=skip_reason,
                     qty=None, size_multiplier=burst_size,
                 )
+
+        if email_notifier is not None and getattr(email_notifier, "run_context", None):
+            email_notifier.run_context["peak_signal_pct"] = day_peak_signal["value"]
+            email_notifier.run_context["peak_signal_symbol"] = day_peak_signal["symbol"]
 
         # ---- scheduled reports (10:35 status, 16:00 close) ----
         _maybe_send_scheduled_reports(config, email_notifier, strategy, executor, market_data, et)
