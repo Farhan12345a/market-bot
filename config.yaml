@@ -115,7 +115,7 @@ trading:
     #   first exit           -0.5%       -0.3%        cut a failed open faster
     #   final exit           -1.0%       -0.6%        cap the damage sooner
     #   trailing stop         0.75%       0.40%       give back less of a fast move
-    #   take-profit tiers    1.0/1.25/1.5  0.75/1.0/1.3  take what a 2-min move gives
+    #   take-profit tiers    1.0/1.25/1.5  0.5/0.75/1.0  take what a 2-min move gives
     #   breakeven trigger    0.5 / 0.3    0.2         protect sooner
     #
     # THE RISK, stated plainly: the opening minutes are the most volatile of the
@@ -130,10 +130,18 @@ trading:
       first_exit_loss_pct: -0.3
       final_exit_loss_pct: -0.6
       trailing_stop_pct: 0.40
+      # Measured from the ENTRY price, not from the 09:30 baseline that
+      # min_move_pct uses - different anchors. A position entered at +0.5% from
+      # the open needs another +0.5% to reach the first tier, i.e. roughly +1.0%
+      # from the open, so the first tier and the entry threshold sharing the
+      # number 0.5 does not mean a trade can qualify and scale out on the same
+      # move. (An earlier revision of this comment claimed it could; that was
+      # wrong, and the tiers were briefly raised to 0.75/1.0/1.3 on the strength
+      # of it.)
       take_profit_tiers:
-        - {gain_pct: 0.75, sell_fraction: 0.33}
-        - {gain_pct: 1.0,  sell_fraction: 0.40}
-        - {gain_pct: 1.3,  sell_fraction: 1.0}
+        - {gain_pct: 0.5,  sell_fraction: 0.33}
+        - {gain_pct: 0.75, sell_fraction: 0.40}
+        - {gain_pct: 1.0,  sell_fraction: 1.0}
       breakeven_tiers:
         - {trigger_pct: 0.2, floor_pct: 0.05}
 

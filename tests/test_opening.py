@@ -389,13 +389,18 @@ check("first exit is tighter", o_["first_exit_loss_pct"] == -0.3 and n_["first_e
 check("final exit is tighter", o_["final_exit_loss_pct"] == -0.6 and n_["final_exit_loss_pct"] == -1.0)
 check("trailing stop is tighter", o_["trailing_stop_pct"] == 0.40 and n_["trailing_stop_pct"] == 0.75)
 check("take-profit tiers are tighter than the session's",
-      [t["gain_pct"] for t in o_["take_profit_tiers"]] == [0.75, 1.0, 1.3],
+      [t["gain_pct"] for t in o_["take_profit_tiers"]] == [0.5, 0.75, 1.0],
       [t["gain_pct"] for t in o_["take_profit_tiers"]])
 check("...and every opening tier sits below the normal top tier",
       max(t["gain_pct"] for t in o_["take_profit_tiers"])
       < max(t["gain_pct"] for t in n_["take_profit_tiers"]))
-check("the first opening tier clears the entry threshold",
-      min(t["gain_pct"] for t in o_["take_profit_tiers"]) > CFG["trading"]["opening_burst"]["min_move_pct"])
+# The entry threshold and the first tier are measured from DIFFERENT anchors -
+# min_move_pct from the 09:30 baseline, take-profit from the entry price - so
+# them sharing the number 0.5 does not let a trade scale out on the move that
+# bought it. This asserts the anchors, not the numbers.
+_tm = TradeManager("A", 100.0, 100, oc)
+check("a tier is measured from ENTRY, not from the session open",
+      _tm.check_take_profit(100.0 * 1.005)[0] > 0 and _tm.check_take_profit(100.0 * 1.004)[0] == 0)
 check("breakeven arms sooner", [t["trigger_pct"] for t in o_["breakeven_tiers"]] == [0.2])
 # Everything NOT overridden must be inherited, or the profile silently drops
 # rules nobody restated.
