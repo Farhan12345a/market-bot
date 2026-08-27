@@ -78,14 +78,60 @@ echo "    imports clean"
 echo "    requests present (notifications can send)"
 
 say "Settings that will be live"
+# This block is the pre-flight confidence check, so it has to show what CHANGED,
+# not a fixed list written once. On 2026-08-27 it printed take_profit_pct - a
+# legacy fallback superseded by take_profit_tiers and not in use - while saying
+# nothing about the opening-move experiment, the exit profile or the dynamic
+# universe. It would have looked identical whether any of that shipped or not.
 "$PY_BIN" - <<'PY'
 import yaml
 t = yaml.safe_load(open("config.yaml"))["trading"]
-for k in ("entry_window_start","use_websocket_stream","rapid_increase_pct",
-          "max_concurrent_positions","max_daily_entries","max_daily_loss_usd",
-          "use_take_profit","take_profit_pct","use_earnings_list","use_qqq_list"):
+
+def show(label, value):
+    print(f"    {label:30} {value}")
+
+def tiers(part, key, field):
+    return "/".join(str(x.get(field)) for x in (part.get(key) or [])) or "-"
+
+print("  session")
+for k in ("entry_window_start", "entry_window_end", "rapid_increase_pct",
+          "rapid_increase_max_pct", "max_concurrent_positions", "max_daily_entries",
+          "max_daily_loss_usd", "reentry_cooldown_minutes"):
     if k in t:
-        print(f"    {k:28} {t[k]}")
+        show(k, t[k])
+show("take_profit gains", tiers(t, "take_profit_tiers", "gain_pct") + "%")
+show("first / final exit", f"{t.get('first_exit_loss_pct')}% / {t.get('final_exit_loss_pct')}%")
+show("trailing_stop_pct", f"{t.get('trailing_stop_pct')}%")
+show("breakeven triggers", tiers(t, "breakeven_tiers", "trigger_pct") + "%")
+show("use_resistance_exit", t.get("use_resistance_exit"))
+
+print("  data")
+for k in ("use_websocket_stream", "stream_max_subscriptions", "stream_benchmarks",
+          "stream_prestart_minutes", "entry_check_interval_seconds",
+          "use_dynamic_universe", "universe_size", "universe_shortlist_size"):
+    if k in t:
+        show(k, t[k])
+if t.get("universe_min_dollar_volume"):
+    show("universe_min_dollar_volume", f"${t['universe_min_dollar_volume']/1e6:.0f}M")
+show("use_continuation_score", t.get("use_continuation_score"))
+
+ob = t.get("opening_burst") or {}
+if ob.get("enabled"):
+    print("  opening burst  *** EXPERIMENT ACTIVE ***")
+    show("window", f"{ob.get('baseline_time')} -> {ob.get('decide_by')}")
+    show("min_move_pct", f"{ob.get('min_move_pct')}%")
+    show("max_positions", f"{ob.get('max_positions')} of {t.get('max_concurrent_positions')}")
+    show("size_multiplier", f"{ob.get('size_multiplier')}x")
+    show("streamed_only", ob.get("streamed_only"))
+    ex = ob.get("exits") or {}
+    if ex:
+        show("exits: first / final",
+             f"{ex.get('first_exit_loss_pct')}% / {ex.get('final_exit_loss_pct')}%")
+        show("exits: trailing", f"{ex.get('trailing_stop_pct')}%")
+        show("exits: take-profit", tiers(ex, "take_profit_tiers", "gain_pct") + "%")
+        show("exits: breakeven", tiers(ex, "breakeven_tiers", "trigger_pct") + "%")
+else:
+    print("  opening burst                  DISABLED")
 PY
 
 if systemctl is-active --quiet market-bot && \
