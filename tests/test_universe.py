@@ -268,7 +268,6 @@ check("an all-unmapped watchlist still streams SPY",
       M._benchmark_symbols(CFG, ["NOSUCH1", "NOSUCH2"]) == ["SPY"])
 check("an empty watchlist is safe", M._benchmark_symbols(CFG, []) == ["SPY"])
 check("live config has benchmarks on", CFG["trading"]["stream_benchmarks"] is True)
-check("continuation ranking is off", CFG["trading"]["use_continuation_score"] is False)
 
 print("\n=== 16. SIGNAL CEILING REPORTING ===")
 from src.notifications.email_notifier import _peak_signal_note

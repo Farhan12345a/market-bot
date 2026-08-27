@@ -108,8 +108,7 @@ print("\n=== 8. CONTINUATION SCORING ===")
 # so the throttle keeps the best signals rather than whichever names sorted
 # earliest. It does not GATE - no signal is refused for scoring low, because the
 # weights are still reasoned guesses rather than a fit.
-check("continuation scoring is OFF - no separation over 2 sessions",
-      t_["use_continuation_score"] is False)
+check("continuation scoring is ON", t_["use_continuation_score"] is True)
 check("factors are recorded either way", "cf_score" in __import__("src.analytics.signal_journal",
       fromlist=["JOURNAL_FIELDS"]).JOURNAL_FIELDS)
 # post_exit_* are written onto the row AFTER the fact and must never restate

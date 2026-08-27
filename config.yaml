@@ -283,25 +283,7 @@ trading:
   # read it computed the same thing and nothing consumed the result. Sessions
   # before that date have cf_score in the journal but it decided nothing, which
   # is what makes them a clean control group.
-  # Back OFF 2026-08-27, after two sessions of measurement.
-  #
-  # It ranks a throttled burst best-first. Two days of journal say it has no
-  # idea what "best" is: Q4-Q1 separation of -0.09pp on 2026-08-27 ("no
-  # separation"), rho -0.020 at 15 min and -0.144 at 30 min, negative at 30 min
-  # on both days. Two of its factors carry the wrong sign against their weights
-  # (rel_strength +0.20 weight vs rho -0.007; vwap_pos +0.15 vs -0.062).
-  #
-  # Turning it off is NOT a no-op, and that is worth stating: on 2026-08-27 it
-  # chose 5 entries out of two throttled bursts (widths 7 and 10) worth +$76.73
-  # net, MSTR among them. Ranking reverts to list order, which is arbitrary. The
-  # case for the change is not that list order is better - it is that ranking on
-  # a score with zero demonstrated separation is deciding on noise while looking
-  # like it is deciding on merit.
-  #
-  # The factors are still COMPUTED and journalled. Only the ranking stops. Turn
-  # this back on when cf_score shows a positive Q4-Q1 spread that survives more
-  # than one session.
-  use_continuation_score: false
+  use_continuation_score: true
   continuation_weights:
     efficiency: 0.20        # momentum persistence - trend, not whipsaw
     rel_strength: 0.20      # excess return over SPY
