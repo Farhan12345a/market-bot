@@ -97,6 +97,46 @@ trading:
     # same symbol later - that would make the experiment change the control.
     skip_reentry_cooldown: true
 
+    # --- Exit profile for opening trades ONLY -----------------------------
+    #
+    # These keys overlay the normal trading config for positions opened by this
+    # mode. Everything NOT listed here keeps the session's setting, so the
+    # resistance exit, momentum fade and 16:00 time stop all still apply - an
+    # exit profile written from scratch would silently drop whatever nobody
+    # remembered to restate, and those omissions would read as decisions.
+    #
+    # A position keeps the profile it was opened with for its whole life.
+    #
+    # WHY TIGHTER. These are meant to be short scalps off the opening move, not
+    # positions held through the session. The normal profile is built for a
+    # trade that has 20+ minutes to work; this one is not.
+    #
+    #                        normal      opening      why
+    #   first exit           -0.5%       -0.3%        cut a failed open faster
+    #   final exit           -1.0%       -0.6%        cap the damage sooner
+    #   trailing stop         0.75%       0.40%       give back less of a fast move
+    #   take-profit tiers    1.0/1.25/1.5  0.5/0.75/1.0  take what a 2-min move gives
+    #   breakeven trigger    0.5 / 0.3    0.2         protect sooner
+    #
+    # THE RISK, stated plainly: the opening minutes are the most volatile of the
+    # day, and a tighter stop in higher volatility is more likely to be hit by
+    # noise rather than by the trade actually failing. -0.3% is roughly 2.4x the
+    # median bid-ask measured on 2026-08-26 (0.126%), which is enough clearance
+    # for most symbols and NOT enough for the widest - HOOD quoted 0.593%, so a
+    # position in a name like that could be stopped out by the spread alone.
+    # Whether that happens is exactly what tomorrow measures; the per-trade exit
+    # reasons in the report are how it will show.
+    exits:
+      first_exit_loss_pct: -0.3
+      final_exit_loss_pct: -0.6
+      trailing_stop_pct: 0.40
+      take_profit_tiers:
+        - {gain_pct: 0.5,  sell_fraction: 0.33}
+        - {gain_pct: 0.75, sell_fraction: 0.40}
+        - {gain_pct: 1.0,  sell_fraction: 1.0}
+      breakeven_tiers:
+        - {trigger_pct: 0.2, floor_pct: 0.05}
+
   # Subscribe the WebSocket this many minutes BEFORE the open.
   #
   # The stream used to start only once is_market_open() went true, and the
@@ -107,7 +147,13 @@ trading:
   # measures from 09:30:00 and decides by 09:32. Alpaca accepts pre-market
   # subscriptions, so connecting early costs nothing and means a price exists
   # when the bell rings.
-  stream_prestart_minutes: 2
+  # Widened 2 -> 4. The stream can only subscribe once the watchlist is FINAL,
+  # which is after the 09:28 list builder, so this cannot simply be moved to
+  # 09:26 - doing so would either subscribe an incomplete list or subscribe
+  # nothing. What a wider window buys is that the socket opens the INSTANT the
+  # list is ready rather than waiting for a narrow slot, which matters on a
+  # morning when the earnings calendar fetch runs slow.
+  stream_prestart_minutes: 4
   entry_window_end: "09:55"          # Stop looking for NEW entries after this time (HH:MM ET). Widened from 09:45.
   # --- Real-time price stream ---
   # Alpaca's free tier delays the REST historical endpoint by ~15 minutes but

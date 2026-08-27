@@ -510,6 +510,7 @@ class EmailNotifier:
             'symbols only. Reported separately because these run under different '
             'rules than the rest of the session - mixing them would make both '
             'numbers unreadable.</div>'
+            + self._opening_exit_profile_html() +
             '</div>'
             '<table class="trades-table"><thead><tr>'
             '<th>Symbol</th><th>Entry</th><th>Exit</th><th>Entry $</th><th>Exit $</th>'
@@ -517,6 +518,39 @@ class EmailNotifier:
             '<th>Peak (MFE)</th><th>Trough (MAE)</th><th>Exit Reason</th>'
             '<th>After Exit</th>'
             '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        )
+
+    def _opening_exit_profile_html(self):
+        """
+        The exit rules these trades ran under, printed next to their results.
+
+        Without it the section is unanalysable: a -0.3% first exit and a -0.5%
+        one produce very different exit-reason mixes, and six weeks from now
+        nobody will remember which was in force. Showing it against the normal
+        session is the point - it turns "FIRST_EXIT fired 5 times" into
+        "FIRST_EXIT fired 5 times at a stop 40% tighter than the session's".
+        """
+        # getattr, not self.run_context: this is reached from
+        # _generate_html_summary, and a missing attribute here would take the
+        # ENTIRE report down over a decorative sub-table. The report surviving
+        # matters more than this section appearing.
+        prof = (getattr(self, "run_context", None) or {}).get("opening_exits")
+        if not prof:
+            return ""
+        rows = "".join(
+            f"<tr><td style='padding:2px 10px 2px 0;color:#4338ca;'>{k}</td>"
+            f"<td style='padding:2px 12px 2px 0;color:#6b7280;'>{n}</td>"
+            f"<td style='padding:2px 0;color:#3730a3;font-weight:600;'>{o}</td></tr>"
+            for k, n, o in prof
+        )
+        return (
+            '<div style="margin-top:10px;font-size:11px;">'
+            '<div style="color:#4338ca;font-weight:600;margin-bottom:3px;">'
+            'Exit profile for these trades</div>'
+            '<table style="border-collapse:collapse;font-size:11px;">'
+            '<tr><td></td><td style="color:#9ca3af;padding-right:12px;">normal</td>'
+            '<td style="color:#9ca3af;">opening</td></tr>'
+            + rows + '</table></div>'
         )
 
     def _generate_html_summary(self, trades, burst_summary="", label="Daily Summary",

@@ -29,7 +29,13 @@ class Strat:
     def __init__(self): self.trades = {}
     def get_open_trades(self): return self.trades
     def can_enter(self, s, q): return True
-    def confirm_entry(self, s, p, q): self.trades[s] = {"price": p, "qty": q}
+    # Signature must match the real Strategy.confirm_entry, including
+    # config_override. When it did not, every entry raised AFTER the broker
+    # order had been submitted - the exception was swallowed by the opening
+    # loop's per-symbol guard and the position was never tracked. A mock that
+    # drifts from the interface hides exactly the failure it should surface.
+    def confirm_entry(self, s, p, q, config_override=None):
+        self.trades[s] = {"price": p, "qty": q, "cfg": config_override}
 
 
 class Exec:
@@ -99,7 +105,9 @@ check("ignores the signal ceiling", ob["ignore_max_pct"] is True)
 check("does not arm the re-entry cooldown", ob["skip_reentry_cooldown"] is True)
 check("normal entry window is UNCHANGED at 09:33",
       CFG["trading"]["entry_window_start"] == "09:33")
-check("stream starts before the bell", CFG["trading"]["stream_prestart_minutes"] == 2)
+check("stream starts well before the bell",
+      CFG["trading"]["stream_prestart_minutes"] >= 2,
+      CFG["trading"]["stream_prestart_minutes"])
 
 print("\n=== 2. BASELINE AND TIMING ===")
 st = {"baseline": {}, "taken": [], "done": False}
@@ -371,6 +379,83 @@ check("rapid_increase_pct is irrelevant here - the mode uses its own threshold",
       "min_move_pct" in msrc and _ob["min_move_pct"] != CFG["trading"]["rapid_increase_pct"])
 check("heavily-traded universe floor raised to $50M",
       CFG["trading"]["universe_min_dollar_volume"] == 50_000_000)
+
+print("\n=== 17. PER-TRADE EXIT PROFILE ===")
+from src.strategy.strategy import Strategy, TradeManager
+oc = M._opening_exit_config(CFG)
+check("an exits block produces an override config", oc is not None)
+n_, o_ = CFG["trading"], oc["trading"]
+check("first exit is tighter", o_["first_exit_loss_pct"] == -0.3 and n_["first_exit_loss_pct"] == -0.5)
+check("final exit is tighter", o_["final_exit_loss_pct"] == -0.6 and n_["final_exit_loss_pct"] == -1.0)
+check("trailing stop is tighter", o_["trailing_stop_pct"] == 0.40 and n_["trailing_stop_pct"] == 0.75)
+check("take-profit tiers are tighter",
+      [t["gain_pct"] for t in o_["take_profit_tiers"]] == [0.5, 0.75, 1.0])
+check("breakeven arms sooner", [t["trigger_pct"] for t in o_["breakeven_tiers"]] == [0.2])
+# Everything NOT overridden must be inherited, or the profile silently drops
+# rules nobody restated.
+for k in ("use_resistance_exit", "momentum_fade_window_minutes", "use_breakeven_floor",
+          "max_stock_price", "min_stock_price", "use_take_profit"):
+    check(f"inherits {k} unchanged", o_[k] == n_[k], (o_[k], n_[k]))
+check("the live config is not mutated", CFG["trading"]["first_exit_loss_pct"] == -0.5)
+check("no exits block -> no override",
+      M._opening_exit_config({"trading": {"opening_burst": {"enabled": True}}}) is None)
+
+print("\n=== 18. THE PROFILE REACHES THE POSITION ===")
+st = {"baseline": {}, "taken": [], "done": False}
+md = MD({"AAA": [100.0, 101.0]})
+strat, ex = Strat(), Exec()
+# Real Strategy so confirm_entry builds a real TradeManager.
+real = Strategy(CFG)
+class RealStrat(Strat):
+    def confirm_entry(self, s, p, q, config_override=None):
+        self.trades[s] = TradeManager(s, p, q, config_override or CFG)
+
+rs = RealStrat()
+run(cfg(), md, rs, ex, ["AAA"], st, at("09:30"))
+run(cfg(), md, rs, ex, ["AAA"], st, at("09:31"))
+tm = rs.trades.get("AAA")
+check("the position exists", tm is not None)
+check("it carries the TIGHT first exit",
+      tm.config["trading"]["first_exit_loss_pct"] == -0.3,
+      tm.config["trading"]["first_exit_loss_pct"])
+check("it carries the TIGHT trailing stop", tm.config["trading"]["trailing_stop_pct"] == 0.40)
+# and the tight stop actually fires earlier than the normal one would
+tight = TradeManager("T", 100.0, 100, oc)
+loose = TradeManager("L", 100.0, 100, CFG)
+px = 100.0 * (1 - 0.004)          # -0.4%: past the tight stop, short of the loose one
+check("-0.4% trips the opening first exit", tight.check_first_exit(px) > 0)
+check("-0.4% does NOT trip the normal one", loose.check_first_exit(px) == 0)
+
+print("\n=== 19. REPORT SHOWS THE PROFILE ===")
+rows = M._opening_exit_profile_rows(CFG)
+check("rows are produced", len(rows) >= 4, rows)
+check("only DIFFERING rows are shown", all(r[1] != r[2] for r in rows), rows)
+labels = {r[0] for r in rows}
+check("covers the stops", {"first exit", "final exit", "trailing stop"} <= labels, labels)
+n2 = EmailNotifier.__new__(EmailNotifier)
+n2.run_context = {"opening_exits": rows}
+html = n2._opening_exit_profile_html()
+check("renders into the report", "-0.3%" in html and "0.4%" in html, html[:200])
+check("shows the normal side for comparison", "-0.5%" in html and "0.75%" in html)
+n3 = EmailNotifier.__new__(EmailNotifier)
+n3.run_context = {}
+check("no profile -> nothing rendered", n3._opening_exit_profile_html() == "")
+
+print("\n=== 20. THRESHOLD REVIEW INSTRUMENTATION ===")
+# "0 entered" is ambiguous between a threshold set too high and a mechanism that
+# never ran. These log lines are what separates the two.
+check("the move distribution is logged", "OPENING MOVES (best first)" in msrc)
+check("the threshold is reviewed against it", "OPENING THRESHOLD REVIEW" in msrc)
+check("taking nothing says WHY, and suggests a number",
+      "OPENING BURST TOOK NOTHING" in msrc and "Lower min_move_pct to about" in msrc)
+check("measuring nothing is reported as a DIFFERENT failure",
+      "OPENING BURST MEASURED NOTHING" in msrc)
+check("stream readiness is logged at the window open",
+      "stream is serving" in msrc)
+check("zero streamed symbols is an error, not a shrug",
+      "NOTHING can be measured" in msrc)
+check("stream connects earlier than before",
+      CFG["trading"]["stream_prestart_minutes"] == 4)
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

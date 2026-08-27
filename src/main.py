@@ -560,6 +560,35 @@ def _warn_if_watchlist_outruns_the_stream(config, symbols):
     )
 
 
+def _opening_exit_profile_rows(config):
+    """
+    [(label, normal, opening)] for the report, or [] when nothing is overridden.
+
+    Only rows that actually DIFFER are returned. A table restating settings that
+    are identical in both profiles buries the handful that are not, and the
+    whole point of showing this beside the results is to make the difference
+    legible.
+    """
+    oc = _opening_exit_config(config)
+    if not oc:
+        return []
+    n, o = config["trading"], oc["trading"]
+
+    def tiers(part, key, field):
+        return "/".join(str(t.get(field)) for t in (part.get(key) or [])) + "%"
+
+    rows = [
+        ("first exit", f"{n.get('first_exit_loss_pct')}%", f"{o.get('first_exit_loss_pct')}%"),
+        ("final exit", f"{n.get('final_exit_loss_pct')}%", f"{o.get('final_exit_loss_pct')}%"),
+        ("trailing stop", f"{n.get('trailing_stop_pct')}%", f"{o.get('trailing_stop_pct')}%"),
+        ("take-profit", tiers(n, "take_profit_tiers", "gain_pct"),
+         tiers(o, "take_profit_tiers", "gain_pct")),
+        ("breakeven trigger", tiers(n, "breakeven_tiers", "trigger_pct"),
+         tiers(o, "breakeven_tiers", "trigger_pct")),
+    ]
+    return [r for r in rows if r[1] != r[2]]
+
+
 def _set_run_context(config, email_notifier, symbols, price_stream):
     """
     Record HOW this session is running, for the band at the top of every report.
@@ -582,6 +611,7 @@ def _set_run_context(config, email_notifier, symbols, price_stream):
             "symbols_note": f"cap {t.get('stream_max_subscriptions', 30)} subscriptions",
             "use_resistance_exit": t.get("use_resistance_exit", True),
             "rapid_increase_max_pct": t.get("rapid_increase_max_pct", 0),
+            "opening_exits": _opening_exit_profile_rows(config),
             "rapid_increase_pct": t.get("rapid_increase_pct"),
             "reentry_cooldown_minutes": t.get("reentry_cooldown_minutes", 0),
             "reentry_cooldown_after_loss_only": t.get("reentry_cooldown_after_loss_only", True),
@@ -1004,6 +1034,30 @@ def _opening_burst_config(config):
     return ob if ob.get("enabled") else None
 
 
+def _opening_exit_config(config):
+    """
+    A full config whose trading section carries the opening mode's exit
+    overrides, or None when it declares none.
+
+    Built by COPYING the live config and overlaying only the keys under
+    opening_burst.exits, so anything not overridden behaves exactly as the
+    normal session does. That direction matters: an exit profile written from
+    scratch would silently drop every setting nobody remembered to restate -
+    resistance, momentum fade, the time stop - and those omissions would look
+    like strategy decisions rather than oversights.
+    """
+    ob = _opening_burst_config(config)
+    if not ob:
+        return None
+    overrides = ob.get("exits") or {}
+    if not overrides:
+        return None
+    import copy as _copy
+    out = _copy.deepcopy(config)
+    out["trading"].update(overrides)
+    return out
+
+
 def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_values,
                        state, now, et, signal_journal=None, spy_pct=None):
     """
@@ -1053,15 +1107,77 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
                         )
                     except Exception:
                         pass
+            # The move DISTRIBUTION, not just the count. "0 entered" on its own
+            # is ambiguous between a threshold set too high and a mechanism that
+            # never ran, and those need opposite fixes. Printing what every
+            # measured symbol actually did says which it was, and says what
+            # threshold would have caught what - so the next setting is read off
+            # data rather than guessed at.
+            moves = []
+            for sym, base in (state.get("baseline") or {}).items():
+                last = state.get("last_price", {}).get(sym)
+                if last and base:
+                    moves.append((round((last - base) / base * 100, 3), sym))
+            moves.sort(reverse=True)
+            thresh = ob.get("min_move_pct", 0.0)
             logger.info(
                 f"===== OPENING BURST CLOSED at {now:%H:%M:%S} ET - "
                 f"{len(state.get('taken', []))} entered, "
                 f"{len(state.get('baseline', {}))} symbols measured ====="
             )
+            if moves:
+                logger.info(
+                    "OPENING MOVES (best first): "
+                    + ", ".join(f"{sym} {mv:+.3f}%" for mv, sym in moves[:20])
+                )
+                qualified = sum(1 for mv, _ in moves if mv >= thresh)
+                logger.info(
+                    f"OPENING THRESHOLD REVIEW: {qualified} of {len(moves)} cleared "
+                    f"{thresh}%. Best {moves[0][0]:+.3f}% ({moves[0][1]}), "
+                    f"median {moves[len(moves) // 2][0]:+.3f}%, "
+                    f"worst {moves[-1][0]:+.3f}% ({moves[-1][1]})."
+                )
+                if not state.get("taken"):
+                    logger.warning(
+                        f"OPENING BURST TOOK NOTHING. The mechanism ran and measured "
+                        f"{len(moves)} symbols, so this is a THRESHOLD result, not a "
+                        f"failure: the best move was {moves[0][0]:+.3f}% against a "
+                        f"{thresh}% requirement. Lower min_move_pct to about "
+                        f"{max(0.1, round(moves[0][0] - 0.05, 2))} to have caught the best one."
+                    )
+            elif not state.get("baseline"):
+                logger.error(
+                    "OPENING BURST MEASURED NOTHING - no symbol produced a baseline "
+                    "price. This is NOT a threshold result: either the stream was not "
+                    "up at the baseline instant, or every symbol fell back to REST and "
+                    "was skipped by streamed_only. Check for the PRE-OPEN subscribe line."
+                )
         return 0
+
+    # Resolved once per session, not per poll.
+    if "exit_config" not in state:
+        state["exit_config"] = _opening_exit_config(config)
 
     streamed_only = ob.get("streamed_only", True)
     baseline = state.setdefault("baseline", {})
+
+    # How many symbols the stream is actually serving, logged once as the
+    # window opens. If this is 0 the experiment cannot work, and knowing that at
+    # 09:30:10 is worth far more than deducing it from an empty report later.
+    if not state.get("readiness_logged"):
+        state["readiness_logged"] = True
+        try:
+            live = sum(1 for s_ in symbols if market_data.is_streamed(s_))
+            msg = (f"OPENING BURST: stream is serving {live}/{len(symbols)} watched "
+                   f"symbols at {now:%H:%M:%S} ET")
+            if live == 0:
+                logger.error(msg + " - NOTHING can be measured; the mode will take no trades")
+            elif live < len(symbols) / 2:
+                logger.warning(msg + " - most symbols are on REST and will be skipped")
+            else:
+                logger.info(msg)
+        except Exception:
+            pass
     taken = state.setdefault("taken", [])
     max_positions = ob.get("max_positions", 4)
     entries = 0
@@ -1123,6 +1239,7 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
                 size_multiplier=ob.get("size_multiplier", 0.5),
                 burst_note=note, signal_pct=round(move, 3),
                 skip_cooldown=ob.get("skip_reentry_cooldown", True),
+                exit_config=state.get("exit_config"),
             )
             if entered:
                 taken.append(symbol)
@@ -1150,7 +1267,7 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
 
 def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi,
                    size_multiplier=1.0, burst_note=None, signal_pct=None,
-                   skip_cooldown=False):
+                   skip_cooldown=False, exit_config=None):
     """
     Shared entry path for all three entry signals (three-bar momentum, rapid
     increase immediate, pullback resumption). Returns True if a position was
@@ -1226,7 +1343,7 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     if order is None:
         return False  # broker rejected/failed - already logged by submit_entry_order, nothing committed
 
-    strategy.confirm_entry(symbol, price, qty)
+    strategy.confirm_entry(symbol, price, qty, config_override=exit_config)
     if burst_note:
         executor.entry_meta.setdefault(symbol, {})["burst_logic"] = burst_note
         if signal_pct is not None:

@@ -528,7 +528,7 @@ class Strategy:
         be tracked and qty must be positive."""
         return symbol not in self.trades and qty > 0
 
-    def confirm_entry(self, symbol, price, qty):
+    def confirm_entry(self, symbol, price, qty, config_override=None):
         """
         Commit a new position to internal tracking. Call this ONLY after the
         broker has confirmed the entry order actually filled - never before.
@@ -543,8 +543,29 @@ class Strategy:
         opening a real, completely untracked SHORT position. 16 of them
         happened this way in one session before being caught.
         """
-        self.trades[symbol] = TradeManager(symbol, price, qty, self.config)
-        logger.info(f"{symbol}: Entered {qty} shares at {price}")
+        # config_override gives one position its OWN exit rules. TradeManager
+        # already reads every exit threshold from the config it is handed -
+        # first exit, final exit, trailing, breakeven tiers, take-profit tiers -
+        # so a different config is a different exit profile, with no branching
+        # in the exit path itself. Used by the opening-move experiment, whose
+        # trades are meant to be short scalps and want tighter stops than the
+        # session they run alongside.
+        #
+        # The position keeps whatever config it was opened with for its whole
+        # life. That matters: changing exit rules under an open position
+        # mid-session would make its behaviour unattributable to either profile.
+        cfg = config_override or self.config
+        self.trades[symbol] = TradeManager(symbol, price, qty, cfg)
+        if config_override is not None:
+            t = cfg["trading"]
+            logger.info(
+                f"{symbol}: Entered {qty} shares at {price} under a CUSTOM exit "
+                f"profile - first {t.get('first_exit_loss_pct')}%, final "
+                f"{t.get('final_exit_loss_pct')}%, trail {t.get('trailing_stop_pct')}%, "
+                f"tiers {[x.get('gain_pct') for x in (t.get('take_profit_tiers') or [])]}"
+            )
+        else:
+            logger.info(f"{symbol}: Entered {qty} shares at {price}")
 
     def correct_entry_price(self, symbol, actual):
         """
