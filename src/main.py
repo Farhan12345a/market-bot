@@ -281,7 +281,7 @@ def select_symbols(config, screener, market_data):
 
     return symbols, rsi_values
 
-def _augment_selection(config, screener, market_data, selection):
+def _augment_selection(config, screener, market_data, selection, stages=("earnings", "qqq")):
     """
     Run the earnings / QQQ list pass over an existing (symbols, rsi_values)
     selection and return an updated one.
@@ -297,7 +297,7 @@ def _augment_selection(config, screener, market_data, selection):
     """
     symbols, rsi_values = selection
     try:
-        full, added = augment_symbols(config, screener, symbols)
+        full, added = augment_symbols(config, screener, symbols, stages=stages)
     except Exception as e:
         logger.error(f"List augmentation failed, keeping the screener list as-is: {e}", exc_info=True)
         return selection
@@ -2427,6 +2427,12 @@ def main():
         # between the screener finishing and the bell.
         augment_start = config["trading"].get("list_builder_start_time", "09:20")
         augment_hour, augment_minute = (int(x) for x in augment_start.split(":"))
+        # The QQQ list gets its own, EARLIER slot. It scores every constituent
+        # serially - 98 of them took 3m17s on 2026-08-27 - and needs nothing
+        # that only exists late, unlike the earnings surprise.
+        qqq_start = config["trading"].get("qqq_list_start_time", "09:10")
+        qqq_hour, qqq_minute = (int(x) for x in qqq_start.split(":"))
+        pending_qqq_done = False
 
         # Holds the pre-market screener result until the open consumes it.
         pending_selection = None
@@ -2473,8 +2479,11 @@ def main():
                     # list_builder_start_time slot and it never came round. Do it now: it
                     # costs entry-window time but an unaugmented list is a
                     # silently different strategy from the configured one.
+                    # Earnings only. The QQQ stage takes minutes and this path
+                    # runs with the market already open, where minutes are the
+                    # scarcest thing there is.
                     pending_selection = _augment_selection(
-                        config, screener, market_data, pending_selection
+                        config, screener, market_data, pending_selection, stages=("earnings",)
                     )
                     pending_augmented = True
 
@@ -2567,11 +2576,26 @@ def main():
             # by 09:32. Alpaca accepts pre-market subscriptions, so connecting
             # early costs nothing.
             prestart = config["trading"].get("stream_prestart_minutes", 0)
+            # Deliberately NOT gated on pending_augmented.
+            #
+            # It was, on 2026-08-27, and that starved the opening-move
+            # experiment completely. The QQQ list scores its constituents one at
+            # a time; that morning it took 3m17s for 98 of them and the whole
+            # augmentation finished at 09:31:50. The stream, waiting on it,
+            # subscribed 110 seconds AFTER the 09:30 baseline instant with zero
+            # bars delivered, so the burst measured 0 of 28 symbols and took
+            # nothing.
+            #
+            # Waiting bought nothing even in principle. Stream slots are handed
+            # out by screener rank, and the screener's own picks already fill the
+            # budget - so an augmented symbol can never win a slot anyway. That
+            # morning all 13 augmented names went to REST regardless. The gate
+            # cost the entire experiment to protect an outcome that could not
+            # happen.
             if (
                 price_stream is not None
                 and prestart
                 and pending_selection is not None
-                and pending_augmented
                 and market_data.is_trading_day(now)
                 and market_open_today - timedelta(minutes=prestart) <= now < market_open_today
                 and not price_stream.is_running()
@@ -2590,6 +2614,29 @@ def main():
                 except Exception as e:
                     logger.error(f"Pre-open stream start failed ({e}) - it will start at the open instead")
 
+            # --- QQQ list, early slot ---
+            qqq_time_today = now.replace(
+                hour=qqq_hour, minute=qqq_minute, second=0, microsecond=0
+            )
+            if (
+                pending_selection is not None
+                and not pending_qqq_done
+                and config["trading"].get("use_qqq_list", False)
+                and market_data.is_trading_day(now)
+                and qqq_time_today <= now < market_open_today
+            ):
+                logger.info(
+                    f"===== PRE-MARKET: building the QQQ list at {now:%H:%M:%S} ET, "
+                    f"{(market_open_today - now).total_seconds() / 60:.0f} min ahead of the open ====="
+                )
+                _t0 = time.monotonic()
+                pending_selection = _augment_selection(
+                    config, screener, market_data, pending_selection, stages=("qqq",)
+                )
+                pending_qqq_done = True
+                logger.info(f"QQQ list finished in {time.monotonic() - _t0:.1f}s")
+                continue
+
             augment_time_today = now.replace(
                 hour=augment_hour, minute=augment_minute, second=0, microsecond=0
             )
@@ -2601,12 +2648,47 @@ def main():
                 and augment_time_today <= now < market_open_today
             ):
                 logger.info(
-                    f"===== PRE-MARKET: building earnings/QQQ lists at {now:%H:%M:%S} ET, "
+                    f"===== PRE-MARKET: building the earnings list at {now:%H:%M:%S} ET, "
                     f"{(market_open_today - now).total_seconds() / 60:.0f} min ahead of the open ====="
                 )
-                pending_selection = _augment_selection(
-                    config, screener, market_data, pending_selection
+                # Hard deadline, for the same reason the screener has a
+                # timeout. On 2026-08-27 this ran for 3m17s and finished at
+                # 09:31:50, which did not merely delay the list - it blocked
+                # this whole loop, so run_trading_day (and with it the
+                # opening-move experiment, whose window is 09:30-09:32) could
+                # not even START until the window had almost passed.
+                #
+                # An augmented list that arrives after the open is worth less
+                # than the minutes it costs. Abandoning it keeps the screener's
+                # picks, which is the same fallback a screener timeout uses.
+                deadline = max(
+                    5.0,
+                    (market_open_today - now).total_seconds()
+                    - config["trading"].get("augment_deadline_buffer_seconds", 20),
                 )
+                aug_pool = ThreadPoolExecutor(max_workers=1)
+                aug_started = time.monotonic()
+                aug_future = aug_pool.submit(
+                    _augment_selection, config, screener, market_data, pending_selection,
+                    ("earnings",),
+                )
+                try:
+                    pending_selection = aug_future.result(timeout=deadline)
+                    logger.info(
+                        f"List build finished in {time.monotonic() - aug_started:.1f}s "
+                        f"(deadline was {deadline:.0f}s)"
+                    )
+                except FutureTimeoutError:
+                    logger.warning(
+                        f"List build did not finish within {deadline:.0f}s - abandoning it "
+                        f"and trading the screener's {len(pending_selection[0])} picks. "
+                        f"The earnings/QQQ adds are dropped for today; a list that lands "
+                        f"after the open costs more than it adds."
+                    )
+                except Exception as e:
+                    logger.error(f"List build failed ({e}) - keeping the screener's picks")
+                finally:
+                    aug_pool.shutdown(wait=False)
                 pending_augmented = True
 
                 # The slot is deliberately tight (09:28, two minutes ahead of

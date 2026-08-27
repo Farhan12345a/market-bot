@@ -2,6 +2,31 @@
 #
 # Pull, verify, restart, confirm. Run on the Droplet from /root/market-bot.
 #
+# FIRST: re-run from a snapshot, so bash is never reading a file git may replace.
+#
+# bash reads a script incrementally, by BYTE OFFSET, as it executes. This script
+# git-pulls a new copy of ITSELF partway through, so without this the running
+# shell continues from a shifted position in a different file. On 2026-08-27 a
+# +50/-4 change pulled cleanly and then printed the OLD settings block, because
+# the shell carried on through stale content. That was the harmless outcome; the
+# harmful one is an offset landing mid-statement, which reproduces as
+# "unexpected EOF while looking for matching quote" - potentially with the
+# service already stopped.
+#
+# Copying to /tmp and executing that means the file under bash never changes,
+# whatever git does to the repo. The re-exec after the pull then makes sure the
+# NEW version is what actually runs.
+if [ -z "${MARKET_BOT_SNAPSHOT:-}" ]; then
+  _snap=$(mktemp /tmp/market-bot-deploy.XXXXXX)
+  cp "$0" "$_snap"
+  export MARKET_BOT_SNAPSHOT="$_snap"
+  export MARKET_BOT_ORIGIN="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  exec bash "$_snap" "$@"
+fi
+SELF_SNAPSHOT="$MARKET_BOT_SNAPSHOT"
+SELF_ORIGIN="$MARKET_BOT_ORIGIN"
+trap 'rm -f "$SELF_SNAPSHOT"' EXIT
+#
 # The point of this script is the ORDER. A python syntax error or a malformed
 # config.yaml is survivable if it's caught here, and expensive if it's caught by
 # systemd at 09:29 with the open six minutes away. It checks first, restarts
@@ -28,6 +53,18 @@ BEFORE=$(git rev-parse HEAD)
 say "Pulling"
 git pull --ff-only origin main || fail "pull failed - resolve by hand, nothing was restarted"
 AFTER=$(git rev-parse HEAD)
+
+# Re-exec if the pull changed THIS script, so the NEW logic is what runs.
+#
+# Safe to do here only because of the snapshot at the top of this file: without
+# it, this check can never be reached, because bash may already have died on the
+# changed file before getting here.
+if ! cmp -s "$SELF_ORIGIN" "$SELF_SNAPSHOT" && [ -z "${MARKET_BOT_REEXEC:-}" ]; then
+  printf '\n\033[1;33m[!] ops/deploy.sh was updated by this pull - restarting it so the\n'
+  printf '    NEW version runs. Nothing has been restarted yet.\033[0m\n'
+  rm -f "$SELF_SNAPSHOT"
+  MARKET_BOT_REEXEC=1 MARKET_BOT_SNAPSHOT= exec bash "$SELF_ORIGIN" "$@"
+fi
 
 if [ "$BEFORE" = "$AFTER" ]; then
   echo "    already up to date at ${AFTER:0:7}"

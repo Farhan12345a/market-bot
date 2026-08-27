@@ -910,6 +910,31 @@ trading:
   # slow calendar fetch (earnings_calendar_timeout_seconds: 20).
   list_builder_start_time: "09:28"
 
+  # The QQQ list runs in its OWN, much earlier slot.
+  #
+  # The two lists have opposite timing needs and sharing 09:28 cost an entire
+  # session's experiment on 2026-08-27. Earnings must be late (it reads a
+  # published EPS surprise, often not on the wire before ~09:28) and is fast -
+  # 2 seconds for 10 candidates. QQQ scores every constituent one at a time and
+  # took 3 minutes 17 seconds for 98 of them, while needing nothing that only
+  # exists late.
+  #
+  # Run together they finished at 09:31:50, which did not merely delay the list:
+  # it blocked the trading loop, so the 09:30-09:32 opening-move window could
+  # not start until it had almost passed, and the stream - gated on the same
+  # thing - subscribed 110 seconds after the baseline instant with zero bars.
+  # The burst measured 0 of 28 symbols and took nothing.
+  #
+  # 09:10 leaves ~20 minutes, comfortably more than the ~3.5 the QQQ pass needs,
+  # and the screener has finished by ~09:18 either way.
+  qqq_list_start_time: "09:10"
+
+  # Hard deadline for the LATE (earnings) slot, as seconds before the open.
+  # It is fast, so this is a backstop rather than a routine cut - but a list
+  # arriving after the bell is worth less than the minutes it costs, and the
+  # screener's picks are the same fallback a screener timeout uses.
+  augment_deadline_buffer_seconds: 20
+
   # Earnings list: today's before-the-bell reporters plus yesterday's
   # after-the-bell ones - i.e. only the names whose news is already priced-in
   # to pre-market. A company reporting after TODAY's close has no catalyst at

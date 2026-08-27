@@ -331,8 +331,14 @@ check("with tomorrow's config that means 09:30, not 09:33",
 # (b) The stream subscribed only after the bell, so no price existed at 09:30:00.
 check("the stream is subscribed pre-open", "PRE-OPEN: subscribing the stream" in msrc)
 check("...gated on stream_prestart_minutes", "stream_prestart_minutes" in msrc)
-check("...and only once the watchlist is final",
-      "and pending_augmented" in msrc)
+# This used to assert the stream waited for augmentation. That gate is what
+# starved the experiment on 2026-08-27, and it protected nothing: stream slots
+# go by screener rank and the screener's own picks already fill the budget, so
+# an augmented symbol could never win one. All 13 added that morning went to
+# REST regardless.
+check("...on the screener's list, WITHOUT waiting for augmentation",
+      "and pending_selection is not None" in msrc
+      and "Deliberately NOT gated on pending_augmented" in msrc)
 check("...without double-starting at the open",
       "price_stream is not None and not price_stream.is_running()" in msrc)
 from src.data.stream import PriceStream
@@ -467,6 +473,57 @@ check("zero streamed symbols is an error, not a shrug",
       "NOTHING can be measured" in msrc)
 check("stream connects earlier than before",
       CFG["trading"]["stream_prestart_minutes"] == 4)
+
+print("\n=== 21. THE 2026-08-27 STARVATION ===")
+# What happened: the QQQ list scored 98 constituents one at a time, took 3m17s,
+# and finished at 09:31:50. The stream was gated on that finishing, so it
+# subscribed 110s AFTER the 09:30 baseline with zero bars - and the augmentation
+# also blocked the loop, so run_trading_day could not start until the
+# 09:30-09:32 window had almost passed. The burst measured 0 of 28 and took
+# nothing. Three separate guards now stop that recurring.
+check("the stream no longer waits for augmentation",
+      "Deliberately NOT gated on pending_augmented" in msrc)
+check("...and the gate really is gone",
+      "and pending_augmented\n                and market_data.is_trading_day(now)\n"
+      "                and market_open_today - timedelta" not in msrc)
+check("the late list build has a hard deadline", "augment_deadline_buffer_seconds" in msrc)
+check("...enforced with a timeout, not a hope",
+      "aug_future.result(timeout=deadline)" in msrc)
+check("...and abandoning it keeps the screener's picks",
+      "abandoning it" in msrc and "screener's" in msrc)
+check("QQQ has its own earlier slot", "qqq_list_start_time" in msrc)
+check("the late slot builds EARNINGS only", '("earnings",)' in msrc)
+check("the at-the-open catch-up also skips the slow stage",
+      'stages=("earnings",)' in msrc)
+
+print("\n=== 22. THE PRE-OPEN TIMELINE FITS ===")
+t = CFG["trading"]
+def mins(hhmm): return int(hhmm[:2]) * 60 + int(hhmm[3:])
+open_m = mins("09:30")
+check("screener starts first", mins(t["screener_start_time"]) < mins(t["qqq_list_start_time"]))
+check("QQQ runs early enough for a ~3.5 min pass",
+      open_m - mins(t["qqq_list_start_time"]) >= 15,
+      open_m - mins(t["qqq_list_start_time"]))
+check("earnings stays late for the surprise to publish",
+      mins(t["list_builder_start_time"]) >= mins("09:25"))
+check("the stream window opens before the earnings slot",
+      open_m - t["stream_prestart_minutes"] <= mins(t["list_builder_start_time"]))
+check("the stream is up before the baseline",
+      open_m - t["stream_prestart_minutes"] < mins(t["opening_burst"]["baseline_time"]) + 1)
+check("QQQ finishes long before the stream subscribes",
+      mins(t["qqq_list_start_time"]) + 4 < open_m - t["stream_prestart_minutes"])
+
+print("\n=== 23. THE STAGES ARE SEPARABLE ===")
+import src.screener.list_builder as LB
+import inspect
+sig = inspect.signature(LB.augment_symbols)
+check("augment_symbols takes a stages argument", "stages" in sig.parameters)
+check("...defaulting to both", sig.parameters["stages"].default == ("earnings", "qqq"))
+src_lb = open(repo_file("src", "screener", "list_builder.py")).read()
+check("earnings is gated on its stage", '"earnings" in stages' in src_lb)
+check("qqq is gated on its stage", '"qqq" in stages' in src_lb)
+sig2 = inspect.signature(M._augment_selection)
+check("_augment_selection passes stages through", "stages" in sig2.parameters)
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

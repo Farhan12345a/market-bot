@@ -456,12 +456,26 @@ def _filter_earnings_candidates(screener, symbols, why, surprises, config):
     return kept
 
 
-def augment_symbols(config, screener, existing, now_et=None) -> Tuple[List[str], List[str]]:
+def augment_symbols(config, screener, existing, now_et=None,
+                    stages=("earnings", "qqq")) -> Tuple[List[str], List[str]]:
     """
     Extend the day's watchlist with the earnings and QQQ lists.
 
     Returns (full_list, added) where full_list starts with `existing`, in order,
     so nothing already selected can be displaced. Never raises.
+
+    `stages` selects which lists to build, because the two have OPPOSITE timing
+    needs and sharing one slot cost an entire experiment on 2026-08-27.
+
+    The earnings list must run LATE - it reads a published EPS surprise that
+    often is not on the wire before ~09:28 - and it is fast, 2 seconds for 10
+    candidates.
+
+    The QQQ list must run EARLY - it scores every constituent one at a time, and
+    98 of them took 3 minutes 17 seconds - and it needs nothing that only exists
+    late. Run together at 09:28 they finished at 09:31:50, blocking the trading
+    loop past the open and starving the 09:30-09:32 opening-move window
+    completely.
     """
     trading = config["trading"]
     existing = list(dict.fromkeys(existing))
@@ -474,7 +488,7 @@ def augment_symbols(config, screener, existing, now_et=None) -> Tuple[List[str],
     now_et = now_et or datetime.now(screener.et)
 
     # --- earnings ---------------------------------------------------------
-    if trading.get("use_earnings_list", False):
+    if "earnings" in stages and trading.get("use_earnings_list", False):
         try:
             cands, why, surprises = fetch_earnings_symbols(now_et, config)
             if cands:
@@ -500,7 +514,7 @@ def augment_symbols(config, screener, existing, now_et=None) -> Tuple[List[str],
             logger.error(f"Earnings list failed, continuing without it: {e}", exc_info=True)
 
     # --- QQQ --------------------------------------------------------------
-    if trading.get("use_qqq_list", False):
+    if "qqq" in stages and trading.get("use_qqq_list", False):
         try:
             is_up, _ = qqq_trend(screener, config)
             if is_up:
@@ -524,7 +538,7 @@ def augment_symbols(config, screener, existing, now_et=None) -> Tuple[List[str],
 
     full = list(dict.fromkeys(existing + added))
     logger.info(
-        f"List augmentation: {len(existing)} watched -> {len(full)} "
+        f"List augmentation [{'+'.join(stages)}]: {len(existing)} watched -> {len(full)} "
         f"(+{len(added)}: {', '.join(added) if added else 'none'})"
     )
     return full, added
