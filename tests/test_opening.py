@@ -388,8 +388,14 @@ n_, o_ = CFG["trading"], oc["trading"]
 check("first exit is tighter", o_["first_exit_loss_pct"] == -0.3 and n_["first_exit_loss_pct"] == -0.5)
 check("final exit is tighter", o_["final_exit_loss_pct"] == -0.6 and n_["final_exit_loss_pct"] == -1.0)
 check("trailing stop is tighter", o_["trailing_stop_pct"] == 0.40 and n_["trailing_stop_pct"] == 0.75)
-check("take-profit tiers are tighter",
-      [t["gain_pct"] for t in o_["take_profit_tiers"]] == [0.5, 0.75, 1.0])
+check("take-profit tiers are tighter than the session's",
+      [t["gain_pct"] for t in o_["take_profit_tiers"]] == [0.75, 1.0, 1.3],
+      [t["gain_pct"] for t in o_["take_profit_tiers"]])
+check("...and every opening tier sits below the normal top tier",
+      max(t["gain_pct"] for t in o_["take_profit_tiers"])
+      < max(t["gain_pct"] for t in n_["take_profit_tiers"]))
+check("the first opening tier clears the entry threshold",
+      min(t["gain_pct"] for t in o_["take_profit_tiers"]) > CFG["trading"]["opening_burst"]["min_move_pct"])
 check("breakeven arms sooner", [t["trigger_pct"] for t in o_["breakeven_tiers"]] == [0.2])
 # Everything NOT overridden must be inherited, or the profile silently drops
 # rules nobody restated.
