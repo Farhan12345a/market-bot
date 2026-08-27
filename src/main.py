@@ -1404,6 +1404,17 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     opening_reversal_confirm_bars = config["trading"].get("opening_reversal_confirm_bars", 5)
     rsi_period = config["trading"].get("rsi_period", 14)
 
+    # NOTE the entry gate below is `entry_start <= now < entry_end`, not just
+    # `now < entry_end`. It used to be the latter, which was safe only because
+    # this function SLEPT until entry_start - the loop could not run early, so
+    # the lower bound was implicit. Starting the loop at 09:30 for the opening
+    # burst removed that guarantee and let normal entries fire three minutes
+    # early. On 2026-08-27 OKTA and CRWD were bought at 09:32:13, both peaked at
+    # MFE 0.00%, both hit FINAL_EXIT -1.0%, and cost $195.52 in 25 seconds -
+    # exactly the open-chasing that moving entry_window_start to 09:33 was
+    # measured to avoid (2026-08-19: the 9:34 and 9:46 bursts went 1 win in 30
+    # for -$1,884, while entries from 9:51 went 6 in 12 for +$356).
+    #
     # The loop must be running before the NORMAL entry window opens whenever the
     # opening-burst experiment is on: it measures from its baseline instant
     # (09:30) and must decide by 09:32, so sleeping until entry_start (09:33)
@@ -1648,7 +1659,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     f"no new entries for the rest of the day; exits continue as normal"
                 )
                 daily_entry_cap_logged = True
-        elif now < entry_end:
+        elif entry_start <= now < entry_end:
             # SPY is tracked purely as a market benchmark - never traded. It is
             # what separates "this stock is strong" from "the market went up":
             # during a burst every name's raw move looks alike, but excess

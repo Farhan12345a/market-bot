@@ -525,5 +525,19 @@ check("qqq is gated on its stage", '"qqq" in stages' in src_lb)
 sig2 = inspect.signature(M._augment_selection)
 check("_augment_selection passes stages through", "stages" in sig2.parameters)
 
+print("\n=== 24. THE LOOP STARTS EARLY, ENTRIES DO NOT ===")
+# Starting the loop at 09:30 for the opening burst removed the implicit lower
+# bound on the normal entry window - it used to be enforced by the function
+# sleeping until entry_start. On 2026-08-27 that let OKTA and CRWD be bought at
+# 09:32:13; both peaked at MFE 0.00%, both hit FINAL_EXIT -1.0%, -$195.52 in 25
+# seconds.
+check("the normal entry block has a LOWER bound again",
+      "elif entry_start <= now < entry_end:" in msrc)
+check("...and the unbounded form is gone",
+      "elif now < entry_end:" not in msrc)
+check("the loop still starts early for the burst", "while now < loop_start:" in msrc)
+check("the two windows are distinct",
+      CFG["trading"]["opening_burst"]["baseline_time"] < CFG["trading"]["entry_window_start"])
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)
