@@ -80,6 +80,82 @@ def load_credentials():
     return False
 
 
+def close_premarket(broker, client, positions, pad_pct):
+    """Close every position in the premarket session, now, not at 09:30.
+
+    Queuing market orders into the open is not good enough when the bot is
+    going to be awake at 09:30 holding the same symbols. Reconciliation drops
+    the SIGN of a position (main.py: int(abs(float(position.qty)))), so a short
+    is adopted as a long; on 2026-08-28 CRWD -39 @ 212.74 against a ~228 market
+    read as +7.2% PROFIT and would have fired a take-profit. submit_exit_order
+    cancels working orders for the symbol before it sells, so the bot would
+    have cancelled the buy-to-cover and shorted 39 more.
+
+    Filling premarket removes the race entirely: the positions are gone before
+    the loop starts, and a restart afterwards adopts nothing.
+
+    Marketable LIMIT orders, priced pad_pct through the market, because Alpaca
+    takes only limit DAY orders outside regular hours. Premarket books are thin
+    and the padding is what buys the fill; on these sizes it costs a few tens of
+    dollars against a four-figure downside.
+    """
+    import time as _time
+
+    print(f"\nCancelling working orders...")
+    try:
+        client.cancel_orders()
+    except Exception as e:
+        print(f"  cancel_orders failed: {e} - continuing anyway")
+    _time.sleep(2)
+
+    print(f"Submitting extended-hours limit orders ({pad_pct}% through the market):\n")
+    submitted = []
+    for sym, p in sorted(positions.items()):
+        qty_signed = float(getattr(p, "qty", 0) or 0)
+        qty = int(abs(qty_signed))
+        if qty <= 0:
+            continue
+        side = "buy" if qty_signed < 0 else "sell"
+
+        ref = None
+        quote = broker.get_latest_quote(sym)
+        if quote:
+            ref = quote["ask"] if side == "buy" else quote["bid"]
+        if not ref:
+            cp = getattr(p, "current_price", None)
+            ref = float(cp) if cp else None
+        if not ref:
+            print(f"  {sym:<6} NO PRICE - skipped, close this one by hand")
+            continue
+
+        mult = (1 + pad_pct / 100) if side == "buy" else (1 - pad_pct / 100)
+        limit = round(ref * mult, 2)
+        try:
+            broker.submit_limit_order(sym, qty, limit, side=side, extended_hours=True)
+            submitted.append(sym)
+            print(f"  {sym:<6} {side:<4} {qty:>5} limit {limit:>9.2f}  (ref {ref:.2f})")
+        except Exception as e:
+            print(f"  {sym:<6} {side:<4} {qty:>5} FAILED: {e}")
+
+    if not submitted:
+        print("\nNothing was submitted. Close by hand in the dashboard.")
+        sys.exit(1)
+
+    print("\nWaiting up to 90s for fills...")
+    for _ in range(18):
+        _time.sleep(5)
+        left = broker.get_positions()
+        if not left:
+            print("\nAll positions closed. Now restart the bot so it adopts nothing:")
+            print("    sudo systemctl restart market-bot")
+            return
+    print(f"\nStill open: {', '.join(sorted(left))}")
+    print("Premarket books are thin. Re-run with a wider pad, e.g.:")
+    print("    ./venv/bin/python3 ops/flatten-now.py --yes --premarket --pad-pct 4")
+    print("DO NOT leave a short open into 09:30 - the bot adopts it as a long.")
+    sys.exit(1)
+
+
 def show_orders(client):
     """Every open order, with the field that actually matters: side.
 
@@ -113,6 +189,11 @@ def main():
     ap.add_argument("--yes", action="store_true", help="actually place the orders")
     ap.add_argument("--cancel-only", action="store_true",
                     help="cancel working orders and stop; touch no positions")
+    ap.add_argument("--premarket", action="store_true",
+                    help="close NOW via extended-hours limit orders instead of "
+                         "queuing market orders until 09:30")
+    ap.add_argument("--pad-pct", type=float, default=2.0,
+                    help="how far through the market to price the limit (default 2%%)")
     args = ap.parse_args()
 
     if not load_credentials():
@@ -165,6 +246,10 @@ def main():
 
     if not args.yes:
         print("\nDry run - nothing was closed. Re-run with --yes to close them.")
+        return
+
+    if args.premarket:
+        close_premarket(broker, client, positions, args.pad_pct)
         return
 
     # Premarket, a market order is accepted and then queues until 09:30, so

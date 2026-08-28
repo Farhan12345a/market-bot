@@ -69,15 +69,25 @@ class AlpacaBroker:
             logger.error(f"Error submitting market order: {e}")
             raise
 
-    def submit_limit_order(self, symbol, qty, limit_price, side="buy"):
-        """Submit limit order"""
+    def submit_limit_order(self, symbol, qty, limit_price, side="buy",
+                           extended_hours=False):
+        """Submit limit order.
+
+        extended_hours=True routes to the 04:00-09:30 / 16:00-20:00 sessions,
+        where Alpaca accepts LIMIT DAY orders only - a market order outside
+        regular hours is not rejected, it is QUEUED until the next open, which
+        is a different thing and easy to mistake for a fill. Used by
+        ops/flatten-now.py to close leftovers before the bot's loop starts,
+        rather than leaving them queued into the opening minute.
+        """
         try:
             order_request = LimitOrderRequest(
                 symbol=symbol,
                 qty=qty,
                 limit_price=limit_price,
                 side=OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL,
-                time_in_force=TimeInForce.DAY
+                time_in_force=TimeInForce.DAY,
+                extended_hours=extended_hours
             )
             order = self.trading_client.submit_order(order_request)
             logger.info(f"Limit order submitted: {symbol} {qty} {side.upper()} @ {limit_price}")

@@ -781,3 +781,25 @@ when it hits - CRWD alone was -$605 unrealized.
 Fix: give `submit_exit_order` the position sign, or have `flatten_all_positions`
 call `broker.trading_client.close_position(symbol)` per symbol. Add a test with
 a negative-qty position asserting the order side is BUY.
+
+## reconcile_existing_positions drops the position sign (found 2026-08-28, NOT fixed)
+
+`src/main.py`, in `reconcile_existing_positions`:
+
+    qty = int(abs(float(position.qty)))
+
+A short is adopted as a long of the same size. Every downstream rule then runs
+backwards: on 2026-08-28 CRWD -39 @ 212.74 against a ~228 market was read as
++7.2% profit and would have fired a take-profit SELL, which shorts 39 more. And
+because `submit_exit_order` cancels working orders for the symbol first, that
+sell would have cancelled the buy-to-cover queued against it.
+
+Not fixed on the day - the market was 50 minutes out and this is the startup
+path for every position the bot holds. Worked around by flattening premarket
+(`ops/flatten-now.py --premarket`) so nothing is left to adopt.
+
+Fix: keep the sign, and either manage shorts properly or refuse to adopt them -
+log loudly and leave them for a human. Refusing is probably right, since the bot
+has no intent to be short and a position that got there is already evidence of a
+different bug. Test: adopt a negative-qty position, assert it is not treated as
+a long.
