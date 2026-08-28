@@ -229,5 +229,48 @@ check("a pre-list_source row is not dropped", len(rows) == 1, widths)
 check("...and its symbol still reads", rows and rows[0]["symbol"] == "AAA")
 shutil.rmtree(_d, ignore_errors=True)
 
+print("\n=== 8. ENTRY-PERCENTILE TOOL ===")
+ep = _load("entry-percentile.py", "ep")
+check("a fill at the top of the window scores 100",
+      ep.percentile_of(110, [100, 102, 105, 108, 110]) == 100.0)
+check("a fill at the bottom scores low",
+      ep.percentile_of(100, [100, 102, 105, 108, 110]) == 20.0)
+check("a mid fill scores mid", ep.percentile_of(105, [100, 102, 105, 108, 110]) == 60.0)
+check("no bars -> None, not a guess", ep.percentile_of(105, []) is None)
+
+# A tiered winner emits three exit rows for ONE fill. Counting rows would weight
+# that entry price three times and bias the whole measurement toward winners.
+_rows = [
+    {"symbol": "AAA", "entry_time": "T1", "entry_price": "100", "pl": "10",
+     "date": "D", "price_source": "tick", "entry_method": "X"},
+    {"symbol": "AAA", "entry_time": "T1", "entry_price": "100", "pl": "20",
+     "date": "D", "price_source": "tick", "entry_method": "X"},
+    {"symbol": "BBB", "entry_time": "T2", "entry_price": "50", "pl": "-5",
+     "date": "D", "price_source": "REST", "entry_method": "X"},
+]
+_p = ep.positions(_rows)
+check("three exit rows collapse to two positions", len(_p) == 2, len(_p))
+check("a tiered position sums its tranches",
+      [x["pl"] for x in _p if x["symbol"] == "AAA"] == [30.0])
+check("a row with no entry price is dropped, not scored as 0",
+      ep.positions([{"symbol": "C", "entry_time": "T", "entry_price": "", "pl": "1"}]) == [])
+check("it declares the trade-schema history",
+      len(ep.TRADE_FIELDS_HISTORY) >= 2)
+check("...covering the pre-list_source width",
+      any(len(h) == len(ep.TRADE_FIELDS) - 1 for h in ep.TRADE_FIELDS_HISTORY))
+
+import pandas as _pd
+class _B:
+    def get_historical_bars(self, s, a, b, tf):
+        return {s: _pd.DataFrame({"close": [1.0, 2.0, 3.0]})}
+class _BFail:
+    def get_historical_bars(self, s, a, b, tf):
+        raise RuntimeError("network down")
+from datetime import datetime as _dt
+check("DataFrame bars are read (what the broker returns)",
+      ep.window_prices(_B(), "AAA", _dt(2026, 8, 27, 13, 33), 15) == [1.0, 2.0, 3.0])
+check("a broker failure returns [] rather than raising",
+      ep.window_prices(_BFail(), "AAA", _dt(2026, 8, 27, 13, 33), 15) == [])
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)
