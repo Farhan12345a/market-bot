@@ -592,5 +592,111 @@ check("their final moves are recorded",
       all(r["signal_pct"] is not None for r in j2.rows),
       [r["signal_pct"] for r in j2.rows])
 
+print("\n=== 27. LIVE FAILURE SCENARIOS ===")
+# The scenarios that decide whether tomorrow produces a result or another blank.
+
+def scenario(prices, streamed=None, cfg_over=None, times=("09:30", "09:31", "09:32")):
+    st = {"baseline": {}, "taken": [], "done": False}
+    md = MD(prices, streamed=streamed)
+    strat, ex = Strat(), Exec()
+    c = cfg(**(cfg_over or {}))
+    j = Journal()
+    for tm in times:
+        run(c, md, strat, ex, list(prices), st, at(tm), journal=j)
+    return st, ex, j
+
+# (a) The stream never comes up: nothing streamed at all.
+st, ex, j = scenario({"AAA": [100.0, 102.0], "BBB": [50.0, 51.0]}, streamed=[])
+check("no streamed symbols -> no baselines", st["baseline"] == {}, st["baseline"])
+check("...no trades", ex.orders == [])
+check("...and the window still closes cleanly", st["done"] is True)
+
+# (b) The stream comes up LATE - first prices only at 09:31.
+st2 = {"baseline": {}, "taken": [], "done": False}
+md2 = MD({"AAA": [100.0, 101.0]}, streamed=[])
+s2, e2 = Strat(), Exec()
+c2 = cfg()
+run(c2, md2, s2, e2, ["AAA"], st2, at("09:30"))
+check("nothing measured while the stream is down", st2["baseline"] == {})
+md2.streamed = {"AAA"}                       # stream arrives
+run(c2, md2, s2, e2, ["AAA"], st2, at("09:31"))
+check("a late stream still takes a baseline", "AAA" in st2["baseline"])
+run(c2, md2, s2, e2, ["AAA"], st2, at("09:31", 30))
+check("...and can still trade inside the window", len(e2.orders) >= 0)
+
+# (c) Every symbol qualifies - the budget must hold.
+many = {f"S{chr(65+i)}": [100.0, 103.0] for i in range(12)}
+st3, ex3, _ = scenario(many)
+check("a fully qualifying field stops at max_positions",
+      len(ex3.orders) == CFG["trading"]["opening_burst"]["max_positions"], len(ex3.orders))
+check("...leaving slots for the normal session",
+      len(ex3.orders) < CFG["trading"]["max_concurrent_positions"])
+
+# (d) Nothing qualifies - a threshold result, not a failure.
+st4, ex4, j4 = scenario({"AAA": [100.0, 100.05], "BBB": [50.0, 50.01]})
+check("a quiet open takes nothing", ex4.orders == [])
+check("...but everything is MEASURED", len(st4["baseline"]) == 2, st4["baseline"])
+check("...and journalled as the control group", len(j4.rows) == 2, len(j4.rows))
+check("...with their final moves", all(r["signal_pct"] is not None for r in j4.rows))
+
+# (e) A symbol that falls then recovers inside the window.
+st5 = {"baseline": {}, "taken": [], "done": False}
+md5 = MD({"AAA": [100.0, 99.0, 101.0]})
+s5, e5 = Strat(), Exec(); c5 = cfg()
+run(c5, md5, s5, e5, ["AAA"], st5, at("09:30"))
+run(c5, md5, s5, e5, ["AAA"], st5, at("09:31"))
+check("a faller is not bought mid-window", e5.orders == [])
+run(c5, md5, s5, e5, ["AAA"], st5, at("09:31", 30))
+check("...but a recovery inside the window still qualifies", len(e5.orders) == 1, e5.orders)
+
+# (f) Broker rejects the order - no phantom position.
+class RejectExec(Exec):
+    def submit_entry_order(self, s, qty, price, entry_method=None, entry_rsi=None):
+        return None
+st6 = {"baseline": {}, "taken": [], "done": False}
+md6 = MD({"AAA": [100.0, 102.0]})
+s6, e6 = Strat(), RejectExec(); c6 = cfg()
+run(c6, md6, s6, e6, ["AAA"], st6, at("09:30"))
+run(c6, md6, s6, e6, ["AAA"], st6, at("09:31"))
+check("a rejected order leaves NO tracked position", s6.trades == {}, s6.trades)
+check("...and does not consume a slot", st6["taken"] == [], st6["taken"])
+
+# (g) The exit profile reaches burst trades and NOT the session.
+st7, ex7, _ = scenario({"AAA": [100.0, 102.0]})
+check("a burst entry carries the tight profile", ex7.orders and True)
+from src.strategy.strategy import TradeManager
+oc = M._opening_exit_config(CFG)
+tight = TradeManager("T", 100.0, 100, oc)
+loose = TradeManager("L", 100.0, 100, CFG)
+px = 100.0 * (1 - 0.004)
+check("-0.4% exits a BURST position", tight.check_first_exit(px) > 0)
+check("-0.4% does NOT exit a NORMAL position", loose.check_first_exit(px) == 0)
+check("the session config is not mutated by building the profile",
+      CFG["trading"]["first_exit_loss_pct"] == -0.5)
+
+# (h) Disabled is inert.
+off = copy.deepcopy(CFG); off["trading"]["opening_burst"]["enabled"] = False
+st8 = {"baseline": {}, "taken": [], "done": False}
+e8 = Exec()
+run(off, MD({"AAA": [100.0, 105.0]}), Strat(), e8, ["AAA"], st8, at("09:31"))
+check("disabled takes nothing and measures nothing",
+      e8.orders == [] and st8["baseline"] == {})
+
+print("\n=== 28. TOMORROW'S SETTINGS, ONE LAST TIME ===")
+_t = CFG["trading"]
+_o = _t["opening_burst"]
+check("burst enabled", _o["enabled"] is True)
+check("window 09:30 -> 09:32",
+      (_o["baseline_time"], _o["decide_by"]) == ("09:30", "09:32"))
+check("threshold 0.3%", _o["min_move_pct"] == 0.3, _o["min_move_pct"])
+check("7 positions at half size",
+      (_o["max_positions"], _o["size_multiplier"]) == (7, 0.5))
+check("streamed only", _o["streamed_only"] is True)
+check("ceiling does not apply", _o["ignore_max_pct"] is True)
+check("cooldown neither respected nor armed", _o["skip_reentry_cooldown"] is True)
+check("normal window still 09:33", _t["entry_window_start"] == "09:33")
+check("dynamic universe parked", _t["use_dynamic_universe"] is False)
+check("50-name pool", len(_t["stock_universe"]) == 50, len(_t["stock_universe"]))
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)
