@@ -2094,9 +2094,41 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         # ---- day-completion checks ----
         open_trades = strategy.get_open_trades()
         if not open_trades and now >= entry_end and had_any_trades:
-            logger.info("All trades closed. Sending daily summary...")
-            finish_day("all_closed")
-            return entries_triggered
+            # The BROKER is the authority on what is held, not strategy.trades.
+            #
+            # Ending the day here returns from run_trading_day, and the 16:00
+            # time stop lives INSIDE this function - so anything the broker
+            # still holds that tracking has lost sits untouched until the next
+            # startup adopts it. On 2026-08-28 six positions were adopted at
+            # 03:16, occupying six of ten concurrent slots before the bell.
+            #
+            # A position can fall out of tracking while the broker keeps shares:
+            # a sell that partially fills, a rejected exit, or a restart between
+            # the strategy popping the symbol and the order confirming. Trusting
+            # the local view here is what lets that become an overnight hold.
+            #
+            # This costs one API call per session - it only runs at the moment
+            # the day would otherwise end.
+            try:
+                still_held = executor.broker.get_positions() or {}
+            except Exception as e:
+                logger.warning(f"Could not verify positions with the broker ({e}) - "
+                               f"not ending the day on an unverified view")
+                still_held = {}
+
+            if still_held:
+                logger.warning(
+                    f"NOT ending the day: tracking shows no open trades but the "
+                    f"broker still holds {len(still_held)} position(s) "
+                    f"({', '.join(sorted(still_held))}). Staying in the loop so "
+                    f"the {time_stop_hour}:00 time stop can flatten them - "
+                    f"otherwise they are held overnight and occupy concurrent "
+                    f"slots at tomorrow's open."
+                )
+            else:
+                logger.info("All trades closed. Sending daily summary...")
+                finish_day("all_closed")
+                return entries_triggered
 
         if now.hour >= time_stop_hour:
             logger.info("Market closing, flattening all positions...")

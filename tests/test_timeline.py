@@ -15,7 +15,7 @@ None of that is visible from a unit test of any single function. What follows
 walks a simulated clock from 09:00 to 09:35 and asserts the ORDER things happen
 in, and that each stage's slowness cannot starve the next.
 """
-import copy, sys, yaml
+import copy, os, sys, yaml
 from datetime import datetime, timedelta
 import pytz
 from _repo import REPO, CONFIG, repo_file, sandbox_cwd
@@ -235,6 +235,39 @@ if prev.returncode == 0:
           (len(old.get("stock_universe", [])), len(t.get("stock_universe", []))))
 else:
     check("previous config available for comparison", False, prev.stderr[:80])
+
+print("\n=== 7. THE DAY CANNOT END WHILE THE BROKER HOLDS SHARES ===")
+# The 16:00 time stop lives INSIDE run_trading_day. Returning early on an
+# all_closed that only consulted strategy.trades means anything the broker still
+# holds is never flattened - on 2026-08-28 six positions were adopted at 03:16,
+# taking six of ten concurrent slots before the bell.
+msrc = open(repo_file("src", "main.py")).read()
+check("the broker is consulted before the day ends",
+      "still_held = executor.broker.get_positions()" in msrc)
+check("a non-empty broker view blocks the early return",
+      "NOT ending the day" in msrc)
+check("...and says why it matters", "occupy concurrent" in msrc)
+check("a broker error does not end the day on an unverified view",
+      "not ending the day on an unverified view" in msrc)
+check("the time stop is still what flattens them",
+      "so the {time_stop_hour}:00 time stop can flatten them" in msrc
+      or "time stop can flatten them" in msrc)
+
+# The ordering that makes this work: the check sits BEFORE the return, and the
+# time stop is reachable on the next iteration.
+_idx_check = msrc.index("still_held = executor.broker.get_positions()")
+_idx_close = msrc.index('finish_day("all_closed")')
+_idx_stop = msrc.index("if now.hour >= time_stop_hour:")
+check("the broker check precedes the all_closed return", _idx_check < _idx_close)
+check("the time stop is still downstream and reachable", _idx_stop > _idx_close)
+
+print("\n=== 8. THE FLATTEN UTILITY ===")
+check("ops/flatten-now.py exists", os.path.exists(repo_file("ops", "flatten-now.py")))
+_f = open(repo_file("ops", "flatten-now.py")).read()
+check("it is a dry run unless --yes is passed", '"--yes"' in _f and "Dry run" in _f)
+check("it goes through the confirmed-order path, not raw sells",
+      "flatten_all_positions" in _f)
+check("it verifies afterwards and fails loudly", "STILL OPEN" in _f and "sys.exit(1)" in _f)
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)
