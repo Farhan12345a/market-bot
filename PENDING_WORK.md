@@ -761,3 +761,23 @@ moving. Volatility is therefore already selected for twice. On 2026-08-26, 12 of
 to move, they were stocks moving against a long-only book. **The gap is
 direction, and direction is the hard half.** More volatility modelling buys more
 of what the bot already has.
+
+## flatten_all_positions sells shorts deeper (found 2026-08-28, NOT fixed)
+
+`Executor.flatten_all_positions` calls `submit_exit_order`, which is hardcoded
+to `side="sell"`. On a long that closes the position; on a short it doubles it.
+The 16:00 time stop uses this path, so any short the bot is holding at 16:00
+gets bigger instead of closing.
+
+Not fixed on 2026-08-28 because the market was 60 minutes from opening and the
+fix touches the live exit path on the day after the first winning session.
+`ops/flatten-now.py` was moved to Alpaca's side-aware `close_all_positions`
+instead, which covers the manual case.
+
+The bot never intends to open a short, so this only bites on positions that got
+there via the phantom-position path. That makes it low-frequency and expensive
+when it hits - CRWD alone was -$605 unrealized.
+
+Fix: give `submit_exit_order` the position sign, or have `flatten_all_positions`
+call `broker.trading_client.close_position(symbol)` per symbol. Add a test with
+a negative-qty position asserting the order side is BUY.

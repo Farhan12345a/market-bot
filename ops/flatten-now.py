@@ -8,9 +8,19 @@ sit there occupying max_concurrent_positions slots at the next open. On
 the opening-move experiment four slots instead of seven and the normal session
 none.
 
-Goes through Executor.flatten_all_positions, the same confirmed-order path the
-16:00 stop uses, rather than issuing raw sells - so a partial failure is
-reported per symbol instead of assumed.
+Uses Alpaca's own close_all_positions, NOT Executor.flatten_all_positions.
+
+That matters, and it is not a stylistic preference. flatten_all_positions
+submits side="sell" for every position unconditionally. On a LONG position that
+closes it; on a SHORT position it doubles it. On 2026-08-28 three of the six
+leftovers were short (CRWD -39, OKTA -52, MTCH -4) - the residue of the phantom
+-position bug - and the sell orders this script queued premarket would have taken
+CRWD to -78 and OKTA to -104 at the bell. Alpaca's close_position picks the side
+from the position's own sign, so it covers a short by buying.
+
+cancel_orders=True clears any working order first, because an opposite-side
+order open on the same symbol makes Alpaca reject the close as a potential wash
+trade.
 
 SAFE TO RUN WHILE THE BOT IS RUNNING. It reconciles from the broker on every
 poll, so it notices the positions are gone. Still: prefer running it OUTSIDE
@@ -78,41 +88,58 @@ def main():
     if not load_credentials():
         sys.exit(1)
 
-    import yaml
     from src.broker.alpaca_broker import AlpacaBroker
-    from src.executor.executor import Executor
 
-    config = yaml.safe_load(open("config.yaml"))
     broker = AlpacaBroker(paper=True)
+    client = broker.trading_client
     positions = broker.get_positions()
 
     if not positions:
         print("No open positions. Nothing to do.")
         return
 
+    shorts = []
     print(f"{len(positions)} open position(s):\n")
     for sym, p in sorted(positions.items()):
-        qty = getattr(p, "qty", "?")
+        qty = float(getattr(p, "qty", 0) or 0)
         avg = getattr(p, "avg_entry_price", "?")
         pl = getattr(p, "unrealized_pl", None)
-        print(f"  {sym:<6} {qty:>8} shares @ {avg}"
-              + (f"   unrealized {float(pl):+.2f}" if pl is not None else ""))
+        if qty < 0:
+            shorts.append(sym)
+        print(f"  {sym:<6} {qty:>9.0f} shares @ {avg}"
+              + (f"   unrealized {float(pl):+.2f}" if pl is not None else "")
+              + ("   [SHORT - closing BUYS]" if qty < 0 else ""))
+
+    if shorts:
+        print(f"\n{len(shorts)} short position(s): {', '.join(shorts)}.")
+        print("Closing a short means BUYING to cover. This uses Alpaca's")
+        print("close_position, which takes the side from the position itself.")
 
     if not args.yes:
         print("\nDry run - nothing was closed. Re-run with --yes to close them.")
         return
 
-    print("\nClosing at market...")
-    executor = Executor(broker, config)
-    flattened = executor.flatten_all_positions()
-
-    print(f"\nConfirmed closed: {', '.join(flattened) if flattened else 'none'}")
-    remaining = broker.get_positions()
-    if remaining:
-        print(f"STILL OPEN: {', '.join(sorted(remaining))}")
-        print("Those orders did not confirm. Check the Alpaca dashboard.")
+    # Premarket, a market order is accepted and then queues until 09:30, so
+    # "did not confirm" here is the normal outcome rather than a failure. Say
+    # which one it is instead of leaving the reader to guess.
+    print("\nCancelling working orders and closing at market...")
+    try:
+        client.close_all_positions(cancel_orders=True)
+    except Exception as e:
+        print(f"close_all_positions failed: {e}")
+        print("Close them by hand: Alpaca paper dashboard -> Positions -> Close All.")
         sys.exit(1)
-    print("All positions closed.")
+
+    remaining = broker.get_positions()
+    if not remaining:
+        print("All positions closed.")
+        return
+
+    print(f"\nStill showing open: {', '.join(sorted(remaining))}")
+    print("If the market is closed, the closing orders are QUEUED and will fill")
+    print("at 09:30 - this is expected. Confirm under Orders in the dashboard:")
+    print("each one should be the OPPOSITE side of its position (buy to cover a")
+    print("short, sell to close a long). Re-run this after the open to verify.")
 
 
 if __name__ == "__main__":

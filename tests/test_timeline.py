@@ -265,9 +265,23 @@ print("\n=== 8. THE FLATTEN UTILITY ===")
 check("ops/flatten-now.py exists", os.path.exists(repo_file("ops", "flatten-now.py")))
 _f = open(repo_file("ops", "flatten-now.py")).read()
 check("it is a dry run unless --yes is passed", '"--yes"' in _f and "Dry run" in _f)
-check("it goes through the confirmed-order path, not raw sells",
-      "flatten_all_positions" in _f)
-check("it verifies afterwards and fails loudly", "STILL OPEN" in _f and "sys.exit(1)" in _f)
+# NOT Executor.flatten_all_positions. That path sells unconditionally, which
+# closes a long and DOUBLES a short - on 2026-08-28 it queued sells against
+# CRWD -39 and OKTA -52, which at the open would have made them -78 and -104.
+check("it does not route through the sell-only flatten path",
+      "executor.flatten_all_positions()" not in _f
+      and "Executor(broker" not in _f)
+check("it closes via Alpaca's side-aware close_all_positions",
+      "close_all_positions" in _f)
+check("it cancels working orders first (else Alpaca calls it a wash trade)",
+      "cancel_orders=True" in _f)
+check("it names short positions before acting on them", "SHORT" in _f)
+check("it re-reads the broker afterwards", "remaining = broker.get_positions()" in _f)
+check("a premarket queue is explained, not reported as failure",
+      "QUEUED" in _f and "09:30" in _f)
+check("a genuine API failure exits non-zero", "sys.exit(1)" in _f)
+check("it loads credentials the way systemd does",
+      "/etc/market-bot.env" in _f and "load_credentials" in _f)
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)
