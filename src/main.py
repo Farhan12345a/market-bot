@@ -123,9 +123,14 @@ def _refresh_candidate_pool(config, screener):
         )
         if candidates and info.get("source") == "dynamic":
             if cap and len(candidates) > cap:
+                # Safe to cut from the tail: select_candidates returns the merged
+                # pool sorted best-first by cheap score, so the names dropped are
+                # the ones least likely to move today - not whichever happened to
+                # sit late in a hand-written file.
                 logger.info(
                     f"Capping the candidate pool at {cap} of {len(candidates)} "
-                    f"(shortlist {info.get('shortlist')} + static pool)"
+                    f"(shortlist {info.get('shortlist')} + static pool, ranked "
+                    f"best-first - the cut takes the lowest-scoring names)"
                 )
                 candidates = candidates[:cap]
             screener.candidates = candidates

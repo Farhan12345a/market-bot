@@ -358,5 +358,54 @@ check("...and finishes before the QQQ slot needs the loop",
 check("the cap is applied whether the dynamic universe is on or off",
       "Capping the static candidate pool" in open(repo_file("src", "main.py")).read())
 
+print("\n=== 21. TRUNCATION KEEPS THE BEST, NOT THE FIRST ===")
+# The merged pool is capped every day once the static pool is ~300 names. A
+# positional cut would let alphabetical accident decide which names survive.
+_syms2 = [tick(i) for i in range(40)]
+_bars2 = {}
+for i in range(40):
+    _bars2[tick(i)] = bars(50.0, 500_000 + i * 200_000, drift=i * 0.004, rng=1 + i * 0.2)
+# Static names deliberately given the DULLEST tape, and listed first by name.
+_static = ["ZZA", "ZZB", "ZZC"]
+for s_ in _static:
+    _bars2[s_] = bars(50.0, 400_000, drift=0.0, rng=0.2)
+_cfg2 = copy.deepcopy(CFG)
+_cfg2["trading"].update({"use_dynamic_universe": True, "universe_shortlist_size": 10,
+                         "universe_min_dollar_volume": 1e6, "universe_size": 100,
+                         "universe_cache_file": "logs/u_rank.json"})
+_b2 = FakeBroker(assets=[asset(x) for x in _syms2], bars=_bars2)
+_cands, _info = U.select_candidates(_b2, _cfg2, static_pool=_static)
+check("static names are still included", all(x in _cands for x in _static), _cands[-5:])
+check("the merged pool is ranked best-first, not shortlist-then-static",
+      _cands[0] == tick(39), _cands[:3])
+_pos = {sym: i for i, sym in enumerate(_cands)}
+check("dull static names sort BELOW the movers",
+      all(_pos[s_] > _pos[tick(39)] for s_ in _static),
+      {s_: _pos[s_] for s_ in _static})
+check("a cap would therefore drop the dull ones first",
+      set(_cands[:5]).isdisjoint(_static), _cands[:5])
+
+# A static name with a GOOD tape must survive the cut even though it is static.
+_bars3 = dict(_bars2)
+# Genuinely the strongest tape in the pool: max volatility, max liquidity, and a
+# real volume SURGE (the last five bars far above the earlier ones), which is
+# the one cheap_score component the others do not max out.
+_hot = bars(50.0, 1_000_000, drift=0.09, rng=9.0)
+for _i in range(len(_hot) - 5, len(_hot)):
+    _hot[_i]["volume"] = 12_000_000
+_bars3["ZZH"] = _hot
+_cfg3 = copy.deepcopy(_cfg2); _cfg3["trading"]["universe_cache_file"] = "logs/u_rank2.json"
+_b3 = FakeBroker(assets=[asset(x) for x in _syms2], bars=_bars3)
+_c3, _ = U.select_candidates(_b3, _cfg3, static_pool=["ZZH"])
+check("a strong static name ranks near the top", _c3.index("ZZH") < 5, _c3[:6])
+check("...and is scored even though it was never in the liquid universe",
+      "ZZH" in _c3)
+
+check("an unscorable name is kept, not dropped",
+      "NOSUCHSYM" in U.select_candidates(
+          FakeBroker(assets=[asset(x) for x in _syms2], bars=_bars2),
+          {**_cfg2, "trading": {**_cfg2["trading"], "universe_cache_file": "logs/u_rank3.json"}},
+          static_pool=["NOSUCHSYM"])[0])
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

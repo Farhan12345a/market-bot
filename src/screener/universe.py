@@ -441,14 +441,44 @@ def select_candidates(broker, config, static_pool=(), force_rebuild=False):
     ranked = rank_candidates(stats, universe, config)
     shortlist = [s for s, _ in ranked[:shortlist_n]]
 
-    merged = list(dict.fromkeys(shortlist + [s.upper() for s in static_pool]))
+    # Fold in the static pool and re-rank the WHOLE thing on merit.
+    #
+    # This used to be `shortlist + static_pool` in that order, which is fine
+    # until the list is capped - and with a 311-name static pool it always is.
+    # A positional cut would then keep whichever static names happened to sit
+    # early in a hand-written file and drop the rest, so the truncation would be
+    # decided by alphabetical accident rather than by which symbols are moving.
+    #
+    # Static names that were not in the liquid universe (too thin to clear the
+    # dollar-volume floor, or simply absent) are fetched here so they can be
+    # scored on the same axis. Anything still unscorable sorts last but is kept:
+    # "not measurable" is not "measurably bad", the same rule continuation_score
+    # uses for missing factors.
+    static = [s.upper() for s in static_pool]
+    missing = [s for s in static if s not in stats]
+    if missing:
+        extra = daily_snapshot(broker, missing, config)
+        if extra:
+            stats = {**stats, **extra}
+            logger.info(f"universe: scored {len(extra)} static-pool names for ranking")
+
+    merged_syms = list(dict.fromkeys(shortlist + static))
+    scored = [(sym, cheap_score(stats.get(sym))) for sym in merged_syms]
+    # Stable sort: equal scores keep shortlist-before-static order, so a tie
+    # still favours a name the day's tape actually surfaced.
+    scored.sort(key=lambda kv: kv[1], reverse=True)
+    merged = [sym for sym, _ in scored]
+
     info.update({"source": "dynamic", "universe": len(universe),
                  "shortlist": len(shortlist), "candidates": len(merged),
                  "top": ranked[:10]})
     logger.info(
         f"universe: {len(universe)} liquid -> top {len(shortlist)} by cheap score "
-        f"-> {len(merged)} candidates with the static pool folded in"
+        f"-> {len(merged)} candidates with the static pool folded in and re-ranked"
     )
+    if scored[:5]:
+        logger.info("universe: best of the merged pool - " +
+                    ", ".join(f"{s}={v:.0f}" for s, v in scored[:5]))
     if ranked[:5]:
         logger.info("universe: best cheap scores - " +
                     ", ".join(f"{s}={v:.0f}" for s, v in ranked[:5]))
