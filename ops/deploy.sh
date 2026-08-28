@@ -84,8 +84,13 @@ echo "    reading the unit file..."
 # ModuleNotFoundError that says nothing about whether the deploy is safe.
 # Ask systemd what it runs, and only fall back to guessing if that fails.
 # Shared with ops/runall.sh - see ops/_python.sh for why this is not `python3`.
+#
+# $0 is the /tmp SNAPSHOT, not the repo copy - see the re-exec at the top. So
+# dirname "$0" is /tmp, and sourcing relative to it fails with
+# "/tmp/_python.sh: No such file or directory". Resolve against SELF_ORIGIN,
+# which is the real path in the repo.
 # shellcheck source=ops/_python.sh
-. "$(dirname "$0")/_python.sh"
+. "$(dirname "$SELF_ORIGIN")/_python.sh"
 if ! find_bot_python; then
   echo "  Nothing was restarted."
   exit 1
