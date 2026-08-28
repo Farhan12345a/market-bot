@@ -60,7 +60,16 @@ trading:
     # threshold, so for names like it a "+0.5% move" can still be one print
     # crossing the spread. If the opening trades cluster in wide-spread symbols,
     # raise this rather than blaming the strategy.
-    min_move_pct: 0.5
+    # 0.5 -> 0.3 for 2026-08-28. The point of the session is to see this mode
+    # actually TRADE - it has never taken a position - and 0.5% over two minutes
+    # is a demanding filter on a quiet open. 0.3% is still 2.4x the median
+    # bid-ask measured on 2026-08-26 (0.126%), so it cannot be produced by a
+    # single bid/ask bounce, but it will qualify materially more names.
+    #
+    # Watch the OPENING THRESHOLD REVIEW line at 09:32: it prints every measured
+    # symbol's move and says what threshold would have caught what. Set the next
+    # value from that rather than from guesswork.
+    min_move_pct: 0.3
 
     # Its OWN position budget, deliberately small. These do not get to consume
     # max_concurrent_positions and starve the normal session; they are an
@@ -802,7 +811,13 @@ trading:
   #
   # Falls back to the static pool on ANY failure. An unfiltered watchlist beats
   # an empty one.
-  use_dynamic_universe: true
+  # OFF for 2026-08-28. It is FIXED (the DataFrame parsing bug that made it
+  # silently produce nothing is repaired and tested) but it is not the thing
+  # being tested tomorrow. 2026-08-27 was the first winning session and it ran
+  # on the static pool; the opening-move experiment has never executed at all.
+  # One new variable, not two. Turn this back on once the burst has a session
+  # of evidence behind it.
+  use_dynamic_universe: false
 
   # How many symbols survive the liquidity cut and get cheap-scored.
   universe_size: 1000
@@ -1005,125 +1020,36 @@ trading:
   # used directly when use_daily_screener is false, and as the fallback if
   # the screener errors, times out, or returns zero candidates.
   stock_universe:
-    # ~300 high-turnover US equities that actually move in the first minutes.
+    # Back to the ORIGINAL 50 for 2026-08-28, deliberately.
     #
-    # Widened from 50 on 2026-08-28. This is a CANDIDATE POOL, not an
-    # auto-include: merge_default_universe is false, so every name here is
-    # scored by the screener and only the top num_stocks_to_trade are watched.
-    # A wider pool changes WHICH symbols are picked, never how many.
+    # 2026-08-27 was the first profitable session (+$534.60) and it ran on a
+    # 92-symbol pool: these 50 plus candidates.txt plus the earnings/QQQ adds.
+    # The next session is testing the OPENING-MOVE experiment, which has never
+    # once executed - so the symbol pool is held constant to keep that the only
+    # new variable. Changing the pool and the entry mode together would make a
+    # bad day unattributable to either.
     #
-    # Selection bias is deliberate and worth stating: these are chosen for
-    # TURNOVER and for a history of moving at the open, drawn from the S&P 500
-    # and Nasdaq-100 plus the high-beta complexes that dominate opening
-    # volatility. Names that gap on news but trade thinly are excluded - on the
-    # IEX feed a symbol that does not print reads as flat, which reads as
-    # 'do not buy'.
+    # The 311-name pool and use_dynamic_universe are not abandoned - they are
+    # parked. Turn both back on once the opening burst has produced a session
+    # of evidence. The 311 list is in git at 8a43124 if it is wanted back.
     #
-    # Every symbol is QUOTED: YAML 1.1 reads bare ON, OFF, YES, NO, Y, N as
-    # booleans, so `- ON` (onsemi) parsed as True and silently corrupted the
-    # list. Quoting is the fix and it must stay.
-    #
-    # This list is the FALLBACK. use_dynamic_universe builds a far larger pool
-    # from the whole market each morning; this is what gets used when that
-    # fails, as it did on 2026-08-27.
-    # --- Mega-cap tech / Nasdaq-100 core
-    - "AAPL"
-    - "MSFT"
-    - "NVDA"
-    - "AMZN"
-    - "GOOGL"
-    - "GOOG"
-    - "META"
-    - "TSLA"
-    - "AVGO"
-    - "NFLX"
-    - "AMD"
-    - "ADBE"
-    - "CRM"
-    - "ORCL"
-    - "CSCO"
-    - "INTC"
-    - "QCOM"
-    - "TXN"
-    - "AMAT"
-    - "MU"
-    - "LRCX"
-    - "KLAC"
-    - "ADI"
-    - "MRVL"
-    - "NXPI"
-    - "ON"
-    - "SWKS"
-    - "MCHP"
-    - "ASML"
-    - "ARM"
-    - "SMCI"
-    - "DELL"
-    - "HPQ"
-    - "WDC"
-    - "STX"
-    # --- Software / cloud - high beta, gap often
-    - "NOW"
-    - "SNOW"
-    - "PLTR"
-    - "CRWD"
-    - "PANW"
-    - "ZS"
-    - "OKTA"
-    - "DDOG"
-    - "NET"
-    - "MDB"
-    - "TEAM"
-    - "WDAY"
-    - "INTU"
-    - "ADSK"
-    - "SNPS"
-    - "CDNS"
-    - "FTNT"
-    - "VEEV"
-    - "HUBS"
-    - "ZM"
-    - "DOCU"
-    - "TWLO"
-    - "SHOP"
-    - "SQ"
-    - "U"
-    - "RBLX"
-    - "PATH"
-    - "AI"
-    - "BILL"
-    - "GTLB"
-    - "ESTC"
-    - "CFLT"
-    - "S"
-    - "APP"
-    - "DASH"
-    - "ABNB"
+    # Quoted because YAML 1.1 reads bare ON, OFF, YES and NO as booleans.
     - "UBER"
     - "LYFT"
-    # --- Semis + AI adjacent
-    - "TSM"
-    - "UMC"
-    - "ASX"
-    - "ACLS"
-    - "AEIS"
-    - "AMKR"
-    - "ALGM"
-    - "COHR"
-    - "CRDO"
-    - "LSCC"
-    - "MPWR"
-    - "POWI"
-    - "QRVO"
-    - "RMBS"
-    - "SITM"
-    - "SLAB"
-    - "SYNA"
-    - "TER"
-    - "WOLF"
-    # --- Crypto complex - among the most volatile at the open
+    - "ABNB"
+    - "DASH"
+    - "RBLX"
+    - "PLTR"
+    - "HOOD"
     - "COIN"
-    - "MSTR"
+    - "SOFI"
+    - "SNAP"
+    - "ROKU"
+    - "CVNA"
+    - "RIVN"
+    - "U"
+    - "AFRM"
+    - "UPST"
     - "MARA"
     - "RIOT"
     - "CLSK"
@@ -1131,225 +1057,33 @@ trading:
     - "CIFR"
     - "WULF"
     - "BITF"
-    - "BTBT"
-    - "IREN"
-    - "CORZ"
-    - "HIVE"
-    - "GREE"
-    - "CAN"
-    - "BTDR"
-    - "SDIG"
-    - "APLD"
-    # --- Fintech / brokers
-    - "HOOD"
-    - "SOFI"
-    - "UPST"
-    - "AFRM"
-    - "LC"
-    - "NU"
-    - "PYPL"
-    - "V"
-    - "MA"
-    - "AXP"
-    - "SCHW"
-    - "GS"
-    - "MS"
-    - "JPM"
-    - "BAC"
-    - "WFC"
-    - "C"
-    - "BLK"
-    - "SPGI"
-    # --- Consumer / travel / retail - reactive to the open
-    - "CVNA"
-    - "CHWY"
-    - "W"
-    - "ETSY"
-    - "GME"
-    - "AMC"
-    - "LULU"
-    - "RCL"
-    - "CCL"
-    - "NCLH"
-    - "MAR"
-    - "HLT"
-    - "BKNG"
-    - "EXPE"
-    - "DKNG"
-    - "PENN"
-    - "CZR"
-    - "MGM"
-    - "WYNN"
-    - "LVS"
-    - "CMG"
-    - "SBUX"
-    - "MCD"
-    - "NKE"
-    - "TGT"
-    - "WMT"
-    - "COST"
-    - "HD"
-    - "LOW"
-    - "TJX"
-    - "ROST"
-    - "DG"
-    - "DLTR"
-    - "BBY"
-    - "M"
-    - "JWN"
-    - "GPS"
-    - "ANF"
-    - "AEO"
-    # --- EV / clean energy
-    - "RIVN"
     - "LCID"
     - "NIO"
     - "XPEV"
     - "LI"
-    - "FSR"
+    - "PINS"
+    - "DKNG"
+    - "BMBL"
+    - "CHWY"
+    - "MTCH"
+    - "GME"
+    - "AMC"
+    - "TLRY"
+    - "CGC"
     - "PLUG"
     - "FCEL"
     - "RUN"
-    - "ENPH"
-    - "SEDG"
-    - "FSLR"
-    - "NOVA"
-    - "BE"
-    - "QS"
-    - "CHPT"
-    - "BLNK"
-    # --- Biotech / pharma - binary movers
-    - "MRNA"
-    - "BNTX"
-    - "NVAX"
-    - "VRTX"
-    - "REGN"
-    - "BIIB"
-    - "GILD"
-    - "AMGN"
-    - "LLY"
-    - "PFE"
-    - "MRK"
-    - "ABBV"
-    - "BMY"
-    - "JNJ"
-    - "UNH"
-    - "CVS"
-    - "CI"
-    - "HUM"
-    - "ELV"
-    - "ISRG"
-    - "DXCM"
-    - "ALNY"
-    - "SRPT"
     - "IONQ"
-    - "EXAS"
-    - "NBIX"
-    # --- Communication / media / internet
-    - "DIS"
-    - "CMCSA"
-    - "T"
-    - "VZ"
-    - "TMUS"
-    - "WBD"
-    - "PARA"
-    - "SPOT"
-    - "ROKU"
-    - "FUBO"
-    - "PINS"
-    - "SNAP"
-    - "MTCH"
-    - "BMBL"
-    - "TTD"
-    - "ZG"
-    - "RDDT"
-    # --- Industrials / transport / defense
-    - "BA"
-    - "CAT"
-    - "DE"
-    - "UPS"
-    - "FDX"
-    - "LMT"
-    - "RTX"
-    - "NOC"
-    - "GD"
-    - "HON"
-    - "GE"
-    - "MMM"
-    - "EMR"
-    - "ETN"
-    - "PH"
-    - "ROK"
-    - "CSX"
-    - "UNP"
-    - "NSC"
-    - "DAL"
-    - "UAL"
-    - "AAL"
-    - "LUV"
-    # --- Energy / commodities
-    - "XOM"
-    - "CVX"
-    - "COP"
-    - "SLB"
-    - "EOG"
-    - "PSX"
-    - "VLO"
-    - "MPC"
-    - "OXY"
-    - "HAL"
-    - "DVN"
-    - "FANG"
-    - "APA"
-    - "MRO"
-    - "CTRA"
-    - "AR"
-    - "RRC"
-    - "SM"
-    - "PR"
-    - "NEM"
-    - "GOLD"
-    - "AEM"
-    - "HMY"
-    - "KGC"
-    - "AU"
-    # --- Meme / high-short-interest - big opening moves
-    - "BBBY"
-    - "KOSS"
-    - "EXPR"
-    - "CLOV"
-    - "WISH"
-    - "SPCE"
+    - "SOUN"
+    - "RGTI"
+    - "AI"
     - "RKLB"
     - "ASTS"
     - "OPEN"
     - "CART"
     - "GRAB"
-    - "SOUN"
-    - "RGTI"
-    - "QBTS"
-    - "TLRY"
-    - "CGC"
-    - "ACB"
-    - "CRON"
-    - "SNDL"
-    - "BYND"
-    - "PTON"
-    # --- Financial / insurance / REIT movers
-    - "PLD"
-    - "AMT"
-    - "CCI"
-    - "EQIX"
-    - "SPG"
-    - "O"
-    - "VICI"
-    - "IRM"
-    - "DLR"
-    - "WELL"
-    - "ARE"
-    - "BXP"
-    - "KIM"
-    - "REG"  # Raised 5 -> 10. A one-cent spread is a fixed dollar cost, so as a PERCENT
+    - "NU"
+    - "FUBO"
   # it explodes at low prices - and every stop here is a percent. At PLUG's
   # $2.19 a penny is 0.46%, which eats 92% of the distance to the -0.5% first
   # exit, so the position sits at its stop the moment it fills. Sub-$10 names

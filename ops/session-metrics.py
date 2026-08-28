@@ -42,6 +42,7 @@ JOURNAL_FIELDS = [
     "signal_pct", "excess_vs_spy_pct", "spy_pct", "rvol", "spread_pct",
     "burst_width",
     "opening_hit_rate", "opening_avg_gain", "opening_sessions",
+    "opening_efficiency", "opening_directional",
     "cf_efficiency", "cf_rel_strength", "cf_vol_accel", "cf_vwap_pos",
     "cf_exhaustion", "cf_breakout", "cf_rvol", "cf_spread", "cf_vwap",
     "cf_sector_strength", "cf_sector_etf",
@@ -254,6 +255,47 @@ def market_table(journal, pos_by_date):
     return lines
 
 
+def window_table(pos_by_date, cutoff="09:33"):
+    """
+    P&L for positions entered in the opening window versus the rest of the day.
+
+    The opening-move experiment runs 09:30-09:32 under its own entry rule, its
+    own exit profile and half size. Folding it into the session total hides both:
+    the experiment gets diluted and the normal session's numbers move for reasons
+    that have nothing to do with its own settings.
+
+    Split on ENTRY time, not on entry_method, so it still separates correctly for
+    sessions before the experiment existed - on 2026-08-27 the first two entries
+    landed at 09:32:13 through the normal rule and lost $195.52 in 25 seconds.
+    """
+    cut_m = int(cutoff[:2]) * 60 + int(cutoff[3:])
+    lines = ["| date | opening (before " + cutoff + ") | rest of session |",
+             "|---|---|---|"]
+    for date in sorted(pos_by_date):
+        early, late = [], []
+        for p in pos_by_date[date]:
+            t = (p.get("entry_time") or "")[11:16]
+            if not t or ":" not in t:
+                late.append(p)
+                continue
+            mins = int(t[:2]) * 60 + int(t[3:])
+            (early if mins < cut_m else late).append(p)
+
+        def cell(group):
+            if not group:
+                return "-"
+            wins = sum(1 for x in group if x["pl"] > 0)
+            return f"{sum(x['pl'] for x in group):+.0f} ({wins}/{len(group)})"
+
+        lines.append(f"| {date} | {cell(early)} | {cell(late)} |")
+    lines.append("")
+    lines.append("P&L (winners/positions). Times are the VPS clock; entries are "
+                 "split on when they were opened, not on which rule opened them, "
+                 "so this reads correctly for sessions before the opening-move "
+                 "experiment existed.")
+    return lines
+
+
 def source_table(pos_by_date):
     """
     P&L by the list that FOUND each symbol.
@@ -402,6 +444,8 @@ def reason_table(pos_by_date):
 FACTORS = [
     ("cf_score", "cf_score (composite)"),
     ("opening_hit_rate", "opening_hit_rate"),
+    ("opening_efficiency", "opening_efficiency"),
+    ("opening_directional", "opening_directional"),
     ("cf_exhaustion", "cf_exhaustion (neg=good)"),
     ("cf_rel_strength", "cf_rel_strength"),
     ("cf_vwap_pos", "cf_vwap_pos"),
@@ -512,6 +556,10 @@ def build(trades, journal, tw, jw, ceiling=1.25):
     out.append("## Market context, and the do-nothing benchmark")
     out.append("")
     out += market_table(journal, by_date)
+    out.append("")
+    out.append("## Opening window vs the rest of the session")
+    out.append("")
+    out += window_table(by_date)
     out.append("")
     out.append("## P&L by list source")
     out.append("")

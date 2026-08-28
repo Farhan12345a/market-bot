@@ -45,6 +45,11 @@ JOURNAL_FIELDS = [
     # returns rather than assume it: with these columns, two weeks of journal
     # answers whether a high past hit-rate actually predicts anything.
     "opening_hit_rate", "opening_avg_gain", "opening_sessions",
+    # Opening EFFICIENCY and DIRECTIONAL CONSISTENCY over the first few minutes,
+    # averaged across recent sessions. hit_rate only asks whether the symbol
+    # reached a target; a name that zig-zags to +1% counts as a hit while being
+    # exactly the shape this strategy loses on. These separate the two.
+    "opening_efficiency", "opening_directional",
     # Continuation factors, recorded whether or not they are SCORED. The
     # weights are the part nobody can know from five sessions - logging the
     # factors against forward returns for a couple of weeks is what turns them
@@ -85,7 +90,12 @@ JOURNAL_FIELDS_HISTORY = [
         "price_15min", "pct_15min", "price_30min", "pct_30min",
     ],
     # v2: opening-move + continuation factors, before sector strength (32)
-    [c for c in JOURNAL_FIELDS if c not in ("cf_sector_strength", "cf_sector_etf")],
+    [c for c in JOURNAL_FIELDS
+     if c not in ("cf_sector_strength", "cf_sector_etf",
+                  "opening_efficiency", "opening_directional")],
+    # v3: before opening efficiency (34)
+    [c for c in JOURNAL_FIELDS
+     if c not in ("opening_efficiency", "opening_directional")],
 ]
 
 

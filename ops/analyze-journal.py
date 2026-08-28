@@ -28,6 +28,7 @@ JOURNAL_FIELDS = [
     "signal_pct", "excess_vs_spy_pct", "spy_pct", "rvol", "spread_pct",
     "burst_width",
     "opening_hit_rate", "opening_avg_gain", "opening_sessions",
+    "opening_efficiency", "opening_directional",
     "cf_efficiency", "cf_rel_strength", "cf_vol_accel", "cf_vwap_pos",
     "cf_exhaustion", "cf_breakout", "cf_rvol", "cf_spread", "cf_vwap",
     "cf_sector_strength", "cf_sector_etf",
@@ -55,6 +56,8 @@ FACTORS = [
 # Raw features already logged before the continuation work, kept in the report
 # as a baseline: any new factor has to beat what was already free.
 BASELINE = [
+    ("opening_efficiency", "opening efficiency (5-min)"),
+    ("opening_directional", "opening directional consistency"),
     ("signal_pct", "signal size at fire"),
     ("excess_vs_spy_pct", "excess vs SPY"),
     ("rvol", "RVOL (raw)"),

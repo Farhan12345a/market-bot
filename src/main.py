@@ -499,6 +499,8 @@ def _opening_move_fields(details_by_symbol, symbol):
         "opening_hit_rate": d.get("opening_hit_rate"),
         "opening_avg_gain": d.get("opening_avg_gain"),
         "opening_sessions": d.get("opening_sessions"),
+        "opening_efficiency": d.get("opening_efficiency"),
+        "opening_directional": d.get("opening_directional"),
     }
 
 

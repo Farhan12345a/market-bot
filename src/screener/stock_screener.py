@@ -299,7 +299,9 @@ class StockScreener:
         are scored, so the claim can be tested against forward returns rather
         than assumed.
         """
-        empty = {"sessions": 0, "hit_rate": 0.0, "avg_max_gain": 0.0, "best": 0.0}
+        empty = {"sessions": 0, "hit_rate": 0.0, "avg_max_gain": 0.0, "best": 0.0,
+                 "opening_efficiency": None, "opening_directional": None,
+                 "opening_eff_sessions": 0}
         try:
             lookback = self.config.get("opening_move_lookback_days", 5)
             window = self.config.get("opening_move_window_minutes", 30)
@@ -324,7 +326,8 @@ class StockScreener:
             df["_mins"] = df["_et"].dt.hour * 60 + df["_et"].dt.minute
 
             open_min = 9 * 60 + 30
-            gains = []
+            eff_window = self.config.get("opening_efficiency_minutes", 5)
+            gains, effs, dcs = [], [], []
             for day, chunk in df.groupby("_date"):
                 # Regular session only: pre- and post-market prints would
                 # otherwise supply the "opening" price.
@@ -338,16 +341,50 @@ class StockScreener:
                 peak = float(sess["high"].max())
                 gains.append((peak - first) / first * 100)
 
+                # Opening EFFICIENCY: how much of the first few minutes' total
+                # travel went toward the net move, rather than being retraced.
+                #
+                #     efficiency = |P_end - P_start| / sum(|each 1-min step|)
+                #
+                # 100 -> 101 -> 102 -> 103 -> 104 scores 1.0. The same net move
+                # via 100 -> 105 -> 101 -> 104 -> 99 -> 105 scores 0.22. Both
+                # end +5%; only one is tradeable by a strategy that buys a
+                # direction and holds it.
+                #
+                # Distinct from hit_rate above, which asks only whether the
+                # symbol reached a target - a name that zig-zags to +1% counts
+                # as a hit while being exactly the shape this strategy loses on.
+                early = sess[sess["_mins"] < open_min + eff_window]
+                closes = [float(x) for x in early["close"].tolist()]
+                if len(closes) >= 3:
+                    steps = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+                    travel = sum(abs(x) for x in steps)
+                    if travel > 0:
+                        effs.append(abs(closes[-1] - closes[0]) / travel)
+                        # Directional consistency: share of 1-min steps that went
+                        # the same way as the net move.
+                        net = closes[-1] - closes[0]
+                        if net != 0:
+                            agree = sum(1 for x in steps if (x > 0) == (net > 0))
+                            dcs.append(agree / len(steps))
+
             gains = gains[-lookback:]          # most recent N sessions
             if not gains:
                 return empty
 
+            effs, dcs = effs[-lookback:], dcs[-lookback:]
             hits = sum(1 for g in gains if g >= target)
             return {
                 "sessions": len(gains),
                 "hit_rate": hits / len(gains),
                 "avg_max_gain": sum(gains) / len(gains),
                 "best": max(gains),
+                # Recorded, never scored. Same discipline every factor got: it
+                # goes to the journal first and only earns a weight once the
+                # forward returns say it predicts something.
+                "opening_efficiency": (sum(effs) / len(effs)) if effs else None,
+                "opening_directional": (sum(dcs) / len(dcs)) if dcs else None,
+                "opening_eff_sessions": len(effs),
             }
         except Exception as e:
             logger.debug(f"Opening-move stats failed for {symbol}: {e}")
@@ -451,6 +488,8 @@ class StockScreener:
             details["opening_hit_rate"] = om["hit_rate"]
             details["opening_avg_gain"] = om["avg_max_gain"]
             details["opening_best"] = om["best"]
+            details["opening_efficiency"] = om.get("opening_efficiency")
+            details["opening_directional"] = om.get("opening_directional")
 
             opening_score = 0
             if self.config.get("use_opening_move_score", False) and om["sessions"]:
@@ -563,6 +602,8 @@ class StockScreener:
                 f"Open30: {details.get('opening_hit_rate', 0) * 100:3.0f}% hit / "
                 f"{details.get('opening_avg_gain', 0):+4.2f}% avg "
                 f"({details.get('opening_sessions', 0)}d) | "
+                f"Eff: {(details.get('opening_efficiency') or 0):.2f} / "
+                f"DC {(details.get('opening_directional') or 0) * 100:3.0f}% | "
                 f"Price: ${details['price']:7.2f}"
             )
 

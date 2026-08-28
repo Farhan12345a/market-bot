@@ -294,7 +294,12 @@ check("ceiling sits above the entry floor",
       t["rapid_increase_max_pct"] > t["rapid_increase_pct"])
 check("resistance is ON", t["use_resistance_exit"] is True)
 check("resistance still needs a real decline", t["resistance_min_decline_pct"] == 0.5)
-check("dynamic universe stays ON", t["use_dynamic_universe"] is True)
+# Parked for 2026-08-28: the opening-move experiment has never executed, and
+# changing the symbol pool at the same time would make a bad session
+# unattributable. The MACHINERY must still be correct either way, which is what
+# every other check in this suite covers.
+check("the dynamic-universe switch exists and is a bool",
+      isinstance(t["use_dynamic_universe"], bool), t["use_dynamic_universe"])
 # The dip guard the user asked to keep: a rising last tick must block the exit.
 from src.strategy.strategy import TradeManager
 _rl2 = 18
@@ -343,11 +348,15 @@ check("empty-but-no-failures is called out as PARSING",
 print("\n=== 20. THE WIDER STATIC POOL, AND ITS COST ===")
 t = CFG["trading"]
 pool = t["stock_universe"]
-check("the fallback pool is ~300 names", 280 <= len(pool) <= 340, len(pool))
+# Size is a per-session decision (50 on 2026-08-28 to hold the pool constant
+# while the opening burst is tested; 311 in git at 8a43124). What must hold is
+# that the list is well-formed and that the screener cap can cope with it.
+check("the fallback pool is non-empty", len(pool) >= 20, len(pool))
 check("no duplicates", len(pool) == len(set(pool)))
-check("all plain tickers", all(x.isalpha() and x.isupper() for x in pool),
-      [x for x in pool if not (x.isalpha() and x.isupper())][:5])
-for must in ("NVDA", "AAPL", "TSLA", "COIN", "MSTR", "HOOD", "SOFI", "UPST"):
+check("all plain string tickers - YAML reads bare ON/OFF/YES/NO as booleans",
+      all(isinstance(x, str) and x.isalpha() and x.isupper() for x in pool),
+      [x for x in pool if not (isinstance(x, str) and x.isalpha() and x.isupper())][:5])
+for must in ("COIN", "HOOD", "SOFI", "UPST", "MARA", "RIOT"):
     check(f"{must} is in the pool", must in pool)
 check("the screener has a hard candidate cap", t["max_screen_candidates"] > 0)
 # 92 candidates took 151.8s on 2026-08-27 => ~1.65s each.
