@@ -698,5 +698,58 @@ check("normal window still 09:33", _t["entry_window_start"] == "09:33")
 check("dynamic universe parked", _t["use_dynamic_universe"] is False)
 check("50-name pool", len(_t["stock_universe"]) == 50, len(_t["stock_universe"]))
 
+print("\n=== 29. BIGGEST MOVER FIRST ===")
+# The budget is 7 and more than 7 can qualify. Taking them in watchlist order
+# would fill the slots by an accident of sorting.
+_prices = {
+    "SMALL": [100.0, 100.4],    # +0.40%
+    "HUGE":  [100.0, 103.0],    # +3.00%
+    "MID":   [100.0, 101.2],    # +1.20%
+    "TINY":  [100.0, 100.1],    # +0.10%, under the threshold
+    "BIG":   [100.0, 102.0],    # +2.00%
+}
+_order = ["SMALL", "HUGE", "MID", "TINY", "BIG"]      # deliberately NOT by size
+st9 = {"baseline": {}, "taken": [], "done": False}
+md9 = MD(_prices)
+s9, e9 = Strat(), Exec()
+c9 = cfg(max_positions=3, min_move_pct=0.3)
+run(c9, md9, s9, e9, _order, st9, at("09:30"))
+run(c9, md9, s9, e9, _order, st9, at("09:31"))
+_bought = [o["symbol"] for o in e9.orders]
+check("the three BIGGEST movers are bought, in order",
+      _bought == ["HUGE", "BIG", "MID"], _bought)
+check("watchlist order is NOT what decided it", _bought[0] != "SMALL", _bought)
+check("a qualifying but smaller mover is passed over when the budget is spent",
+      "SMALL" not in _bought, _bought)
+check("a sub-threshold symbol is never bought", "TINY" not in _bought, _bought)
+
+# With room for everything, the sub-threshold one is still refused.
+st10 = {"baseline": {}, "taken": [], "done": False}
+md10 = MD(_prices); s10, e10 = Strat(), Exec()
+c10 = cfg(max_positions=7, min_move_pct=0.3)
+run(c10, md10, s10, e10, _order, st10, at("09:30"))
+run(c10, md10, s10, e10, _order, st10, at("09:31"))
+_b2 = [o["symbol"] for o in e10.orders]
+check("with room, all four qualifiers are taken", sorted(_b2) == ["BIG", "HUGE", "MID", "SMALL"], _b2)
+check("...still biggest-first", _b2 == ["HUGE", "BIG", "MID", "SMALL"], _b2)
+check("...and TINY is still refused on merit", "TINY" not in _b2)
+
+# Everything measured, whether or not it was bought.
+check("every streamed symbol still gets a baseline", len(st10["baseline"]) == 5, st10["baseline"])
+
+# A later, bigger mover cannot displace an already-open position - ranking is
+# within a poll, and that trade-off is deliberate.
+st11 = {"baseline": {}, "taken": [], "done": False}
+md11 = MD({"EARLY": [100.0, 101.0, 101.0], "LATER": [100.0, 100.0, 105.0]})
+s11, e11 = Strat(), Exec()
+c11 = cfg(max_positions=1, min_move_pct=0.3)
+run(c11, md11, s11, e11, ["EARLY", "LATER"], st11, at("09:30"))
+run(c11, md11, s11, e11, ["EARLY", "LATER"], st11, at("09:31"))
+check("the early qualifier takes the only slot", [o["symbol"] for o in e11.orders] == ["EARLY"],
+      [o["symbol"] for o in e11.orders])
+run(c11, md11, s11, e11, ["EARLY", "LATER"], st11, at("09:31", 30))
+check("a bigger later mover does NOT displace it (ranking is within a poll)",
+      [o["symbol"] for o in e11.orders] == ["EARLY"], [o["symbol"] for o in e11.orders])
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

@@ -1219,37 +1219,59 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
     max_positions = ob.get("max_positions", 4)
     entries = 0
 
+    # PASS 1 - measure everything, decide nothing.
+    #
+    # The move has to be known for every symbol before any of them is bought,
+    # because the budget is 7 and more than 7 can qualify. Taking them in
+    # watchlist order would fill those slots by an accident of sorting - the
+    # same flaw the burst throttle had before _rank_burst, arriving here through
+    # a different door.
+    measured = []
     for symbol in symbols:
         try:
-            # Streamed only. A REST price is ~15 minutes delayed, so its "move
-            # since the open" describes a window that has not happened yet.
             if streamed_only and not market_data.is_streamed(symbol):
                 continue
-
             bar = market_data.get_latest_bar(symbol, "1Min")
             if not bar:
                 continue
             price = market_data.get_entry_price(symbol, bar)
             if not price:
                 continue
-
-            # First price seen at or after the baseline instant IS the baseline.
             if symbol not in baseline:
                 baseline[symbol] = price
                 continue
-            # Latest price per symbol, so the window-close journal can record
-            # what each refused symbol actually finished at.
             state.setdefault("last_price", {})[symbol] = price
+            base = baseline[symbol]
+            measured.append((
+                ((price - base) / base * 100) if base else 0.0, symbol, price, base,
+            ))
+        except Exception as e:
+            logger.error(f"Opening burst measurement failed for {symbol}: {e}")
+            continue
 
+    # PASS 2 - act, biggest move first.
+    #
+    # Ranking is WITHIN a poll, not across the whole window. Waiting until 09:32
+    # to pick the best would select better and enter two minutes later, which on
+    # a momentum trade gives back most of what it was selecting for. So a strong
+    # early mover can still take a slot a stronger later one would have wanted -
+    # that is the deliberate trade: an early fill in a real move beats a perfect
+    # fill in a spent one.
+    measured.sort(reverse=True)
+    if measured:
+        logger.debug(
+            "OPENING BURST poll: "
+            + ", ".join(f"{sym} {mv:+.2f}%" for mv, sym, _, _ in measured[:8])
+        )
+
+    for move, symbol, price, base in measured:
+        try:
             if symbol in taken or symbol in strategy.get_open_trades():
                 continue
             if len(taken) >= max_positions:
-                continue
-
-            base = baseline[symbol]
-            move = (price - base) / base * 100 if base else 0.0
+                break          # budget spent; the rest are ranked below these
             if move < ob.get("min_move_pct", 0.0):
-                continue
+                break          # sorted, so nothing after this qualifies either
 
             # The signal ceiling, only if this mode is told to honour it.
             # rapid_increase_max_pct exists to refuse a move that has already
