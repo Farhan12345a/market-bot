@@ -803,3 +803,28 @@ log loudly and leave them for a human. Refusing is probably right, since the bot
 has no intent to be short and a position that got there is already evidence of a
 different bug. Test: adopt a negative-qty position, assert it is not treated as
 a long.
+
+
+## What the premarket flatten actually cost (2026-08-28, resolved)
+
+~$57 across all six positions, not the $1,800-2,000 feared at the time.
+
+Equity, not cash, is the measure. Cash fell 107,725.18 -> 93,883.54, which is
+short-covering (buying back CRWD/OKTA/MTCH spends ~$18,800; selling the three
+longs returns ~$4,200) and says nothing about P&L. With no positions open,
+equity is cash:
+
+    cash before                                        107,725.18
+    + longs   MSTR 135.03 + NVDA 1,818.80 + SOFI 2,267.78   +4,221.61
+    - shorts  CRWD 8,906.04 + MTCH 164.01 + OKTA 8,936.35  -18,006.40
+                                                      = 93,940.39
+    equity after                                        93,883.54
+                                                      = -56.85
+
+The scare came from reading the IEX ask (CRWD 237.26 against a 228.36 mark) as
+the price we would pay. Wrong twice. IEX is ~2% of consolidated volume, so its
+premarket book is thin and its quotes stale - fine for the sanity check the
+quote is used for, useless as a price prediction. And a marketable LIMIT fills
+at the best available offer, not at the limit: 242.01 was a ceiling, not a cost.
+
+Keep the 2% padding. It bought certainty of fill for roughly $57.
