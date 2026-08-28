@@ -80,9 +80,39 @@ def load_credentials():
     return False
 
 
+def show_orders(client):
+    """Every open order, with the field that actually matters: side.
+
+    A queued premarket order is invisible as a position and easy to mistake for
+    one in the dashboard, and its SIDE is what decides whether it closes a
+    short or deepens it.
+    """
+    from alpaca.trading.requests import GetOrdersRequest
+    from alpaca.trading.enums import QueryOrderStatus
+    try:
+        orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+    except Exception as e:
+        print(f"Could not read open orders: {e}")
+        return
+
+    if not orders:
+        print("Open orders: none.")
+        return
+
+    print(f"{len(orders)} open order(s):\n")
+    for o in orders:
+        side = str(getattr(o, "side", "?")).split(".")[-1].lower()
+        print(f"  {o.symbol:<6} {side:<5} {getattr(o, 'qty', '?'):>6}"
+              f"  status={str(getattr(o, 'status', '?')).split('.')[-1].lower()}"
+              f"  id={getattr(o, 'id', '?')}")
+    print()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--yes", action="store_true", help="actually place the orders")
+    ap.add_argument("--cancel-only", action="store_true",
+                    help="cancel working orders and stop; touch no positions")
     args = ap.parse_args()
 
     if not load_credentials():
@@ -92,6 +122,24 @@ def main():
 
     broker = AlpacaBroker(paper=True)
     client = broker.trading_client
+
+    # Orders FIRST, and always. "I cancel them and they come back" is ambiguous
+    # between three states that look identical in the dashboard: an order that
+    # will not cancel, an order something keeps resubmitting, and a POSITION
+    # being mistaken for an order. Print ids and statuses so it is none of them.
+    show_orders(client)
+
+    if args.cancel_only:
+        print("\nCancelling all working orders...")
+        try:
+            client.cancel_orders()
+        except Exception as e:
+            print(f"cancel_orders failed: {e}")
+            sys.exit(1)
+        show_orders(client)
+        print("\nPositions were NOT touched.")
+        return
+
     positions = broker.get_positions()
 
     if not positions:
