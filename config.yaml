@@ -811,12 +811,40 @@ trading:
   #
   # Falls back to the static pool on ANY failure. An unfiltered watchlist beats
   # an empty one.
-  # OFF for 2026-08-28. It is FIXED (the DataFrame parsing bug that made it
-  # silently produce nothing is repaired and tested) but it is not the thing
-  # being tested tomorrow. 2026-08-27 was the first winning session and it ran
-  # on the static pool; the opening-move experiment has never executed at all.
-  # One new variable, not two. Turn this back on once the burst has a session
-  # of evidence behind it.
+  # OFF for 2026-08-28. Kept off deliberately, not because it is broken.
+  #
+  # The reasoning below is why it is worth turning ON later; the reason it is
+  # off now is simply that 2026-08-27 was the first profitable session, it ran
+  # on the 92-name pool, and the opening-move burst has never once executed. One
+  # new variable per session. Turn this on once the burst has produced evidence.
+  #
+  # It was briefly parked to keep the symbol pool constant while the
+  # opening-move burst was tested. Two things make that caution unnecessary.
+  #
+  # First, the point of a screener is to search. A fixed 92-name pool
+  # (stock_universe + candidates.txt) caps what can ever be found no matter how
+  # good the scoring is - the top 15 change daily, but only ever from those 92.
+  # The dynamic build screens ~1,000 liquid names from the whole market instead.
+  # The evidence that this matters is already in hand: on 2026-08-27, 5 of the
+  # 14 symbols traded (MSTR, HMY, CMBT, NFLX, ABNB) came from the earnings and
+  # QQQ lists rather than the static pool, and those five produced +$337 of a
+  # $535 day. Names from outside the fixed pool were most of the profit.
+  #
+  # Second, attribution no longer requires holding it still. session-metrics now
+  # splits P&L by ENTRY TIME (opening window versus the rest of the session), so
+  # the burst's contribution is separable from the pool's even when both change.
+  #
+  # The failure mode is safe: a build that produces nothing falls back to the
+  # static pool, which is exactly what happened on 2026-08-27 - the session
+  # traded normally and profitably while this silently did nothing. So the
+  # downside of it failing again is a day identical to today's.
+  #
+  # WHAT IS NOT YET PROVEN: this has never once completed successfully against
+  # the live broker. The DataFrame parsing bug that made it return nothing is
+  # fixed and tested, but tested against synthetic frames matching the shape
+  # get_historical_bars documents - not against Alpaca. Tomorrow is its first
+  # real run either way. Watch for "DYNAMIC UNIVERSE: N liquid -> top 100" in
+  # the log; its absence means it fell back again.
   use_dynamic_universe: false
 
   # How many symbols survive the liquidity cut and get cheap-scored.

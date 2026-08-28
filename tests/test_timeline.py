@@ -180,6 +180,38 @@ check("the burst leaves slots for the normal session",
       t["opening_burst"]["max_positions"] < t["max_concurrent_positions"],
       (t["opening_burst"]["max_positions"], t["max_concurrent_positions"]))
 
+print("\n=== 5b. THE POOL WITH THE DYNAMIC UNIVERSE ON ===")
+# The screener cost scales with the candidate count, and the dynamic build adds
+# a shortlist on top of the static pool. This is the arithmetic that decides
+# whether the pre-open window still fits.
+_static = len(t["stock_universe"])
+_short = t.get("universe_shortlist_size", 0)
+_merged = _short + _static + 50          # + candidates.txt
+_screened = min(_merged, t.get("max_screen_candidates", _merged))
+_secs = _screened * 1.65                 # measured 2026-08-27: 92 in 151.8s
+print(f"      {_short} shortlist + {_static} static + ~50 file = ~{_merged}, "
+      f"screening {_screened} in ~{_secs:.0f}s")
+# Asserted for BOTH states, since the switch flips between sessions: with the
+# dynamic build on the pool is shortlist+static+file, with it off it is
+# static+file. Either must fit under the cap and inside the window.
+_pool_off = _static + 50
+check("the pool fits under the cap with the dynamic build OFF",
+      _pool_off <= t.get("max_screen_candidates", 0), (_pool_off, t.get("max_screen_candidates")))
+check("...and ON",
+      _merged <= t.get("max_screen_candidates", 0), (_merged, t.get("max_screen_candidates")))
+check("the screen still fits before the stream window",
+      mins(t["screener_start_time"]) + _secs / 60 < mins("09:30") - t["stream_prestart_minutes"],
+      mins(t["screener_start_time"]) + _secs / 60)
+check("...and inside its own timeout", _secs < t["screener_timeout_seconds"], _secs)
+_tl_dyn = Timeline(CFG, screener_secs=_secs)
+_d = _tl_dyn.run()
+check("with a dynamic-sized screen the stream is still pre-open",
+      _d["stream"] and _d["stream"] < mins("09:30"), fmt(_d["stream"]))
+check("...and the loop still starts at the bell",
+      _d["loop"] and _d["loop"] <= mins("09:30") + 0.5, fmt(_d["loop"]))
+check("a failed build falls back rather than emptying the watchlist",
+      "falling back to the static pool" in open(repo_file("src", "screener", "universe.py")).read())
+
 print("\n=== 6. NOTHING MATERIAL CHANGED SINCE THE WINNING SESSION ===")
 # 2026-08-27 was the first profitable day. These are the settings that decided
 # the trades it took; if any drift, tomorrow is not a comparable test.

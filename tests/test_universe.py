@@ -298,8 +298,13 @@ check("resistance still needs a real decline", t["resistance_min_decline_pct"] =
 # changing the symbol pool at the same time would make a bad session
 # unattributable. The MACHINERY must still be correct either way, which is what
 # every other check in this suite covers.
-check("the dynamic-universe switch exists and is a bool",
+# Off for 2026-08-28: one new variable per session, and the opening-move burst
+# is that variable. The MACHINERY must be correct either way, which is what the
+# rest of this suite covers.
+check("the dynamic-universe switch is a bool",
       isinstance(t["use_dynamic_universe"], bool), t["use_dynamic_universe"])
+check("its failure mode is a fallback, not an empty watchlist",
+      "falling back to the static pool" in open(repo_file("src", "screener", "universe.py")).read())
 # The dip guard the user asked to keep: a rising last tick must block the exit.
 from src.strategy.strategy import TradeManager
 _rl2 = 18
