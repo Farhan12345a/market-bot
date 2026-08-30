@@ -192,7 +192,20 @@ trading:
       # trigger_pct back toward 0.2-0.3 so the floor arms after the noise band
       # rather than inside it.
       breakeven_tiers:
-        - {trigger_pct: 0.05, floor_pct: 0.05}
+        # 0.127 = just ABOVE the 0.126% median bid-ask measured on 2026-08-26.
+        # 0.05 was tried first and rejected on arithmetic: a trigger inside the
+        # spread can be armed by one print crossing it and fired by the next
+        # crossing back, so the floor would have caught noise rather than moves.
+        # This is the smallest trigger that cannot be produced by the spread
+        # alone - protection as early as it can be had honestly.
+        #
+        # The floor stays at 0.05: once armed, exit just above entry. Together
+        # that means a trade which clears the spread cannot go on to lose.
+        #
+        # WATCH ON 2026-08-31: if BREAKEVEN_STOP dominates the opening trades'
+        # exit reasons AND the "ran further" column shows those moves continued,
+        # this is still arming too early - raise to 0.2-0.3.
+        - {trigger_pct: 0.127, floor_pct: 0.05}
 
   # Subscribe the WebSocket this many minutes BEFORE the open.
   #
@@ -932,7 +945,26 @@ trading:
   # get_historical_bars documents - not against Alpaca. Tomorrow is its first
   # real run either way. Watch for "DYNAMIC UNIVERSE: N liquid -> top 100" in
   # the log; its absence means it fell back again.
-  use_dynamic_universe: false
+  # Turned ON for 2026-08-31.
+  #
+  # Friday's constraint was not the signal, it was the pool: UBER and SPCE
+  # traded well through the first 20 minutes and could never have been selected,
+  # because they were not among the 92 hand-written names. ~11,000 tradable US
+  # equities go in, a dollar-volume floor and a cheap score cut them to
+  # universe_shortlist_size, and the static pool is folded in and re-ranked on
+  # merit so nothing is privileged by having been typed by hand.
+  #
+  # THIS DOES NOT HELP THE OPENING BURST, and may hurt it: the burst can only
+  # measure the 14 symbols the IEX stream serves, and a wider watchlist means a
+  # smaller fraction streamed. Monday is running both experiments at once, so
+  # read the burst's readiness ramp on its own terms and do not let a change in
+  # the pool be mistaken for a change in stream coverage.
+  #
+  # universe_rank is now recorded per entry, so "are the top-ranked names
+  # actually better?" is answerable from outcomes: correlate rank against
+  # realised P&L. If ranks 1-14 do no better than 80-100, the cheap score is
+  # sorting noise.
+  use_dynamic_universe: true
 
   # How many symbols survive the liquidity cut and get cheap-scored.
   universe_size: 1000

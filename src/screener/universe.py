@@ -469,8 +469,18 @@ def select_candidates(broker, config, static_pool=(), force_rebuild=False):
     scored.sort(key=lambda kv: kv[1], reverse=True)
     merged = [sym for sym, _ in scored]
 
+    # Each symbol's position in the merit ranking, 1-based.
+    #
+    # Recorded so the question "is the dynamic universe actually picking better
+    # names?" can be answered from outcomes rather than from the fact that it
+    # ran. Without a rank per symbol, a session where the top 14 lost money and
+    # one where they made it look identical afterwards. Correlate universe_rank
+    # against realised P&L: if rank 1-14 does no better than rank 80-100, the
+    # cheap score is sorting noise and the whole apparatus is expensive
+    # decoration.
     info.update({"source": "dynamic", "universe": len(universe),
                  "shortlist": len(shortlist), "candidates": len(merged),
+                 "rank": {sym: i + 1 for i, sym in enumerate(merged)},
                  "top": ranked[:10]})
     logger.info(
         f"universe: {len(universe)} liquid -> top {len(shortlist)} by cheap score "

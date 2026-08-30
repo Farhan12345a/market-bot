@@ -1508,6 +1508,12 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
 
     strategy.confirm_entry(symbol, price, qty, config_override=exit_config)
     executor.entry_meta.setdefault(symbol, {})["list_source"] = symbol_source.get(symbol, "screener")
+    # Where this symbol placed in the dynamic universe's merit ranking. Absent
+    # on a static-pool session, which is the correct reading of "there was no
+    # ranking" rather than a rank of zero.
+    _rank = (universe_info.get("rank") or {}).get(symbol)
+    if _rank:
+        executor.entry_meta[symbol]["universe_rank"] = _rank
     if burst_note:
         executor.entry_meta.setdefault(symbol, {})["burst_logic"] = burst_note
         if signal_pct is not None:
@@ -1838,6 +1844,36 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     continue
 
         halted = _breadth_halt(config, market_data, symbols, breadth_state, now, et)
+
+        # Sector scoreboard, logged with the breadth check and again at the halt
+        # decision. sector_strength already feeds the signal journal per signal
+        # (rho +0.483 against the 15-min forward return on 2026-08-28, one
+        # session, sign unconfirmed) - what was missing is a plain human-readable
+        # note of which complexes were working WHILE the session ran, rather
+        # than only in the next morning's table.
+        if breadth_state.get("checked") and not breadth_state.get("sector_logged"):
+            breadth_state["sector_logged"] = True
+            try:
+                import src.analytics.sectors as _SEC
+                by_sector = {}
+                for _sym, _open in (breadth_state.get("open_px") or {}).items():
+                    _sec = _SEC.sector_for(_sym)
+                    if not _sec:
+                        continue
+                    _bar = market_data.get_latest_bar(_sym, "1Min")
+                    _px = market_data.get_entry_price(_sym, _bar) if _bar else None
+                    if _px and _open:
+                        by_sector.setdefault(_sec, []).append((_px - _open) / _open * 100)
+                if by_sector:
+                    ranked = sorted(
+                        ((sum(v) / len(v), k, len(v)) for k, v in by_sector.items()),
+                        reverse=True)
+                    logger.info(
+                        f"SECTOR SCOREBOARD at {now:%H:%M} ET (mean move since the open): "
+                        + ", ".join(f"{k} {m:+.2f}% (n={n})" for m, k, n in ranked)
+                    )
+            except Exception as e:
+                logger.debug(f"sector scoreboard skipped: {e}")
 
         if halted:
             pass

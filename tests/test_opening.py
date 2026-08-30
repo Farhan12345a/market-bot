@@ -415,14 +415,27 @@ check("a tier is measured from ENTRY, not from the session open",
 # measured on 2026-08-26, so the spread alone can both arm and trigger it - the
 # expected outcome is scratches at +0.05% rather than winners or losers, and the
 # exit-reason table is where that will show.
-check("breakeven arms sooner", [t["trigger_pct"] for t in o_["breakeven_tiers"]] == [0.05])
+check("breakeven arms sooner", [t["trigger_pct"] for t in o_["breakeven_tiers"]] == [0.127])
+# The number is not round on purpose: 0.127% sits just above the 0.126% median
+# bid-ask measured on 2026-08-26. A trigger INSIDE the spread can be armed by
+# one print crossing it and fired by the next crossing back, which protects
+# against noise instead of against losses. This is the smallest honest trigger.
+check("...and it sits outside the measured bid-ask, not inside it",
+      o_["breakeven_tiers"][0]["trigger_pct"] > 0.126)
 check("...and the floor sits ABOVE entry, so an armed trade cannot lose",
       [t["floor_pct"] for t in o_["breakeven_tiers"]] == [0.05])
 
 # The floor has to actually hold at +0.05%, not merely be configured.
+def _make_tm(peak):
+    t = TradeManager("X", 100.0, 100, oc)
+    t.highest_since_entry = peak
+    return t
+
 _bm = TradeManager("B", 100.0, 100, oc)
-_bm.highest_since_entry = 100.0 * 1.0006  # peak above the trigger arms it
-check("armed at +0.06%, a fall back to entry exits", _bm.check_breakeven_stop(100.0) > 0)
+_bm.highest_since_entry = 100.0 * 1.0015  # peak past +0.127% arms it
+check("armed above the spread, a fall back to entry exits", _bm.check_breakeven_stop(100.0) > 0)
+check("...but a peak INSIDE the spread does not arm it",
+      _make_tm(100.0 * 1.0006).check_breakeven_stop(100.0) == 0)
 check("...and it does NOT exit while still above the floor",
       TradeManager("C", 100.0, 100, oc).check_breakeven_stop(100.0 * 1.001) == 0)
 # Everything NOT overridden must be inherited, or the profile silently drops
@@ -709,7 +722,15 @@ check("streamed only", _o["streamed_only"] is True)
 check("ceiling does not apply", _o["ignore_max_pct"] is True)
 check("cooldown neither respected nor armed", _o["skip_reentry_cooldown"] is True)
 check("normal window still 09:33", _t["entry_window_start"] == "09:33")
-check("dynamic universe parked", _t["use_dynamic_universe"] is False)
+# ON from 2026-08-31. Friday's constraint was the POOL, not the signal: UBER and
+# SPCE traded well through the first 20 minutes and could never have been picked,
+# because they were not among the 92 hand-written names. This does NOT help the
+# opening burst - that is capped at the 14 symbols IEX serves - and may hurt it
+# by widening the watchlist against the same 14 slots. Two experiments in one
+# session; read the burst's readiness ramp on its own terms.
+check("dynamic universe on", _t["use_dynamic_universe"] is True)
+check("...and the rank is recorded so it can be judged on outcomes",
+      "universe_rank" in open(repo_file("src", "main.py")).read())
 check("50-name pool", len(_t["stock_universe"]) == 50, len(_t["stock_universe"]))
 
 print("\n=== 29. BIGGEST MOVER FIRST ===")
