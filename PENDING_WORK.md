@@ -828,3 +828,29 @@ quote is used for, useless as a price prediction. And a marketable LIMIT fills
 at the best available offer, not at the limit: 242.01 was a ceiling, not a cost.
 
 Keep the 2% padding. It bought certainty of fill for roughly $57.
+
+## A real answer for bearish tape (TODO - the halt is a bandaid)
+
+`breadth_halt` (added 2026-08-30) stops new entries when the watchlist mean move
+since the open is below -0.3% at 09:40. That is damage control, not a way to
+profit. It rests on an ASSUMPTION nobody has measured: that a weak first ten
+minutes implies a weak session. It will sometimes halt a day that recovers, and
+those days leave no row in the P&L to notice them by.
+
+Measure it before trusting it. The signal journal already records every signal
+whether taken or not, so a halted day still has the counterfactual: compare the
+forward returns of signals that fired AFTER the halt against what the halt cost.
+If post-halt signals mostly rose, the assumption is wrong.
+
+Real options, none of them free:
+1. Short the weak side. Needs the sign bugs fixed first, and note no_shorting is
+   being set on the account precisely to prevent accidental shorts - a
+   deliberate short strategy would have to undo that consciously.
+2. Trade an inverse ETF (SQQQ, SH) as a long. No shorting machinery needed and
+   no borrow. Probably the cheapest honest path.
+3. Require positive market breadth as an ENTRY condition rather than a halt, so
+   the size scales with the tape instead of switching off.
+
+The deeper point from 2026-08-28: `edge` was +1.03pp on both a winning and a
+losing session. Selection is adding value in both regimes. What is missing is
+something to be long OF on a day with no upside in it.

@@ -360,16 +360,20 @@ class Executor:
         """Number of open positions, derived from the reconciled symbol set."""
         return len(self._open_symbols)
 
-    def pre_entry_check(self, qty, price):
+    def pre_entry_check(self, qty, price, symbol=None):
         """
         Returns (ok: bool, reason: str). Checked BEFORE ever attempting a
         broker order for a new entry - closes the gap where only Alpaca's own
         margin rejection used to be the backstop against over-leveraging.
-        Three independent checks, all must pass:
+        Four independent checks, all must pass:
           1. Enough buying power for this specific order.
           2. Not already at max_concurrent_positions.
           3. Adding this position wouldn't push total committed capital past
              max_total_exposure_fraction of current equity.
+          4. Not already at max_positions_per_sector for this symbol's complex.
+
+        `symbol` is optional so an older caller keeps working; without it the
+        sector check is skipped rather than guessed at.
         """
         cost = qty * price
 
@@ -401,6 +405,40 @@ class Executor:
         max_positions = self.config["trading"].get("max_concurrent_positions")
         if max_positions and self._open_position_count >= max_positions:
             return False, f"at max_concurrent_positions ({self._open_position_count}/{max_positions})"
+
+        # Sector concentration.
+        #
+        # The screener does not choose a sector; volatility does. rapid_increase
+        # fires on whatever moves most, and on 2026-08-28 that was crypto miners
+        # - MARA fired 21 times, RIOT 17, CIFR 17 - which filled 9 of 30
+        # positions with one complex and returned 0 winners for -$131. The day
+        # before, the same complex was +$318 on 4 of 4. That is not stock
+        # selection working or failing; it is one sector call, taken twice,
+        # sized as if it were nine independent bets.
+        #
+        # Counted from open_entries (symbols the broker holds for us) rather
+        # than from a separate tally, so a position that closed stops counting
+        # immediately.
+        max_per_sector = self.config["trading"].get("max_positions_per_sector")
+        if max_per_sector and symbol:
+            try:
+                from src.analytics.sectors import sector_for
+                sector = sector_for(symbol)
+                # An unmapped symbol has no complex to be concentrated in, so it
+                # is never refused - better to let one through than to lump every
+                # unknown name into a single phantom bucket and starve it.
+                if sector:
+                    held = sum(1 for s_ in self.open_entries
+                               if s_ != symbol and sector_for(s_) == sector)
+                    if held >= max_per_sector:
+                        return False, (
+                            f"at max_positions_per_sector for {sector} "
+                            f"({held}/{max_per_sector}) - already holding "
+                            f"{', '.join(sorted(s_ for s_ in self.open_entries if sector_for(s_) == sector))}"
+                        )
+            except Exception as e:
+                # Never block an entry because the sector map failed to load.
+                logger.debug(f"{symbol}: sector concentration check skipped: {e}")
 
         max_exposure_fraction = self.config["trading"].get("max_total_exposure_fraction")
         if max_exposure_fraction and self._equity > 0:

@@ -57,6 +57,96 @@ def parse_hhmm_today(hhmm_str, et_tz):
     hour, minute = map(int, hhmm_str.split(":"))
     return datetime.now(et_tz).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
+def _breadth_halt(config, market_data, symbols, state, now, et):
+    """Stop opening new positions when the names we trade are broadly falling.
+
+    The bandaid for a bearish tape, and deliberately named as one. The strategy
+    is long-only and needs continuation: a stock that moves up and keeps moving.
+    On 2026-08-28 SPY was flat (-0.018% across the windows signals were measured
+    on) while the average signal returned -1.045% at 15 minutes, 19 of 30
+    positions never got above +0.5%, and the day lost $250 while still beating
+    the do-nothing benchmark by 1.03pp. Selection was working; there was nothing
+    to select from.
+
+    So this does not try to predict the day. It reads what the watchlist has
+    ALREADY done by check_time and, if the mean move is below min_mean_pct,
+    stops opening anything new. The assumption baked in - that a bearish first
+    ten minutes implies a bearish rest of the day - is an ASSUMPTION, not a
+    measured fact, and it is the thing this session tests. It will sometimes
+    halt a day that recovers.
+
+    Exits are untouched: a halt stops new entries only, so open positions keep
+    their stops and tiers.
+
+    Returns True once the halt is in force. Evaluated once, at the first poll
+    at or after check_time, and latched for the rest of the day - re-checking
+    would let a dead-cat bounce reopen trading on the same evidence.
+    """
+    ob = config.get("trading", {}).get("breadth_halt") or {}
+    if not ob.get("enabled"):
+        return False
+    if state.get("halted"):
+        return True
+    if state.get("checked"):
+        return False
+
+    try:
+        check_at = parse_hhmm_today(ob.get("check_time", "09:40"), et)
+    except Exception:
+        return False
+    if now < check_at:
+        return False
+
+    state["checked"] = True
+    moves = []
+    for symbol in symbols:
+        try:
+            bar = market_data.get_latest_bar(symbol, "1Min")
+            if not bar:
+                continue
+            price = market_data.get_entry_price(symbol, bar)
+            open_px = state.get("open_px", {}).get(symbol)
+            if price and open_px:
+                moves.append((price - open_px) / open_px * 100)
+        except Exception:
+            continue
+
+    min_n = ob.get("min_symbols", 5)
+    if len(moves) < min_n:
+        logger.warning(
+            f"BREADTH HALT: only {len(moves)} of {len(symbols)} symbols had both an "
+            f"open price and a current price at {now:%H:%M} ET (need {min_n}) - "
+            f"NOT halting on evidence this thin; trading continues normally"
+        )
+        return False
+
+    mean_move = sum(moves) / len(moves)
+    falling = sum(1 for m in moves if m < 0)
+    threshold = ob.get("min_mean_pct", -0.3)
+    state["mean_move"] = mean_move
+    state["breadth_n"] = len(moves)
+    state["falling"] = falling
+
+    if mean_move < threshold:
+        state["halted"] = True
+        logger.warning(
+            f"===== BREADTH HALT at {now:%H:%M} ET: watchlist mean move since the "
+            f"open is {mean_move:+.3f}%, below the {threshold:+.2f}% floor "
+            f"({falling}/{len(moves)} symbols falling). NO NEW ENTRIES for the rest "
+            f"of the day. Open positions keep their exits. This is the bearish-tape "
+            f"bandaid, and the assumption it rests on - that a weak first ten "
+            f"minutes implies a weak session - is what today measures. ====="
+        )
+        return True
+
+    logger.info(
+        f"BREADTH CHECK at {now:%H:%M} ET: watchlist mean {mean_move:+.3f}% "
+        f"({falling}/{len(moves)} falling), above the {threshold:+.2f}% floor - "
+        f"trading continues"
+    )
+    return False
+
+
 def _benchmark_symbols(config, symbols):
     """
     Context symbols to stream alongside the watchlist: SPY plus whichever sector
@@ -1407,7 +1497,7 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
         )
         return False
 
-    ok, reason = executor.pre_entry_check(qty, price)
+    ok, reason = executor.pre_entry_check(qty, price, symbol=symbol)
     if not ok:
         logger.info(f"{symbol}: entry skipped - {reason}")
         return False
@@ -1571,6 +1661,8 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     day_peak_signal = {"value": 0.0, "symbol": None, "at": None}
     # Opening-burst state, persisting across polls within the session.
     opening_state = {"baseline": {}, "taken": [], "done": False}
+    breadth_state = {"open_px": {}}
+    market_open_dt = parse_hhmm_today("09:30", et)
     sector_history = {}
     # Only the sectors this watchlist actually needs. Computed once here rather
     # than per poll: the watchlist does not change during a session.
@@ -1726,7 +1818,30 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         # entries_triggered is local to run_trading_day, so it resets on its own
         # each trading day rather than accumulating across days in this
         # long-running process.
-        if max_daily_entries and entries_triggered >= max_daily_entries:
+        # Open-price snapshot for the breadth check. Taken on every poll but
+        # only ever WRITTEN once per symbol, so each symbol's reference is the
+        # first price seen after the bell rather than a moving target. Symbols
+        # on REST arrive with a stale price and are simply the ones the check
+        # cannot see - min_symbols is what stops it concluding anything from too
+        # few.
+        if now >= market_open_dt:
+            for _sym in symbols:
+                if _sym in breadth_state["open_px"]:
+                    continue
+                try:
+                    _bar = market_data.get_latest_bar(_sym, "1Min")
+                    if _bar:
+                        _px = market_data.get_entry_price(_sym, _bar)
+                        if _px:
+                            breadth_state["open_px"][_sym] = _px
+                except Exception:
+                    continue
+
+        halted = _breadth_halt(config, market_data, symbols, breadth_state, now, et)
+
+        if halted:
+            pass
+        elif max_daily_entries and entries_triggered >= max_daily_entries:
             if not daily_entry_cap_logged:
                 logger.info(
                     f"Reached max_daily_entries ({entries_triggered}/{max_daily_entries}) - "

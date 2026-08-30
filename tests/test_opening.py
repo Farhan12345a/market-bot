@@ -45,7 +45,7 @@ class Exec:
         self._cooldown = cooldown
         self.equity = 100000.0
     def reentry_cooldown_remaining(self, s): return self._cooldown
-    def pre_entry_check(self, qty, price): return True, ""
+    def pre_entry_check(self, qty, price, symbol=None): return True, ""
     def submit_entry_order(self, s, qty, price, entry_method=None, entry_rsi=None):
         self.orders.append({"symbol": s, "qty": qty, "price": price, "method": entry_method})
         return {"id": len(self.orders)}
@@ -410,7 +410,21 @@ check("...and every opening tier sits below the normal top tier",
 _tm = TradeManager("A", 100.0, 100, oc)
 check("a tier is measured from ENTRY, not from the session open",
       _tm.check_take_profit(100.0 * 1.005)[0] > 0 and _tm.check_take_profit(100.0 * 1.004)[0] == 0)
-check("breakeven arms sooner", [t["trigger_pct"] for t in o_["breakeven_tiers"]] == [0.2])
+# 0.2 -> 0.05 for 2026-08-31. Arms almost immediately so an opening trade that
+# ticks up cannot go on to lose. Note 0.05% is BELOW the 0.126% median bid-ask
+# measured on 2026-08-26, so the spread alone can both arm and trigger it - the
+# expected outcome is scratches at +0.05% rather than winners or losers, and the
+# exit-reason table is where that will show.
+check("breakeven arms sooner", [t["trigger_pct"] for t in o_["breakeven_tiers"]] == [0.05])
+check("...and the floor sits ABOVE entry, so an armed trade cannot lose",
+      [t["floor_pct"] for t in o_["breakeven_tiers"]] == [0.05])
+
+# The floor has to actually hold at +0.05%, not merely be configured.
+_bm = TradeManager("B", 100.0, 100, oc)
+_bm.highest_since_entry = 100.0 * 1.0006  # peak above the trigger arms it
+check("armed at +0.06%, a fall back to entry exits", _bm.check_breakeven_stop(100.0) > 0)
+check("...and it does NOT exit while still above the floor",
+      TradeManager("C", 100.0, 100, oc).check_breakeven_stop(100.0 * 1.001) == 0)
 # Everything NOT overridden must be inherited, or the profile silently drops
 # rules nobody restated.
 for k in ("use_resistance_exit", "momentum_fade_window_minutes", "use_breakeven_floor",

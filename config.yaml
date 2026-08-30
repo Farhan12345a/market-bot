@@ -174,8 +174,25 @@ trading:
         - {gain_pct: 0.5,  sell_fraction: 0.33}
         - {gain_pct: 0.75, sell_fraction: 0.40}
         - {gain_pct: 1.0,  sell_fraction: 1.0}
+      # Arms almost immediately: touch +0.05% and the stop sits at +0.05%, so
+      # the position cannot go on to lose money.
+      #
+      # STATED PLAINLY, BECAUSE IT MATTERS: 0.05% is BELOW the median bid-ask
+      # measured on 2026-08-26 (0.126%). A single print crossing the spread can
+      # arm this floor, and the next print crossing back can trigger it. The
+      # likely outcome is that most opening trades end as scratches at +0.05%
+      # rather than either winning or losing - the downside is capped, and so is
+      # essentially all of the upside, because a real move gets stopped out on
+      # its first pullback before it can run.
+      #
+      # That is the trade requested for 2026-08-31 and it is a reasonable thing
+      # to WANT on an experiment whose only losing outcome so far has been
+      # entering badly. Judge it on the exit-reason table: if BREAKEVEN_STOP
+      # dominates and the "ran further" column shows the moves continued, raise
+      # trigger_pct back toward 0.2-0.3 so the floor arms after the noise band
+      # rather than inside it.
       breakeven_tiers:
-        - {trigger_pct: 0.2, floor_pct: 0.05}
+        - {trigger_pct: 0.05, floor_pct: 0.05}
 
   # Subscribe the WebSocket this many minutes BEFORE the open.
   #
@@ -764,6 +781,53 @@ trading:
   # leverage across 28 simultaneous positions on 2026-08-18 before anything
   # stopped it - Alpaca's own rejection was the only backstop that existed.
   max_concurrent_positions: 10      # never hold more than this many positions open at once
+
+  # Never hold more than this many positions in ONE sector complex at once.
+  #
+  # The screener does not pick a sector; volatility does. rapid_increase fires
+  # on whatever is moving most, and high-beta names cluster - on 2026-08-28
+  # crypto miners fired MARAx21, RIOTx17, CIFRx17 and took 9 of 30 positions,
+  # returning 0 winners for -$131. On 2026-08-27 the same complex was +$318 on
+  # 4 of 4. Two sessions, opposite results, one underlying bet: the day was a
+  # sector call sized as if it were nine independent ones.
+  #
+  # 3 of 10 slots. Complexes come from src/analytics/sectors.py (12 ETF
+  # buckets); an UNMAPPED symbol is never refused, since lumping every unknown
+  # name into one phantom bucket would starve them all.
+  #
+  # This is a real behavioural change, not a measurement one: it will refuse
+  # entries that previous sessions took. Expect fewer positions on days when
+  # one complex dominates, and check the "P&L by sector complex" table to see
+  # whether the refused slots would have helped or hurt.
+  max_positions_per_sector: 3
+
+  # Stop opening new positions when the names we trade are broadly falling.
+  #
+  # A BANDAID, and named as one. The strategy is long-only and needs
+  # continuation. On 2026-08-28 SPY was flat (-0.018%) while the average signal
+  # returned -1.045% at 15 minutes; 19 of 30 positions never got above +0.5%.
+  # The day lost $250 and STILL beat the do-nothing benchmark by 1.03pp -
+  # selection was working, there was just nothing to select from. No amount of
+  # better picking fixes a tape with no upside in it.
+  #
+  # This does not predict the day. At check_time it reads what the watchlist has
+  # already done since the open, and if the mean is below min_mean_pct it stops
+  # opening anything new for the rest of the session. Exits are untouched.
+  #
+  # THE ASSUMPTION, stated so it can be tested rather than believed: that a weak
+  # first ten minutes implies a weak session. That is not measured - it is the
+  # thing this setting is here to measure. It WILL sometimes halt a day that
+  # goes on to recover, and the cost of those days is invisible in the P&L
+  # (a trade not taken leaves no row). Read the BREADTH CHECK / BREADTH HALT log
+  # line against the rest of the session before trusting it.
+  #
+  # Latched once evaluated - a bounce does not un-halt the day, because that
+  # would reopen trading on the same evidence that closed it.
+  breadth_halt:
+    enabled: true
+    check_time: "09:40"      # 10 minutes of tape, as requested
+    min_mean_pct: -0.3       # halt if the watchlist mean is below this
+    min_symbols: 5           # never conclude anything from fewer than this many
 
   # Total positions OPENED over the whole day, regardless of how many are held
   # at once - a different limit from max_concurrent_positions above. On
