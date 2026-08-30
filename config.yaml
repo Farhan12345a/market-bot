@@ -45,7 +45,30 @@ trading:
     baseline_time: "09:30"
 
     # No opening entry after this. The whole point is an early decision.
-    decide_by: "09:32"
+    #
+    # 09:32 -> 09:33 for 2026-08-31. Not a change of heart about deciding early:
+    # the window was closing before there was anything to decide ON. Across two
+    # sessions the stream served 0/28 and then 3/27 watched symbols in the first
+    # seconds after the bell - not because the socket was slow (it connected at
+    # 09:26 and ended the day healthy, 38,454 trades) but because IEX carries
+    # ~2% of US volume, so a stock trading on Nasdaq and NYSE has no IEX print
+    # to send. Coverage, not latency.
+    #
+    # Baselines are captured on each symbol's FIRST print rather than fixed at
+    # 09:30, so a longer window lets late-printing symbols get a baseline AND a
+    # follow-up reading. The cost is a later baseline for those symbols, which
+    # is a real cost - a move measured from 09:32 is not the move from the open.
+    # Measuring 12 symbols late beats measuring 3 early, but only just, and this
+    # should come back down if the readiness ramp below shows it can.
+    #
+    # WHY 09:33 AND NOT LATER. entry_window_start is 09:33, and the burst
+    # closing exactly as normal entries open is what keeps the experiment
+    # separable from the session it runs alongside - an overlap would let burst
+    # trades and normal trades compete for the same slots, and neither result
+    # would mean anything afterwards. 09:34 was tried and reverted for this;
+    # test_timeline.py asserts the handoff. Going later requires moving
+    # entry_window_start too, which changes the part of the system that works.
+    decide_by: "09:33"
 
     # Minimum move from the baseline to qualify. 0.0 means "any increase",
     # which is what the strategy as described asks for. Raise it to require a

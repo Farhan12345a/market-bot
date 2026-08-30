@@ -1,6 +1,6 @@
 """
 The opening-move experiment: measure each streamed symbol from the 09:30 open,
-buy the ones that are up, decide by 09:32.
+buy the ones that are up, decide by 09:33.
 
 This is deliberately a SEPARATE entry mode rather than a wider entry window, and
 most of what is tested here is that separation holding. Widening
@@ -92,7 +92,7 @@ print("=== 1. CONFIG ===")
 ob = CFG["trading"]["opening_burst"]
 check("enabled for tomorrow", ob["enabled"] is True)
 check("baseline is the bell", ob["baseline_time"] == "09:30")
-check("decides by 09:32", ob["decide_by"] == "09:32")
+check("decides by 09:33", ob["decide_by"] == "09:33")
 check("has its OWN position budget", ob["max_positions"] == 7, ob["max_positions"])
 check("budget leaves room for the normal session",
       ob["max_positions"] < CFG["trading"]["max_concurrent_positions"], ob["max_positions"])
@@ -163,7 +163,7 @@ md = MD({"AAA": [100.0, 105.0]})
 s_, e_ = Strat(), Exec()
 c = cfg()
 run(c, md, s_, e_, ["AAA"], st, at("09:30"))
-check("no entry after decide_by", run(c, md, s_, e_, ["AAA"], st, at("09:32")) == 0)
+check("no entry after decide_by", run(c, md, s_, e_, ["AAA"], st, at("09:33")) == 0)
 check("...and the mode marks itself done", st["done"] is True)
 check("still nothing later in the session",
       run(c, md, s_, e_, ["AAA"], st, at("09:45")) == 0 and e_.orders == [])
@@ -272,7 +272,7 @@ check("the move is recorded as signal_pct",
       [r.get("signal_pct") for r in taken_rows])
 # Refusals land once, at window close, with the move they finished on - the
 # control group without which "buy what went up" is untestable.
-run(c, md, Strat(), Exec(), ["UP", "DOWN"], st, at("09:32"), journal=j)
+run(c, md, Strat(), Exec(), ["UP", "DOWN"], st, at("09:33"), journal=j)
 closed = j.rows[len(taken_rows):]
 check("the refused ones are recorded at window close",
       [r["symbol"] for r in closed] == ["DOWN"], [r["symbol"] for r in closed])
@@ -482,7 +482,7 @@ print("\n=== 21. THE 2026-08-27 STARVATION ===")
 # and finished at 09:31:50. The stream was gated on that finishing, so it
 # subscribed 110s AFTER the 09:30 baseline with zero bars - and the augmentation
 # also blocked the loop, so run_trading_day could not start until the
-# 09:30-09:32 window had almost passed. The burst measured 0 of 28 and took
+# 09:30-09:33 window had almost passed. The burst measured 0 of 28 and took
 # nothing. Three separate guards now stop that recurring.
 check("the stream no longer waits for augmentation",
       "Deliberately NOT gated on pending_augmented" in msrc)
@@ -532,7 +532,7 @@ print("\n=== 24. THE LOOP STARTS EARLY, ENTRIES DO NOT ===")
 # Starting the loop at 09:30 for the opening burst removed the implicit lower
 # bound on the normal entry window - it used to be enforced by the function
 # sleeping until entry_start. On 2026-08-27 that let OKTA and CRWD be bought at
-# 09:32:13; both peaked at MFE 0.00%, both hit FINAL_EXIT -1.0%, -$195.52 in 25
+# 09:33:13; both peaked at MFE 0.00%, both hit FINAL_EXIT -1.0%, -$195.52 in 25
 # seconds.
 check("the normal entry block has a LOWER bound again",
       "elif entry_start <= now < entry_end:" in msrc)
@@ -548,7 +548,7 @@ print("\n=== 25. THE REPORT ALWAYS STATES THE OUTCOME ===")
 n4 = EmailNotifier.__new__(EmailNotifier)
 n4.run_context = {"opening_burst_summary": {
     "enabled": True, "closed": True, "measured": 14, "taken": 0,
-    "threshold": 0.5, "window": "09:30-09:32", "best_move": 0.31, "qualified": 0}}
+    "threshold": 0.5, "window": "09:30-09:33", "best_move": 0.31, "qualified": 0}}
 h = n4._opening_burst_html([])
 check("a zero-trade session still renders a section", bool(h))
 check("it names it a THRESHOLD result", "THRESHOLD result" in h, h[:400])
@@ -558,7 +558,7 @@ check("it reports the best move", "+0.310%" in h)
 n5 = EmailNotifier.__new__(EmailNotifier)
 n5.run_context = {"opening_burst_summary": {
     "enabled": True, "closed": True, "measured": 0, "taken": 0,
-    "threshold": 0.5, "window": "09:30-09:32", "best_move": None, "qualified": 0}}
+    "threshold": 0.5, "window": "09:30-09:33", "best_move": None, "qualified": 0}}
 h2 = n5._opening_burst_html([])
 check("measuring nothing renders a DIFFERENT diagnosis", "Measured NOTHING" in h2)
 check("...and points at the stream, not the threshold",
@@ -583,7 +583,7 @@ check("it carries the opening exit profile",
       rs2.trades["WIN"]["cfg"] is not None and
       rs2.trades["WIN"]["cfg"]["trading"]["first_exit_loss_pct"] == -0.3)
 j2 = Journal()
-run(c, md, rs2, ex2, ["WIN", "FLAT", "DOWN"], st, at("09:32"), journal=j2)
+run(c, md, rs2, ex2, ["WIN", "FLAT", "DOWN"], st, at("09:33"), journal=j2)
 check("the window closes", st["done"] is True)
 check("the two refused symbols are journalled at close",
       sorted(r["symbol"] for r in j2.rows) == ["DOWN", "FLAT"],
@@ -595,7 +595,7 @@ check("their final moves are recorded",
 print("\n=== 27. LIVE FAILURE SCENARIOS ===")
 # The scenarios that decide whether tomorrow produces a result or another blank.
 
-def scenario(prices, streamed=None, cfg_over=None, times=("09:30", "09:31", "09:32")):
+def scenario(prices, streamed=None, cfg_over=None, times=("09:30", "09:31", "09:33")):
     st = {"baseline": {}, "taken": [], "done": False}
     md = MD(prices, streamed=streamed)
     strat, ex = Strat(), Exec()
@@ -686,8 +686,8 @@ print("\n=== 28. TOMORROW'S SETTINGS, ONE LAST TIME ===")
 _t = CFG["trading"]
 _o = _t["opening_burst"]
 check("burst enabled", _o["enabled"] is True)
-check("window 09:30 -> 09:32",
-      (_o["baseline_time"], _o["decide_by"]) == ("09:30", "09:32"))
+check("window 09:30 -> 09:33",
+      (_o["baseline_time"], _o["decide_by"]) == ("09:30", "09:33"))
 check("threshold 0.3%", _o["min_move_pct"] == 0.3, _o["min_move_pct"])
 check("7 positions at half size",
       (_o["max_positions"], _o["size_multiplier"]) == (7, 0.5))

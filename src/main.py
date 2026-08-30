@@ -1201,15 +1201,29 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
     # How many symbols the stream is actually serving, logged once as the
     # window opens. If this is 0 the experiment cannot work, and knowing that at
     # 09:30:10 is worth far more than deducing it from an empty report later.
-    if not state.get("readiness_logged"):
-        state["readiness_logged"] = True
+    # Logged once as the window opens, then every 30s until it closes.
+    #
+    # One reading told us 3/27 on 2026-08-28 and 0/28 on 2026-08-27, which says
+    # the mode cannot work but not what to DO about it. The missing number is
+    # the RAMP: IEX carries ~2% of US volume, so symbols appear as they happen
+    # to print there, and how fast that count climbs is what decides where
+    # decide_by belongs. If it reaches 12/27 by 09:31 the window can come back
+    # in; if it is still 4/27 at 09:34 then no amount of waiting fixes it and
+    # the honest answer is the paid SIP feed.
+    #
+    # Costs one is_streamed() sweep per 30s over a list of ~27 - nothing.
+    last_ready = state.get("readiness_at")
+    if last_ready is None or (now - last_ready).total_seconds() >= 30:
+        first = last_ready is None
+        state["readiness_at"] = now
         try:
             live = sum(1 for s_ in symbols if market_data.is_streamed(s_))
+            based = len(state.get("baseline", {}))
             msg = (f"OPENING BURST: stream is serving {live}/{len(symbols)} watched "
-                   f"symbols at {now:%H:%M:%S} ET")
+                   f"symbols at {now:%H:%M:%S} ET ({based} with a baseline)")
             if live == 0:
                 logger.error(msg + " - NOTHING can be measured; the mode will take no trades")
-            elif live < len(symbols) / 2:
+            elif first and live < len(symbols) / 2:
                 logger.warning(msg + " - most symbols are on REST and will be skipped")
             else:
                 logger.info(msg)
