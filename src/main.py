@@ -2786,6 +2786,21 @@ def main():
                 # Subscribe only once the day's symbol list is known. Started
                 # here rather than at construction because the watchlist isn't
                 # decided until the screener has run.
+                # One retry at the bell if the stream wrote itself off before it.
+                #
+                # A pre-market give-up is a verdict reached on pre-market
+                # evidence, and pre-market silence is not evidence of a broken
+                # socket. On 2026-08-31 the stream gave up at 09:30:39 and the
+                # whole session ran on REST ~15 min delayed, including every
+                # entry decision, because nothing ever reconsidered it.
+                if price_stream is not None and price_stream.clear_give_up():
+                    logger.warning(
+                        "Stream had given up before the open - retrying once now "
+                        "that the market is live, since a pre-market verdict was "
+                        "reached on pre-market silence. If it fails again the "
+                        "session runs on REST as before."
+                    )
+
                 if price_stream is not None and not price_stream.is_running():
                     # Benchmarks go on the stream too, and LAST in priority.
                     #
@@ -2884,19 +2899,33 @@ def main():
             # morning all 13 augmented names went to REST regardless. The gate
             # cost the entire experiment to protect an outcome that could not
             # happen.
-            if (
-                price_stream is not None
-                and prestart
-                and pending_selection is not None
-                and market_data.is_trading_day(now)
-                and market_open_today - timedelta(minutes=prestart) <= now < market_open_today
-                and not price_stream.is_running()
-            ):
+            # Called HERE and again after every blocking pre-market stage.
+            #
+            # It used to be a single check per loop iteration, which is not the
+            # same thing. On 2026-08-31 the iteration that would have subscribed
+            # evaluated this at 09:10:22 - too early, the window opens at 09:26 -
+            # and then entered the QQQ build IN THE SAME ITERATION, which ran for
+            # 17m44s. By the next iteration it was 09:28 going on 09:30 and the
+            # window had been slept through from the inside. The stream started
+            # late at the bell, delivered nothing, and the burst measured 0 of 25.
+            #
+            # A window checked once per iteration is only as reliable as the
+            # slowest thing that can run inside one. Checking after each stage
+            # makes the subscribe happen the moment it becomes possible.
+            def _try_prestart_stream():
+                _now = datetime.now(et)
+                if not (price_stream is not None and prestart
+                        and pending_selection is not None
+                        and market_data.is_trading_day(_now)
+                        and market_open_today - timedelta(minutes=prestart) <= _now < market_open_today
+                        and not price_stream.is_running()):
+                    return
                 symbols_now = pending_selection[0]
                 bench = _benchmark_symbols(config, symbols_now)
                 logger.info(
-                    f"===== PRE-OPEN: subscribing the stream {(market_open_today - now).total_seconds():.0f}s "
-                    f"before the bell ({len(symbols_now)} symbols + {len(bench)} benchmarks) ====="
+                    f"===== PRE-OPEN: subscribing the stream "
+                    f"{(market_open_today - _now).total_seconds():.0f}s before the bell "
+                    f"({len(symbols_now)} symbols + {len(bench)} benchmarks) ====="
                 )
                 try:
                     price_stream.start(
@@ -2922,11 +2951,48 @@ def main():
                     f"{(market_open_today - now).total_seconds() / 60:.0f} min ahead of the open ====="
                 )
                 _t0 = time.monotonic()
-                pending_selection = _augment_selection(
-                    config, screener, market_data, pending_selection, stages=("qqq",)
+                # Hard deadline, which this branch did not have and the
+                # earnings branch did. On 2026-08-31 it ran for 17m44s - it
+                # scores QQQ constituents one at a time and nothing capped it -
+                # blocking this single-threaded loop from 09:10 to 09:28 and
+                # taking the stream's pre-open subscribe window with it.
+                #
+                # Budgeted to leave the stream its full prestart window, not
+                # merely to finish before the open: a list that lands at 09:29
+                # is worthless if the socket it starved cannot then come up in
+                # time. The screener's picks are the fallback, same as a
+                # screener timeout.
+                _stream_needs = market_open_today - timedelta(minutes=prestart or 0)
+                _qqq_deadline = max(
+                    5.0,
+                    (_stream_needs - now).total_seconds()
+                    - config["trading"].get("augment_deadline_buffer_seconds", 20),
                 )
+                _qqq_pool = ThreadPoolExecutor(max_workers=1)
+                _qqq_future = _qqq_pool.submit(
+                    _augment_selection, config, screener, market_data,
+                    pending_selection, ("qqq",),
+                )
+                try:
+                    pending_selection = _qqq_future.result(timeout=_qqq_deadline)
+                    logger.info(
+                        f"QQQ list finished in {time.monotonic() - _t0:.1f}s "
+                        f"(deadline was {_qqq_deadline:.0f}s)"
+                    )
+                except FutureTimeoutError:
+                    logger.warning(
+                        f"QQQ list did not finish within {_qqq_deadline:.0f}s - abandoning it "
+                        f"and keeping the screener's {len(pending_selection[0])} picks. "
+                        f"A list that lands after the stream's subscribe window costs "
+                        f"more than it adds."
+                    )
+                except Exception as e:
+                    logger.error(f"QQQ list failed ({e}) - keeping the screener's picks")
+                finally:
+                    _qqq_pool.shutdown(wait=False)
                 pending_qqq_done = True
-                logger.info(f"QQQ list finished in {time.monotonic() - _t0:.1f}s")
+                # The window may have opened while that ran.
+                _try_prestart_stream()
                 continue
 
             augment_time_today = now.replace(
@@ -2982,6 +3048,9 @@ def main():
                 finally:
                     aug_pool.shutdown(wait=False)
                 pending_augmented = True
+                # Same reason as after the QQQ build: this stage blocks the loop,
+                # and the subscribe window can open and close inside it.
+                _try_prestart_stream()
 
                 # The slot is deliberately tight (09:28, two minutes ahead of
                 # the bell) so the earnings surprise has had time to publish.

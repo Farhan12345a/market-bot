@@ -366,7 +366,20 @@ class PriceStream:
                 self.stop()
                 return
 
-            if time.monotonic() - self._started_at < NO_DATA_GIVE_UP_SECONDS:
+            # The clock starts at the OPEN, not at subscribe.
+            #
+            # The stream now subscribes up to 4 minutes pre-market, where IEX
+            # genuinely has almost no bars - it carries ~2% of US volume and
+            # most names simply do not print before the bell. A watchdog counting
+            # from subscribe therefore spends its whole 120s budget in a period
+            # where silence is the CORRECT observation, and kills a working
+            # socket seconds after the open. That is what happened on
+            # 2026-08-31: connected, zero bars, gave up at 09:30:39.
+            #
+            # 120 seconds of silence during MARKET HOURS is genuinely broken.
+            # 120 seconds of silence before the bell is just early.
+            since = max(self._started_at, self._market_open_monotonic())
+            if time.monotonic() - since < NO_DATA_GIVE_UP_SECONDS:
                 continue
 
             logger.error(
@@ -380,6 +393,48 @@ class PriceStream:
             self._gave_up = True
             self.stop()
             return
+
+    def clear_give_up(self):
+        """Allow one more connection attempt after the stream wrote itself off.
+
+        A give-up is meant to be final FOR A REASON that has been observed -
+        the feed rejected the subscription, or the socket is genuinely dead.
+        Before 2026-08-31 it could also fire for a reason that had not been
+        observed at all: silence during pre-market, when silence is normal. The
+        watchdog no longer counts that time, but a stream that gave up for any
+        reason before the bell has still been judged on pre-market evidence.
+
+        So the caller gets exactly one reset, at the open, where the evidence
+        actually means something. Returns True if there was a give-up to clear,
+        so the caller can say so rather than silently retrying.
+        """
+        if not self._gave_up:
+            return False
+        self._gave_up = False
+        self._stop_requested.clear()
+        self._started_at = time.monotonic()
+        return True
+
+    def _market_open_monotonic(self):
+        """Today's 09:30 ET as a monotonic timestamp, or -inf outside a session.
+
+        Returns -inf when the open has already passed, so the watchdog behaves
+        exactly as it always did once the session is under way: the max() in the
+        caller then falls through to _started_at. Only the pre-market case is
+        changed.
+        """
+        try:
+            import pytz
+            from datetime import datetime
+            et = pytz.timezone("America/New_York")
+            now = datetime.now(et)
+            open_at = now.replace(hour=9, minute=30, second=0, microsecond=0)
+            if now >= open_at:
+                return float("-inf")
+            return time.monotonic() + (open_at - now).total_seconds()
+        except Exception:
+            # Never let a clock problem disable the watchdog entirely.
+            return float("-inf")
 
     def stop(self):
         """Signal the background thread to stop and close the connection."""
