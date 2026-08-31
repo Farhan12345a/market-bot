@@ -1009,7 +1009,27 @@ trading:
   # universe; this only decides what is allowed into it. Roughly 600-900 US
   # equities clear $50M/day against ~1200-1500 at $20M, so at this floor
   # universe_size (1000) stops being the binding constraint and liquidity does.
-  universe_min_dollar_volume: 50000000
+  # 50M -> 3M for 2026-09-01.
+  #
+  # On 2026-08-31 this cut 10,999 scored symbols down to SIXTY-FOUR, against a
+  # universe_size of 1000. The dynamic universe therefore contributed almost
+  # nothing: the merged pool was 144 names of which 77 were the static list, so
+  # the "wider pool" was mostly the pool it was meant to widen.
+  #
+  # The cause is a unit mismatch. Free-tier historical bars are IEX-ONLY, and
+  # IEX carries roughly 2% of US consolidated volume, so a $50M floor measured
+  # on IEX volume is asking for about $2.5B of real volume - which only a few
+  # dozen names do. 64 of 11,000 is exactly the shape that predicts.
+  #
+  # 3M on IEX is roughly $150M consolidated, which is a genuine liquidity floor
+  # rather than a mega-cap filter. The real selection is the `top_n` sort by
+  # dollar volume that follows (universe_size, 1000) - this floor is only a
+  # sanity guard against illiquid names, and it was doing the sorting instead.
+  #
+  # CHECK THIS IN THE LOG: "universe: N symbols after the liquidity cut". If N
+  # is still under a few hundred, the floor is still wrong; if it is ~1000, the
+  # cut is being made by universe_size as intended.
+  universe_min_dollar_volume: 3000000
 
   # Symbols per batched bar request. A too-large request fails as a whole and
   # takes its chunk with it, so this bounds the blast radius of one bad response.

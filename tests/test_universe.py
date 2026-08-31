@@ -111,9 +111,15 @@ out = U.liquidity_cut(stats, CFG)
 check("above max_stock_price dropped", "RICH" not in out, out)
 check("below min_stock_price dropped", "CHEAP" not in out, out)
 check("illiquid dropped", "THIN" not in out, out)
-check("liquid in-band kept", set(out) == {"GOOD", "OK"}, out)
-check("a $30M name is below the $50M floor", "THIN2" not in out, out)
-check("ordered by dollar volume", out == ["GOOD", "OK"], out)
+# THIN2 at $30M now CLEARS the floor. The floor moved 50M -> 3M on 2026-09-01
+# because free-tier bars are IEX-only (~2% of consolidated volume), so $50M of
+# IEX volume was asking for ~$2.5B of real volume - it kept 64 of 10,999
+# symbols and the dynamic universe collapsed back onto the static list.
+# Selection is the top_n sort below, not this floor.
+check("liquid in-band kept", set(out) == {"GOOD", "OK", "THIN2"}, out)
+check("a $30M name now clears the floor", "THIN2" in out, out)
+check("ordered by dollar volume", out == ["GOOD", "OK", "THIN2"], out)
+check("...and $1M is still refused as genuinely illiquid", "THIN" not in out, out)
 small = copy.deepcopy(CFG); small["trading"]["universe_size"] = 1
 check("universe_size caps the list", U.liquidity_cut(stats, small) == ["GOOD"])
 

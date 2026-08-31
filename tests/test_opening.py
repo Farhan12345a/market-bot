@@ -386,8 +386,12 @@ check("3 slots left for the normal session",
 check("the ceiling does not apply", _ob["ignore_max_pct"] is True)
 check("the mode reads its OWN threshold, not rapid_increase_pct",
       "min_move_pct" in msrc and "ob.get(\"min_move_pct\"" in msrc)
-check("heavily-traded universe floor raised to $50M",
-      CFG["trading"]["universe_min_dollar_volume"] == 50_000_000)
+# 50M -> 3M on 2026-09-01. Measured on IEX-only bars, $50M demanded ~$2.5B of
+# consolidated volume and kept 64 of 10,999 symbols, so the "wider" pool was
+# mostly the 77-name static list it was meant to widen.
+check("the universe floor is a liquidity guard, not a mega-cap filter",
+      CFG["trading"]["universe_min_dollar_volume"] == 3_000_000,
+      CFG["trading"]["universe_min_dollar_volume"])
 
 print("\n=== 17. PER-TRADE EXIT PROFILE ===")
 from src.strategy.strategy import Strategy, TradeManager

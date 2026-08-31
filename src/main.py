@@ -2935,6 +2935,14 @@ def main():
                 except Exception as e:
                     logger.error(f"Pre-open stream start failed ({e}) - it will start at the open instead")
 
+            # Every iteration, unconditionally. The calls after the QQQ and
+            # earnings builds are EXTRA - they exist because those stages can
+            # block for minutes - but this one is what runs on a normal morning
+            # where both lists are already done and neither branch is entered.
+            # Without it the subscribe would depend on a list build happening to
+            # be in flight, which is not a schedule, it is a coincidence.
+            _try_prestart_stream()
+
             # --- QQQ list, early slot ---
             qqq_time_today = now.replace(
                 hour=qqq_hour, minute=qqq_minute, second=0, microsecond=0

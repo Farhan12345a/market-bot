@@ -94,6 +94,18 @@ check("...and compares the window against that fresh clock",
 check("it does nothing if the stream is already up",
       "not price_stream.is_running()" in MAIN)
 
+# The regression this nearly shipped with: if the ONLY calls are inside the QQQ
+# and earnings branches, then on a morning where both lists are already done
+# neither branch is entered and the stream never subscribes at all. There must
+# be a call that does not depend on a list build being in flight.
+_defn = MAIN.index("def _try_prestart_stream():")
+_qqq_branch = MAIN.index("# --- QQQ list, early slot ---")
+_between = MAIN[_defn:_qqq_branch]
+check("there is an unconditional call every iteration",
+      "\n            _try_prestart_stream()" in _between, _between[-200:])
+check("...and it is at loop indentation, not inside a branch",
+      any(l == "            _try_prestart_stream()" for l in _between.splitlines()))
+
 
 print("\n=== 3. THE WATCHDOG COUNTS MARKET TIME ===")
 check("the no-bars clock starts at the later of subscribe and the open",
@@ -150,6 +162,44 @@ check("earnings slot is inside the subscribe window or later, so the stream wins
       (t["list_builder_start_time"], prestart))
 check("the burst still decides before normal entries",
       t["opening_burst"]["decide_by"] <= t["entry_window_start"])
+
+print("\n=== 6. THE DYNAMIC UNIVERSE ACTUALLY WIDENS THE POOL ===")
+# 2026-08-31: 10,999 symbols scored -> 64 kept, against universe_size 1000. The
+# floor was doing the selecting instead of the top_n sort, because free-tier
+# bars are IEX-only (~2% of consolidated volume), so a $50M floor on IEX volume
+# asks for ~$2.5B of real volume. A pool that shrinks to the static list is not
+# a dynamic universe.
+from src.screener.universe import liquidity_cut
+_u = CFG["trading"]
+check("the liquidity floor is not a mega-cap filter",
+      _u["universe_min_dollar_volume"] <= 5_000_000, _u["universe_min_dollar_volume"])
+check("universe_size is what does the selecting", _u["universe_size"] >= 500, _u["universe_size"])
+check("...and the shortlist is smaller than the universe",
+      _u["universe_shortlist_size"] < _u["universe_size"])
+
+# A synthetic tape at realistic IEX scale.
+# $3M to $46M of IEX volume, i.e. roughly $150M-$2.3B consolidated. This is
+# where the tradeable middle of the market actually sits, and the old floor
+# excluded all of it.
+_stats = {f"S{i:03d}": {"price": 50.0, "dollar_volume": 3_000_000 + i * 143_000}
+          for i in range(300)}
+check("a realistic IEX-scale tape survives the floor",
+      len(liquidity_cut(_stats, CFG)) >= 200, len(liquidity_cut(_stats, CFG)))
+_old = {"trading": dict(_u, universe_min_dollar_volume=50_000_000)}
+check("...and the old floor would have kept none of it",
+      len(liquidity_cut(_stats, _old)) == 0, len(liquidity_cut(_stats, _old)))
+
+# The price band must still bite - an unbuyable name must never take a slot,
+# a stream subscription or a poll.
+_band = {"PENNY": {"price": 2.0, "dollar_volume": 900_000_000},
+         "RICH":  {"price": 900.0, "dollar_volume": 900_000_000},
+         "GOOD":  {"price": 50.0, "dollar_volume": 900_000_000}}
+check("the price band still excludes unbuyable names",
+      liquidity_cut(_band, CFG) == ["GOOD"], liquidity_cut(_band, CFG))
+# And a genuinely illiquid name must still be refused.
+_thin = {"THIN": {"price": 50.0, "dollar_volume": 100_000}}
+check("a truly illiquid name is still refused", liquidity_cut(_thin, CFG) == [])
+
 
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)
