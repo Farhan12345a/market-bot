@@ -401,19 +401,23 @@ n_, o_ = CFG["trading"], oc["trading"]
 check("first exit is tighter", o_["first_exit_loss_pct"] == -0.3 and n_["first_exit_loss_pct"] == -0.5)
 check("final exit is tighter", o_["final_exit_loss_pct"] == -0.6 and n_["final_exit_loss_pct"] == -1.0)
 check("trailing stop is tighter", o_["trailing_stop_pct"] == 0.40 and n_["trailing_stop_pct"] == 0.75)
+# 0.5/0.75/1.0 -> 0.75/1.0/1.25 for 2026-09-01.
 check("take-profit tiers are tighter than the session's",
-      [t["gain_pct"] for t in o_["take_profit_tiers"]] == [0.5, 0.75, 1.0],
+      [t["gain_pct"] for t in o_["take_profit_tiers"]] == [0.75, 1.0, 1.25],
       [t["gain_pct"] for t in o_["take_profit_tiers"]])
 check("...and every opening tier sits below the normal top tier",
       max(t["gain_pct"] for t in o_["take_profit_tiers"])
       < max(t["gain_pct"] for t in n_["take_profit_tiers"]))
 # The entry threshold and the first tier are measured from DIFFERENT anchors -
 # min_move_pct from the 09:30 baseline, take-profit from the entry price - so
-# them sharing the number 0.5 does not let a trade scale out on the move that
-# bought it. This asserts the anchors, not the numbers.
+# a trade cannot scale out on the move that bought it. This asserts the anchors,
+# not the numbers, so it survives a tier change.
 _tm = TradeManager("A", 100.0, 100, oc)
+_first = min(t["gain_pct"] for t in o_["take_profit_tiers"])
 check("a tier is measured from ENTRY, not from the session open",
-      _tm.check_take_profit(100.0 * 1.005)[0] > 0 and _tm.check_take_profit(100.0 * 1.004)[0] == 0)
+      _tm.check_take_profit(100.0 * (1 + _first / 100))[0] > 0
+      and _tm.check_take_profit(100.0 * (1 + (_first - 0.05) / 100))[0] == 0,
+      _first)
 # 0.2 -> 0.05 for 2026-08-31. Arms almost immediately so an opening trade that
 # ticks up cannot go on to lose. Note 0.05% is BELOW the 0.126% median bid-ask
 # measured on 2026-08-26, so the spread alone can both arm and trigger it - the
@@ -790,5 +794,60 @@ run(c11, md11, s11, e11, ["EARLY", "LATER"], st11, at("09:31", 30))
 check("a bigger later mover does NOT displace it (ranking is within a poll)",
       [o["symbol"] for o in e11.orders] == ["EARLY"], [o["symbol"] for o in e11.orders])
 
+print("\n=== 18. THE BURST RUNS ON A STREAM THAT COMES UP LATE ===")
+# The real-world failure three sessions running was never the threshold - it was
+# that no symbol had a price when the window opened. IEX carries ~2% of US
+# volume, so names appear as they happen to print there. The burst must survive
+# a stream that serves nothing at 09:30 and fills in over the following minutes.
+st_late = {"baseline": {}, "taken": [], "done": False}
+# Prices are consumed per read, and a symbol that is not streamed is never
+# read - so these two values are the FIRST and SECOND prints each symbol makes
+# once it appears, not a fixed 09:30/09:31 schedule.
+md_late = MD({"A": [100.0, 101.0], "B": [50.0, 50.1]}, streamed=set())
+e_late, s_late = Exec(), Strat()
+c_late = cfg()
+check("nothing measured while the stream serves no symbols",
+      run(c_late, md_late, s_late, e_late, ["A", "B"], st_late, at("09:30")) == 0
+      and not st_late["baseline"])
+check("...and the window is NOT closed by that",
+      st_late.get("done") is not True)
+
+# 09:31 - the stream starts serving. Baselines are taken on FIRST print, so a
+# symbol that appears late still gets one; it is measured from when it appeared,
+# which is the honest reading.
+md_late.streamed = {"A", "B"}
+run(c_late, md_late, s_late, e_late, ["A", "B"], st_late, at("09:31"))
+check("a late-arriving symbol still gets a baseline", set(st_late["baseline"]) == {"A", "B"},
+      st_late["baseline"])
+check("...and the baseline is its FIRST price, not the 09:30 one it never sent",
+      st_late["baseline"]["A"] == 100.0, st_late["baseline"])
+
+# 09:32 - it moves. Still inside the window, so it can still be bought.
+run(c_late, md_late, s_late, e_late, ["A", "B"], st_late, at("09:32"))
+bought_late = [o["symbol"] for o in e_late.orders]
+check("a symbol that qualifies after a late start is still bought",
+      "A" in bought_late, bought_late)
+check("...and one that did not move is not", "B" not in bought_late, bought_late)
+
+# The window still closes on time regardless of when the stream arrived.
+run(c_late, md_late, s_late, e_late, ["A", "B"], st_late, at("09:33"))
+check("the window still closes at decide_by", st_late["done"] is True)
+
+print("\n=== 19. TAKE-PROFIT TIERS ===")
+_oc = M._opening_exit_config(CFG)
+_tiers = [t["gain_pct"] for t in _oc["trading"]["take_profit_tiers"]]
+check("burst tiers are 0.75/1.0/1.25", _tiers == [0.75, 1.0, 1.25], _tiers)
+check("...still tighter than the session's top tier",
+      max(_tiers) < max(t["gain_pct"] for t in CFG["trading"]["take_profit_tiers"]))
+check("...and strictly increasing", _tiers == sorted(_tiers) and len(set(_tiers)) == 3)
+_fracs = [t["sell_fraction"] for t in _oc["trading"]["take_profit_tiers"]]
+check("the last tier closes the position", _fracs[-1] == 1.0, _fracs)
+# A tier must not be reachable by the entry move itself: tiers measure from
+# ENTRY, min_move_pct from the 09:30 baseline, so the first tier has to sit
+# above zero regardless - but it must also not be so low the spread reaches it.
+check("the first tier clears the measured bid-ask", _tiers[0] > 0.126, _tiers[0])
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)
+
+
