@@ -415,13 +415,13 @@ check("a tier is measured from ENTRY, not from the session open",
 # measured on 2026-08-26, so the spread alone can both arm and trigger it - the
 # expected outcome is scratches at +0.05% rather than winners or losers, and the
 # exit-reason table is where that will show.
-check("breakeven arms sooner", [t["trigger_pct"] for t in o_["breakeven_tiers"]] == [0.127])
+check("breakeven arms sooner", [t["trigger_pct"] for t in o_["breakeven_tiers"]] == [0.15])
 # The number is not round on purpose: 0.127% sits just above the 0.126% median
 # bid-ask measured on 2026-08-26. A trigger INSIDE the spread can be armed by
 # one print crossing it and fired by the next crossing back, which protects
 # against noise instead of against losses. This is the smallest honest trigger.
 check("...and it sits outside the measured bid-ask, not inside it",
-      o_["breakeven_tiers"][0]["trigger_pct"] > 0.126)
+      o_["breakeven_tiers"][0]["trigger_pct"] >= 0.126 * 1.15)
 check("...and the floor sits ABOVE entry, so an armed trade cannot lose",
       [t["floor_pct"] for t in o_["breakeven_tiers"]] == [0.05])
 

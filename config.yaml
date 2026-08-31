@@ -192,7 +192,10 @@ trading:
       # trigger_pct back toward 0.2-0.3 so the floor arms after the noise band
       # rather than inside it.
       breakeven_tiers:
-        # 0.127 = just ABOVE the 0.126% median bid-ask measured on 2026-08-26.
+        # 0.15 = clear of the 0.126% median bid-ask measured on 2026-08-26, with
+        # margin. 0.127 sat only 0.001pp above it, which is not really clearance
+        # at all - the median is a median, so half the symbols quote WIDER than
+        # it, and for those a 0.127 trigger is still inside the spread.
         # 0.05 was tried first and rejected on arithmetic: a trigger inside the
         # spread can be armed by one print crossing it and fired by the next
         # crossing back, so the floor would have caught noise rather than moves.
@@ -205,7 +208,7 @@ trading:
         # WATCH ON 2026-08-31: if BREAKEVEN_STOP dominates the opening trades'
         # exit reasons AND the "ran further" column shows those moves continued,
         # this is still arming too early - raise to 0.2-0.3.
-        - {trigger_pct: 0.127, floor_pct: 0.05}
+        - {trigger_pct: 0.15, floor_pct: 0.05}
 
   # Subscribe the WebSocket this many minutes BEFORE the open.
   #
@@ -224,7 +227,12 @@ trading:
   # list is ready rather than waiting for a narrow slot, which matters on a
   # morning when the earnings calendar fetch runs slow.
   stream_prestart_minutes: 4
-  entry_window_end: "09:55"          # Stop looking for NEW entries after this time (HH:MM ET). Widened from 09:45.
+  # Widened 09:55 -> 10:00 for 2026-08-31, alongside moving the breadth halt to
+  # 09:45. The two go together: a later halt only buys more evidence if there is
+  # still window left to trade after it, and at a 09:45 halt against a 09:55 end
+  # only 10 of 22 minutes remained. 09:33-10:00 gives 27 minutes, so the halt
+  # decision is made on 15 minutes of tape with 15 minutes still to act on.
+  entry_window_end: "10:00"          # Stop looking for NEW entries after this time (HH:MM ET).
   # --- Real-time price stream ---
   # Alpaca's free tier delays the REST historical endpoint by ~15 minutes but
   # carries the same IEX data LIVE over the WebSocket - a delivery-mechanism
@@ -838,7 +846,7 @@ trading:
   # would reopen trading on the same evidence that closed it.
   breadth_halt:
     enabled: true
-    check_time: "09:40"      # 10 minutes of tape, as requested
+    check_time: "09:45"      # 15 minutes of tape, paired with the 10:00 window end
     min_mean_pct: -0.3       # halt if the watchlist mean is below this
     min_symbols: 5           # never conclude anything from fewer than this many
 

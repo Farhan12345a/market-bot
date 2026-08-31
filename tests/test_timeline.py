@@ -220,7 +220,21 @@ prev = subprocess.run(["git", "show", "b466429:config.yaml"],
                       capture_output=True, text=True, cwd=REPO)
 if prev.returncode == 0:
     old = yaml.safe_load(prev.stdout)["trading"]
-    same = ["entry_window_start", "entry_window_end", "rapid_increase_pct",
+    # DELIBERATE changes since the winning session, listed with what they must
+    # now be. Moving a key here rather than deleting it keeps the drift check
+    # honest: an accidental edit still fails, it just fails against the new
+    # value. A key that is neither in `same` nor here is not being watched at
+    # all, which is the state this block exists to prevent.
+    changed = {
+        # Widened with the breadth halt at 09:45 - a later halt only buys tape
+        # if there is window left to trade after it.
+        "entry_window_end": "10:00",
+    }
+    for k, want in changed.items():
+        check(f"{k} deliberately changed to {want}", t.get(k) == want,
+              (old.get(k), t.get(k)))
+
+    same = ["entry_window_start", "rapid_increase_pct",
             "rapid_increase_max_pct", "rapid_increase_lookback_minutes",
             "max_concurrent_positions", "max_daily_entries", "max_daily_loss_usd",
             "first_exit_loss_pct", "final_exit_loss_pct", "trailing_stop_pct",

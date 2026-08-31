@@ -416,9 +416,12 @@ class Executor:
         # selection working or failing; it is one sector call, taken twice,
         # sized as if it were nine independent bets.
         #
-        # Counted from open_entries (symbols the broker holds for us) rather
-        # than from a separate tally, so a position that closed stops counting
-        # immediately.
+        # Counted from _open_symbols, the SAME reconciled set that
+        # max_concurrent_positions above uses - not from open_entries, which
+        # keeps an entry price around for P&L attribution and can therefore
+        # still name a symbol the broker no longer holds. Two concentration
+        # guards disagreeing about what is held is how one of them ends up
+        # refusing entries against positions that closed minutes ago.
         max_per_sector = self.config["trading"].get("max_positions_per_sector")
         if max_per_sector and symbol:
             try:
@@ -428,13 +431,13 @@ class Executor:
                 # is never refused - better to let one through than to lump every
                 # unknown name into a single phantom bucket and starve it.
                 if sector:
-                    held = sum(1 for s_ in self.open_entries
+                    held = sum(1 for s_ in self._open_symbols
                                if s_ != symbol and sector_for(s_) == sector)
                     if held >= max_per_sector:
                         return False, (
                             f"at max_positions_per_sector for {sector} "
                             f"({held}/{max_per_sector}) - already holding "
-                            f"{', '.join(sorted(s_ for s_ in self.open_entries if sector_for(s_) == sector))}"
+                            f"{', '.join(sorted(s_ for s_ in self._open_symbols if sector_for(s_) == sector))}"
                         )
             except Exception as e:
                 # Never block an entry because the sector map failed to load.
