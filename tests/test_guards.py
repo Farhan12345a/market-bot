@@ -185,7 +185,7 @@ _t = CFG["trading"]
 _h = _t["breadth_halt"]
 check("halt is enabled", _h["enabled"] is True)
 check("halt checks at 09:45", _h["check_time"] == "09:45")
-check("entry window ends 10:00", _t["entry_window_end"] == "10:00")
+check("entry window ends 10:15", _t["entry_window_end"] == "10:15")
 # A halt only buys evidence if there is still window left to act on afterwards.
 _start = _t["entry_window_start"]
 check("the halt lands INSIDE the entry window",

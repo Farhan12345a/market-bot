@@ -226,9 +226,15 @@ if prev.returncode == 0:
     # value. A key that is neither in `same` nor here is not being watched at
     # all, which is the state this block exists to prevent.
     changed = {
-        # Widened with the breadth halt at 09:45 - a later halt only buys tape
-        # if there is window left to trade after it.
-        "entry_window_end": "10:00",
+        # Widened again for 2026-09-02: the four positions that survive the
+        # 09:45 halt (or any earlier entry still working) get more room to
+        # reach take-profit before the window closes. The halt's own -0.3%
+        # floor is untouched - this is downstream of it, not a loosening of it.
+        "entry_window_end": "10:15",
+        # 2000 -> 1000 for 2026-09-02. 2000 was raised in test to let a session
+        # run further before halting; set back now that measurement isn't the
+        # goal. See config.yaml for the real-money reminder attached to this.
+        "max_daily_loss_usd": 1000,
     }
     for k, want in changed.items():
         check(f"{k} deliberately changed to {want}", t.get(k) == want,
@@ -236,7 +242,7 @@ if prev.returncode == 0:
 
     same = ["entry_window_start", "rapid_increase_pct",
             "rapid_increase_max_pct", "rapid_increase_lookback_minutes",
-            "max_concurrent_positions", "max_daily_entries", "max_daily_loss_usd",
+            "max_concurrent_positions", "max_daily_entries",
             "first_exit_loss_pct", "final_exit_loss_pct", "trailing_stop_pct",
             "take_profit_tiers", "breakeven_tiers", "use_resistance_exit",
             "use_breakeven_floor", "reentry_cooldown_minutes",

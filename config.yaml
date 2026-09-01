@@ -234,9 +234,15 @@ trading:
   # Widened 09:55 -> 10:00 for 2026-08-31, alongside moving the breadth halt to
   # 09:45. The two go together: a later halt only buys more evidence if there is
   # still window left to trade after it, and at a 09:45 halt against a 09:55 end
-  # only 10 of 22 minutes remained. 09:33-10:00 gives 27 minutes, so the halt
-  # decision is made on 15 minutes of tape with 15 minutes still to act on.
-  entry_window_end: "10:00"          # Stop looking for NEW entries after this time (HH:MM ET).
+  # only 10 of 22 minutes remained.
+  #
+  # 10:00 -> 10:15 for 2026-09-02. The halt itself stays at 09:45 pending
+  # ops/breadth-counterfactual.py against a few more sessions - widening this
+  # alone gives the four positions that survive the halt (or any pre-halt
+  # entry still working) more room to reach take-profit before the window
+  # closes, without loosening the -0.3% floor that decided whether new
+  # entries opened at all.
+  entry_window_end: "10:15"          # Stop looking for NEW entries after this time (HH:MM ET).
   # --- Real-time price stream ---
   # Alpaca's free tier delays the REST historical endpoint by ~15 minutes but
   # carries the same IEX data LIVE over the WebSocket - a delivery-mechanism
@@ -719,9 +725,16 @@ trading:
   # setting paper_trading: false cannot quietly put the account in violation.
   min_account_equity_usd: 25000
 
-  max_daily_loss_usd: 2000  # Stop trading if daily loss exceeds this. Raised 1000 -> 2000 to let a
-                             # test session run further before halting - at 1000 the limit would have
-                             # ended 2026-08-19 at exit 17 of 71, collecting little data.
+  # 1000 -> 2000 -> 1000 for 2026-09-02. Raised in test to let a session run
+  # further before halting rather than cut off early on a small paper account
+  # (at 1000 the 2026-08-19 limit would have ended at exit 17 of 71, collecting
+  # little data). Set back to 1000 now that measurement isn't the goal.
+  #
+  # REMINDER: this is a paper-account number. Before trading with real money,
+  # re-derive it from actual account size and real risk tolerance rather than
+  # carrying this value over - it was picked to keep a test session running,
+  # not as a considered real-money risk limit.
+  max_daily_loss_usd: 1000  # Stop trading if daily loss exceeds this.
 
   # --- Burst throttle ---
   # When many symbols signal in the SAME poll they are rarely independent
