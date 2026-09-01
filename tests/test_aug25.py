@@ -16,10 +16,18 @@ print("=== A. CANCEL BEFORE EXIT (the 2026-08-24 wash-trade bug) ===")
 class Order:
     def __init__(s,i,side="buy",filled=40,qty=79): s.id=i; s.side=side; s.filled_qty=filled; s.qty=qty
 class Broker:
-    def __init__(s, open_orders=None, cancel_boom=False, list_boom=False, sell_boom=False):
+    # holdings models what the broker ACTUALLY holds, independent of
+    # open_orders/sold - every scenario in this file exits a real, already-
+    # filled HOOD position (79 shares), so the phantom-entry guard in
+    # submit_exit_order (added 2026-09-02) must see it as genuinely held, not
+    # as a phantom. A bare `get_positions(): return {}` used to be fine here
+    # because nothing read it; now it decides whether the sell fires at all.
+    def __init__(s, open_orders=None, cancel_boom=False, list_boom=False, sell_boom=False,
+                 holdings=None):
         s.open_orders=open_orders or []; s.cancelled=[]; s.sold=[]
         s.cancel_boom=cancel_boom; s.list_boom=list_boom; s.sell_boom=sell_boom
         s.order=0
+        s.holdings = dict(holdings) if holdings is not None else {"HOOD": 79}
     def cancel_open_orders(s,sym):
         if s.list_boom: raise RuntimeError("orders endpoint down")
         n=0
@@ -31,9 +39,13 @@ class Broker:
         if side=="sell" and s.sell_boom and s.open_orders:
             raise RuntimeError('potential wash trade detected')
         s.sold.append((sym,qty,side)); s.order+=1
+        if side=="sell":
+            s.holdings[sym] = max(0, s.holdings.get(sym, 0) - qty)
         return types.SimpleNamespace(id=f"o{s.order}")
     def get_account(s): return types.SimpleNamespace(cash="90000",equity="90000",buying_power="90000")
-    def get_positions(s): return {}
+    def get_positions(s):
+        return {sym: types.SimpleNamespace(symbol=sym, qty=str(q))
+                for sym, q in s.holdings.items() if q}
 
 def mkex(broker):
     ex=Executor(broker, copy.deepcopy(CFG))

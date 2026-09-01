@@ -43,6 +43,20 @@ PARTIAL_EXIT_REASONS = {"FIRST_EXIT_-0.5%", "TAKE_PROFIT"}
 # is_partial_exit takes the quantities.
 TAKE_PROFIT_PREFIX = "TAKE_PROFIT"
 
+# Returned by submit_exit_order when there is nothing to sell: the broker
+# holds zero shares of the symbol, so the "position" was a phantom - see
+# submit_exit_order's PHANTOM ENTRY GUARD for how that happens.
+#
+# A third, distinct outcome from the existing two. `order is not None` means
+# a real sell filled; `order is None` means a real attempt failed and should
+# be retried next poll. Neither fits "there was nothing to try in the first
+# place" - treating it as either would be wrong: as success, it would try to
+# confirm_exit() a sale that never happened; as failure, it would retry an
+# identical sell against the same zero holding forever, which is exactly what
+# happened to NOW/PLTR/MSTR/RGTI/SOXL for 45+ minutes on 2026-09-01 before
+# no_shorting turned the retries into log noise instead of real shorts.
+PHANTOM_EXIT = object()
+
 
 def is_partial_exit(reason, qty, qty_before):
     """
@@ -135,6 +149,12 @@ class Executor:
         self._entry_recorded_at = {}  # symbol -> time.monotonic() when we recorded the entry
         self._last_close_at = {}  # symbol -> (time.monotonic() at full close, closed_at_loss) for the re-entry cooldown
         self._pending_cost = {}  # symbol -> cost basis, for exposure while the broker lags
+        # symbol -> the qty submit_exit_order ACTUALLY submitted, when it
+        # differs from what the caller asked for (the phantom-entry guard
+        # corrects a stale/over-large qty down to what the broker really
+        # holds). The caller commits to Strategy with the qty it originally
+        # computed unless it reads this first - see exit_qty_actually_submitted.
+        self._last_exit_qty = {}
 
     def refresh_account_snapshot(self):
         """
@@ -560,6 +580,79 @@ class Executor:
             # submit below may hit the same rejection it would have anyway.
             logger.debug(f"{symbol}: pre-exit cancel failed, submitting anyway: {e}")
 
+        # PHANTOM ENTRY GUARD.
+        #
+        # submit_entry_order records the position (open_entries, _open_symbols,
+        # strategy.trades via the caller) the instant the entry ORDER is
+        # SUBMITTED, not once it FILLS - a market order is not guaranteed to
+        # fill before the next ~10s poll, and Alpaca's own fill latency is
+        # occasionally longer than that gap. On 2026-09-01, NOW's exit check
+        # fired while its entry BUY was still "working, 0/28 filled": this
+        # code cancelled that working BUY (see above) and then submitted a
+        # SELL for the full tracked qty against a position that had never
+        # actually been bought - a short, rejected by no_shorting, retried
+        # every ~10s for the rest of the session because nothing here ever
+        # asked "does the broker actually hold anything to sell." The same
+        # shape hit PLTR, MSTR, RGTI, SOXL the same day.
+        #
+        # Ask the broker what it ACTUALLY holds right before selling, rather
+        # than trusting the qty this call was handed:
+        #   - 0 shares: the entry never filled (or was already fully closed by
+        #     some other path). There is nothing to sell. Clean up the
+        #     phantom's bookkeeping directly and hand the caller PHANTOM_EXIT
+        #     instead of submitting an order that can only be rejected or,
+        #     worse, silently open a real short if no_shorting were ever off.
+        #   - fewer shares than requested: a genuine partial fill the poll
+        #     cycle hasn't reconciled yet (refresh_account_snapshot's qty
+        #     correction only runs OUTSIDE the entry grace window). Sell what
+        #     is actually held instead of over-asking and hitting Alpaca's
+        #     "insufficient qty available" rejection - CRM hit exactly this on
+        #     2026-09-01 (requested 16, available 15).
+        # One extra get_positions() call per exit attempt, not per poll - exits
+        # are far rarer than polls, so this is not the cost entry-side
+        # per-symbol checks would be.
+        try:
+            live_positions = self.broker.get_positions()
+        except Exception as e:
+            logger.debug(
+                f"{symbol}: could not verify live quantity before exiting "
+                f"({e}) - proceeding with the tracked qty"
+            )
+            live_positions = None
+
+        if live_positions is not None:
+            live_pos = live_positions.get(symbol)
+            try:
+                live_qty = int(abs(float(getattr(live_pos, "qty", 0) or 0))) if live_pos else 0
+            except (TypeError, ValueError):
+                live_qty = None
+
+            if live_qty == 0:
+                logger.warning(
+                    f"{symbol}: exit skipped - the broker holds 0 shares "
+                    f"(the entry never filled). Dropping the phantom position "
+                    f"instead of selling against nothing."
+                )
+                self._open_symbols.discard(symbol)
+                self._entry_recorded_at.pop(symbol, None)
+                self._pending_cost.pop(symbol, None)
+                self.open_entries.pop(symbol, None)
+                return PHANTOM_EXIT
+
+            if live_qty is not None and live_qty < qty:
+                logger.info(
+                    f"{symbol}: exit qty corrected {qty} -> {live_qty} "
+                    f"(broker holds less than tracked)"
+                )
+                qty = live_qty
+                # The caller (main.py) computed its own qty before this call
+                # and commits to Strategy with THAT number unless it checks
+                # here first - see exit_qty_actually_submitted(). Without this,
+                # confirm_exit would subtract more than was actually sold,
+                # taking qty_remaining negative or below what the broker
+                # genuinely still holds.
+                self._last_exit_qty[symbol] = qty
+
         try:
             order = self.broker.submit_market_order(symbol, qty, side="sell")
         except Exception as e:
@@ -664,6 +757,23 @@ class Executor:
             logger.error(f"Exit order for {symbol} filled but record-keeping failed: {e}")
 
         return order
+
+    def exit_qty_actually_submitted(self, symbol, default):
+        """
+        The qty the last submit_exit_order() call for `symbol` actually
+        submitted, if the phantom-entry guard corrected it down from what the
+        caller asked for - otherwise `default`.
+
+        Call this AFTER submit_exit_order() and BEFORE strategy.confirm_exit(),
+        with the qty the caller itself computed as `default`. Without it,
+        confirm_exit commits whatever the caller originally decided even when
+        this class sold less (a broker-side partial fill it corrected for),
+        which subtracts too much from qty_remaining and can take it negative.
+
+        Pops the value - a correction is a one-time fact about that specific
+        exit call, not a standing override for the symbol's next one.
+        """
+        return self._last_exit_qty.pop(symbol, default)
 
     def _add_realized_pnl(self, pl):
         """

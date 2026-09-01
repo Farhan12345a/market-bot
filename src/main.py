@@ -30,7 +30,7 @@ from src.broker.alpaca_broker import AlpacaBroker
 from src.strategy.strategy import Strategy, TradeManager
 from src.data.market_data import MarketDataManager
 from src.data.stream import PriceStream
-from src.executor.executor import Executor
+from src.executor.executor import Executor, PHANTOM_EXIT
 from src.screener.stock_screener import StockScreener
 from src.screener.list_builder import augment_symbols
 from src.notifications.email_notifier import EmailNotifier
@@ -1777,8 +1777,23 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         # one by the numbers rather than by the reason string.
                         qty_before=(trade.qty_remaining if trade else None),
                     )
-                    if order is not None:
-                        strategy.confirm_exit(symbol, exit_info["qty"], exit_info["reason"], exit_info["price"])
+                    if order is PHANTOM_EXIT:
+                        # The broker held zero shares - the entry never
+                        # filled. Nothing was bought or sold, so there is no
+                        # trade to commit; confirm_exit's P&L math assumes a
+                        # real fill happened and would be wrong here. Drop the
+                        # phantom directly instead of retrying a sell against
+                        # nothing every poll for the rest of the session (the
+                        # 2026-09-01 shape: NOW/PLTR/MSTR/RGTI/SOXL, 45+
+                        # minutes of identical retries).
+                        strategy.drop_phantom(symbol)
+                    elif order is not None:
+                        # The executor may have corrected the qty down from
+                        # what was requested (a broker-side partial fill it
+                        # caught before submitting) - commit whatever it
+                        # actually sold, not what was originally computed.
+                        actual_qty = executor.exit_qty_actually_submitted(symbol, exit_info["qty"])
+                        strategy.confirm_exit(symbol, actual_qty, exit_info["reason"], exit_info["price"])
                         had_any_trades = True
                     else:
                         logger.error(

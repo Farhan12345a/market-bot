@@ -722,6 +722,22 @@ class Strategy:
         else:
             return {"action": "PARTIAL_EXIT", "symbol": symbol, "qty": qty, "reason": reason, "price": price}
 
+    def drop_phantom(self, symbol):
+        """
+        Remove a tracked position that was never actually held at the broker -
+        the entry order was submitted but never filled, so `confirm_entry` was
+        called (submit_entry_order only checks the order was ACCEPTED, not
+        FILLED) against shares that do not exist.
+
+        Distinct from confirm_exit: that commits a REAL sale (updates
+        qty_remaining, records realized P&L). This commits nothing, because
+        nothing was ever bought or sold - the position is simply wrong and
+        needs to stop being checked. A no-op if the symbol isn't tracked,
+        since the executor's phantom-guard and this call can both observe
+        the same broker state on a busy poll.
+        """
+        self.trades.pop(symbol, None)
+
     def get_open_trades(self):
         """Return all open trades"""
         return self.trades.copy()
