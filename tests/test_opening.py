@@ -399,7 +399,7 @@ oc = M._opening_exit_config(CFG)
 check("an exits block produces an override config", oc is not None)
 n_, o_ = CFG["trading"], oc["trading"]
 check("first exit is tighter", o_["first_exit_loss_pct"] == -0.3 and n_["first_exit_loss_pct"] == -0.5)
-check("final exit is tighter", o_["final_exit_loss_pct"] == -0.6 and n_["final_exit_loss_pct"] == -1.0)
+check("final exit is tighter", o_["final_exit_loss_pct"] == -0.35 and n_["final_exit_loss_pct"] == -1.0)
 check("trailing stop is tighter", o_["trailing_stop_pct"] == 0.40 and n_["trailing_stop_pct"] == 0.75)
 # 0.5/0.75/1.0 -> 0.75/1.0/1.25 for 2026-09-01.
 check("take-profit tiers are tighter than the session's",
@@ -846,6 +846,57 @@ check("the last tier closes the position", _fracs[-1] == 1.0, _fracs)
 # ENTRY, min_move_pct from the 09:30 baseline, so the first tier has to sit
 # above zero regardless - but it must also not be so low the spread reaches it.
 check("the first tier clears the measured bid-ask", _tiers[0] > 0.126, _tiers[0])
+
+print("\n=== 20. MULTI-FACTOR GATE: move must clear its OWN spread, not just min_move_pct ===")
+check("shipped enabled at 2x", CFG["trading"]["opening_burst"]["min_move_to_spread_ratio"] == 2.0)
+
+
+class MDSpread(MD):
+    """Same fake as everywhere else in this file, plus a quote broker so
+    _spread_pct (which _run_opening_burst's gate reads directly, unlike its
+    normal journal-only callers) has something to measure."""
+    def __init__(self, prices, spreads, streamed=None):
+        super().__init__(prices, streamed=streamed)
+        self.broker = types.SimpleNamespace(
+            get_latest_quote=lambda s: {"spread": spreads.get(s)} if s in spreads else None
+        )
+
+
+# WIDE: +0.4% move, but a $0.30 spread on a $100 stock is 0.3% - the move is
+# only 1.33x its own spread, under the 2.0x ratio, so it reads as noise.
+# TIGHT: same +0.4% move, a one-cent spread - comfortably 40x itself, real.
+st = {"baseline": {}, "taken": [], "done": False}
+md = MDSpread({"WIDE": [100.0, 100.4], "TIGHT": [100.0, 100.4]},
+              {"WIDE": 0.30, "TIGHT": 0.01})
+s_, e_ = Strat(), Exec()
+c = cfg(min_move_pct=0.3, min_move_to_spread_ratio=2.0)
+run(c, md, s_, e_, ["WIDE", "TIGHT"], st, at("09:30"))
+run(c, md, s_, e_, ["WIDE", "TIGHT"], st, at("09:31"))
+bought = [o["symbol"] for o in e_.orders]
+check("a move that clears min_move_pct but not 2x its own spread is refused",
+      "WIDE" not in bought, bought)
+check("the same-sized move on a tight spread is bought",
+      "TIGHT" in bought, bought)
+
+# Symbol with no quote available (the common case - _spread_pct is best-effort
+# and this mode ran before this gate existed without it) is NOT penalized -
+# "unmeasurable" is not "bad", same rule the continuation score already uses.
+st2 = {"baseline": {}, "taken": [], "done": False}
+md2 = MDSpread({"NOQUOTE": [100.0, 100.4]}, {})
+e2 = Exec()
+run(c, md2, Strat(), e2, ["NOQUOTE"], st2, at("09:30"))
+run(c, md2, Strat(), e2, ["NOQUOTE"], st2, at("09:31"))
+check("no quote available -> gate does not refuse it",
+      "NOQUOTE" in [o["symbol"] for o in e2.orders])
+
+# ratio: 0 disables the gate outright, same shape as every other 0-disables
+# knob in this config (rapid_increase_max_pct, market_burst_spy_pct, ...).
+st3 = {"baseline": {}, "taken": [], "done": False}
+md3 = MDSpread({"WIDE": [100.0, 100.4]}, {"WIDE": 0.30})
+e3 = Exec()
+run(cfg(min_move_pct=0.3, min_move_to_spread_ratio=0), md3, Strat(), e3, ["WIDE"], st3, at("09:30"))
+run(cfg(min_move_pct=0.3, min_move_to_spread_ratio=0), md3, Strat(), e3, ["WIDE"], st3, at("09:31"))
+check("ratio 0 disables the gate", "WIDE" in [o["symbol"] for o in e3.orders])
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

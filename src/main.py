@@ -147,6 +147,94 @@ def _breadth_halt(config, market_data, symbols, state, now, et):
     return False
 
 
+def _regime_multiplier(config, state, breadth_state, spy_history, now, et):
+    """
+    Scale new-entry SIZE by how the tape has behaved since the open, instead
+    of breadth_halt's binary stop/don't-stop.
+
+    REPLACES breadth_halt when trading.regime_sizing.enabled is true - see the
+    call site in run_trading_day, which runs one or the other, never both.
+    breadth_halt's own note names the problem this fixes: "there was just
+    nothing to select from" on a losing day, and no amount of better picking
+    fixes a tape with no upside in it. A hard halt makes that literally true -
+    it refuses every remaining signal regardless of quality. Scaling size
+    instead means a neutral or bearish reading still takes fewer, smaller
+    positions rather than zero, which is strictly more breadth for the same
+    bandaid intent (don't commit full size into a weak tape).
+
+    Uses the SAME evidence breadth_halt does - the watchlist's own mean move
+    since the open (breadth_state["mean_move"], populated as a side effect of
+    the breadth measurement below) - plus SPY's own move since the open as a
+    broad-market trend reading. QQQ is deliberately left out of this first cut:
+    it is not currently streamed or benchmarked anywhere in this file (only
+    SPY and the day's sector ETFs are - see _benchmark_symbols), and SPY is
+    already the market proxy used everywhere else in this module
+    (market_burst_spy_pct, excess_vs_spy_pct). Adding a second index is a real
+    but separate piece of work, not a blocker to shipping this with one.
+
+    Evaluated once, at check_time, and latched for the rest of the day - same
+    reasoning as breadth_halt: a mid-morning bounce is not new evidence about
+    the SESSION, it is the noise the check_time delay already exists to filter.
+
+    Returns (multiplier, label). label is None before check_time or when
+    there isn't enough evidence yet to read a regime (mirrors breadth_halt's
+    min_symbols guard) - both cases return a 1.0 multiplier, i.e. "no opinion
+    yet" rather than "penalize for missing data".
+    """
+    rc = config.get("trading", {}).get("regime_sizing") or {}
+    if not rc.get("enabled"):
+        return 1.0, None
+    if "multiplier" in state:
+        return state["multiplier"], state.get("label")
+
+    try:
+        check_at = parse_hhmm_today(rc.get("check_time", "09:45"), et)
+    except Exception:
+        return 1.0, None
+    if now < check_at:
+        return 1.0, None
+
+    breadth_move = breadth_state.get("mean_move")
+    spy_open = (breadth_state.get("open_px") or {}).get("SPY")
+    spy_now = spy_history[-1][1] if spy_history else None
+    spy_move = ((spy_now - spy_open) / spy_open * 100) if spy_open and spy_now else None
+
+    readings = [m for m in (breadth_move, spy_move) if m is not None]
+    if not readings:
+        # Same "too thin to conclude anything" guard breadth_halt uses - stay
+        # at full size on no evidence rather than penalize for missing data.
+        return 1.0, None
+
+    bearish_floor = rc.get("bearish_below_pct", -0.3)
+    bullish_floor = rc.get("bullish_above_pct", 0.0)
+    bullish_mult = rc.get("bullish_multiplier", 1.0)
+    neutral_mult = rc.get("neutral_multiplier", 0.5)
+    bearish_mult = rc.get("bearish_multiplier", 0.15)
+
+    # Either reading being bearish is enough to call the regime bearish - a
+    # weak market OR weak selection each independently argue for less size.
+    # BOTH must clear the bullish floor to call it bullish - one strong
+    # reading while the other is merely adequate is the neutral case, not the
+    # confident one.
+    if any(m < bearish_floor for m in readings):
+        mult, label = bearish_mult, "bearish"
+    elif all(m >= bullish_floor for m in readings):
+        mult, label = bullish_mult, "bullish"
+    else:
+        mult, label = neutral_mult, "neutral"
+
+    state["multiplier"] = mult
+    state["label"] = label
+    bm = f"{breadth_move:+.3f}%" if breadth_move is not None else "n/a"
+    sm = f"{spy_move:+.3f}%" if spy_move is not None else "n/a"
+    logger.warning(
+        f"===== REGIME at {now:%H:%M} ET: {label.upper()} (watchlist breadth "
+        f"{bm}, SPY {sm} since the open) - new entries sized at {mult:g}x for "
+        f"the rest of the day. Open positions and their exits are untouched. ====="
+    )
+    return mult, label
+
+
 def _benchmark_symbols(config, symbols):
     """
     Context symbols to stream alongside the watchlist: SPY plus whichever sector
@@ -1018,7 +1106,14 @@ def _position_size(config, executor, price):
     if not budgets:
         return 0
 
-    return int(min(budgets) / price)
+    # Set by run_trading_day once per poll (default 1.0 = no change) when
+    # trading.regime_sizing is enabled - see _regime_multiplier. Applied here,
+    # after the three ceilings, so it composes with EVERY caller's own
+    # size_multiplier (burst throttle, the opening-burst mode's 0.5x) rather
+    # than needing to be threaded into each one individually.
+    regime_mult = getattr(executor, "regime_size_multiplier", 1.0)
+
+    return int(min(budgets) / price * regime_mult)
 
 def _summarise_burst_notes(config, notes):
     """
@@ -1062,8 +1157,12 @@ def _spread_pct(market_data, symbol, price):
     Measuring it directly is what would eventually allow keeping a cheap stock
     that happens to be tight while rejecting an expensive one that is wide.
 
-    Fully guarded: journal-only, called after the entry decision, never gates
-    a trade, and returns None on any failure.
+    Fully guarded: returns None on any failure. Journal-only everywhere it is
+    called from the normal entry path (after the decision, never gates it) -
+    the one exception is _run_opening_burst's spread gate, which reads this
+    BEFORE deciding, because that mode's own min_move_pct is tight enough for
+    a wide spread to fake a real move (see that gate's comment for the
+    HOOD example this is built from).
     """
     try:
         quote = market_data.broker.get_latest_quote(symbol)
@@ -1377,6 +1476,34 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
             if move < ob.get("min_move_pct", 0.0):
                 break          # sorted, so nothing after this qualifies either
 
+            # Multi-factor gate, added 2026-09-02: refuse a move that is not
+            # comfortably bigger than the symbol's OWN spread. min_move_pct
+            # alone is a single fixed floor for every symbol, but the config
+            # for this mode already documents the failure this misses - HOOD
+            # quoted a 0.593% median spread on 2026-08-26, WIDER than the
+            # 0.3-0.5% thresholds tried here, so "+0.3% from the open" can be
+            # one print crossing the spread rather than a real move. Ratio,
+            # not a flat spread cap, because the risk scales with the move
+            # size being chased, not with spread alone. min_move_pct still
+            # does the primary filtering (this loop is sorted by move and
+            # breaks above); this only removes candidates whose move the
+            # spread itself could have produced. rel-strength-vs-SPY and
+            # volume were considered and left out for now - vwap/exhaustion
+            # need a window this mode does not have by 09:32-09:33, spy_pct
+            # is one value per poll so it cannot reorder candidates within a
+            # poll, and volume history is not threaded into this function.
+            # See PENDING_WORK.md item 4 for the fuller cf_score version.
+            ratio = ob.get("min_move_to_spread_ratio", 0)
+            if ratio:
+                spread_pct = _spread_pct(market_data, symbol, price)
+                if spread_pct and move < spread_pct * ratio:
+                    logger.info(
+                        f"{symbol}: opening move +{move:.3f}% refused - spread "
+                        f"gate ({spread_pct:.3f}% spread x {ratio:g} = "
+                        f"{spread_pct * ratio:.3f}% required)"
+                    )
+                    continue
+
             # The signal ceiling, only if this mode is told to honour it.
             # rapid_increase_max_pct exists to refuse a move that has already
             # spent itself over a 3-minute window; this mode is explicitly
@@ -1668,6 +1795,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     # Opening-burst state, persisting across polls within the session.
     opening_state = {"baseline": {}, "taken": [], "done": False}
     breadth_state = {"open_px": {}}
+    regime_state = {}
     market_open_dt = parse_hhmm_today("09:30", et)
     sector_history = {}
     # Only the sectors this watchlist actually needs. Computed once here rather
@@ -1858,7 +1986,18 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 except Exception:
                     continue
 
-        halted = _breadth_halt(config, market_data, symbols, breadth_state, now, et)
+        # breadth_halt's MEASUREMENT (mean move since the open, into
+        # breadth_state) runs regardless - regime_sizing below reuses it. Only
+        # the HALT decision is skipped when regime_sizing has taken over: a
+        # hard stop and a size-scaling replacement should never both be live,
+        # per the REPLACE (not layer) note on _regime_multiplier.
+        regime_cfg = config.get("trading", {}).get("regime_sizing") or {}
+        regime_active = regime_cfg.get("enabled", False)
+        breadth_would_halt = _breadth_halt(config, market_data, symbols, breadth_state, now, et)
+        halted = breadth_would_halt and not regime_active
+        if regime_active:
+            _mult, _ = _regime_multiplier(config, regime_state, breadth_state, spy_history, now, et)
+            executor.regime_size_multiplier = _mult
 
         # Sector scoreboard, logged with the breadth check and again at the halt
         # decision. sector_strength already feeds the signal journal per signal
@@ -1909,10 +2048,16 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 spy_bar = market_data.get_latest_bar("SPY", "1Min")
                 if spy_bar:
                     spy_ts = spy_bar.get("timestamp", now)
-                    spy_history.append((spy_ts, spy_bar.get("close", 0)))
+                    spy_close = spy_bar.get("close", 0)
+                    spy_history.append((spy_ts, spy_close))
                     spy_cutoff = spy_ts - lookback
                     while spy_history and spy_history[0][0] < spy_cutoff:
                         spy_history.popleft()
+                    # First SPY print of the day only - _regime_multiplier
+                    # reads this as SPY's "since the open" reference, the same
+                    # role breadth_state["open_px"] already plays per symbol.
+                    if spy_close and "SPY" not in breadth_state["open_px"]:
+                        breadth_state["open_px"]["SPY"] = spy_close
             except Exception as e:
                 logger.debug(f"SPY benchmark unavailable this poll: {e}")
 

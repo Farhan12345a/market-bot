@@ -94,6 +94,17 @@ trading:
     # value from that rather than from guesswork.
     min_move_pct: 0.3
 
+    # Multi-factor gate, added 2026-09-02: on top of min_move_pct, refuse a
+    # candidate whose move is not at least this many times its OWN bid-ask
+    # spread. HOOD's median spread measured 0.593% on 2026-08-26 - wider than
+    # min_move_pct itself - so a flat move threshold alone cannot tell "a real
+    # +0.3% move" from "one print crossing a 0.3%+ spread". 2.0 means the move
+    # must be double the spread; 0 disables the gate. See _run_opening_burst
+    # for why this is spread-only rather than the full cf_score composite
+    # (mostly None this early - opening_range_minutes/vwap/sector all need a
+    # window this mode decides within before it exists).
+    min_move_to_spread_ratio: 2.0
+
     # Its OWN position budget, deliberately small. These do not get to consume
     # max_concurrent_positions and starve the normal session; they are an
     # experiment running alongside it.
@@ -145,10 +156,17 @@ trading:
     #
     #                        normal      opening      why
     #   first exit           -0.5%       -0.3%        cut a failed open faster
-    #   final exit           -1.0%       -0.6%        cap the damage sooner
+    #   final exit           -1.0%       -0.35%       cap the damage sooner
     #   trailing stop         0.75%       0.40%       give back less of a fast move
     #   take-profit tiers    1.0/1.25/1.5  0.75/1.0/1.25  take what a 3-min move gives
-    #   breakeven trigger    0.5 / 0.3    0.2         protect sooner
+    #   breakeven trigger    0.5 / 0.3    0.15        protect sooner
+    #
+    # final exit -0.6% -> -0.35% for 2026-09-02, on request ("Hard stop:
+    # -0.35%, Trailing: 0.40%, BE: +0.15%"). Trailing and BE were already at
+    # those values (set 2026-08-31/09-01) - only the hard stop was still -0.6%.
+    # first_exit_loss_pct stays at -0.3% (unchanged): it is the PARTIAL
+    # scale-out that fires before the hard stop, and -0.3% already sits
+    # tighter than -0.35%, so the ordering (partial, then full) still holds.
     #
     # THE RISK, stated plainly: the opening minutes are the most volatile of the
     # day, and a tighter stop in higher volatility is more likely to be hit by
@@ -160,7 +178,7 @@ trading:
     # reasons in the report are how it will show.
     exits:
       first_exit_loss_pct: -0.3
-      final_exit_loss_pct: -0.6
+      final_exit_loss_pct: -0.35
       trailing_stop_pct: 0.40
       # Measured from the ENTRY price, not from the 09:30 baseline that
       # min_move_pct uses - different anchors. A position entered at +0.5% from
@@ -878,6 +896,49 @@ trading:
     check_time: "09:45"      # 15 minutes of tape, paired with the 10:00 window end
     min_mean_pct: -0.3       # halt if the watchlist mean is below this
     min_symbols: 5           # never conclude anything from fewer than this many
+
+  # ---------------------------------------------------------------------
+  # Regime-scaled position sizing (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # REPLACES breadth_halt's binary trade/don't-trade with a smooth size
+  # multiplier - 100% bullish, 50% neutral, 15% (of the 0-25% range asked
+  # for) bearish - so a weak tape shrinks new entries instead of refusing
+  # every remaining signal for the day.
+  #
+  # Directly serves the thing 2026-08-28's session proved: `edge` (taken vs.
+  # do-nothing) was positive on that day AND on losing days generally -
+  # selection is working, what's missing is breadth, i.e. enough qualifying
+  # moves to select from. A hard halt makes "nothing to select from"
+  # literally true by refusing every remaining signal outright, even a
+  # genuinely good one. Scaling size instead keeps taking signals - fewer,
+  # smaller - which is strictly more breadth for the same risk-management
+  # intent (don't commit full size into a tape with no upside in it).
+  #
+  # breadth_halt stays enabled ABOVE, on purpose: its measurement (mean move
+  # since the open) is reused as one of the two regime inputs below, and
+  # keeping it on costs nothing - see the call site in main.py's
+  # run_trading_day, which computes breadth_halt's evidence every time but
+  # only lets it actually HALT when this block is disabled. Turning this
+  # off reverts to breadth_halt's original behavior with no other change.
+  #
+  # Uses SPY's own move since the open as the second input (broad-market
+  # trend), not QQQ - SPY is already the market proxy used everywhere else
+  # in this file and is already streamed; QQQ is not currently subscribed to
+  # anything. A second index is real future work, not a blocker to shipping
+  # this with one - see PENDING_WORK.md.
+  #
+  # UNPROVEN, same status breadth_halt shipped with: the assumption that a
+  # weak/strong first 15 minutes says anything about the rest of the
+  # session is what this measures, not what it starts from. Watch the
+  # REGIME log line against the rest of each day's session-metrics.
+  regime_sizing:
+    enabled: true
+    check_time: "09:45"        # same evidence window as breadth_halt
+    bearish_below_pct: -0.3    # either reading below this -> bearish (mirrors breadth_halt's min_mean_pct)
+    bullish_above_pct: 0.0     # BOTH readings at/above this -> bullish; anything else -> neutral
+    bullish_multiplier: 1.0
+    neutral_multiplier: 0.5
+    bearish_multiplier: 0.15   # midpoint of the requested 0-25% bearish range
 
   # Total positions OPENED over the whole day, regardless of how many are held
   # at once - a different limit from max_concurrent_positions above. On
