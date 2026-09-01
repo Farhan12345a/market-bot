@@ -90,8 +90,19 @@ def as_float(v):
 
 
 def hhmm(signal_time):
-    # signal_time is HH:MM:SS ET. Comparable as a plain string.
-    return (signal_time or "")[:5]
+    """'HH:MM' from signal_time, which is a full ISO datetime (see
+    signal_journal.py: row["signal_time"] = now.isoformat()), NOT a bare
+    time - "2026-09-01T09:45:12.345-04:00". Taking the first 5 characters of
+    that is the year, not the hour, and silently put every row in "after" no
+    matter what --after was, on 2026-09-01's data. Split on the date/time
+    separator first.
+    """
+    s = signal_time or ""
+    if "T" in s:
+        s = s.split("T", 1)[1]
+    elif " " in s:
+        s = s.split(" ", 1)[1]
+    return s[:5]
 
 
 def summarize(label, rows, horizon_field):

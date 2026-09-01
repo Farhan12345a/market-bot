@@ -48,7 +48,7 @@ check("reports that it changed something", changed is True)
 check("original size shrinks proportionally so tiers size off reality",
       t.entry_qty==40, t.entry_qty)
 tier=t.check_take_profit(101.05)   # +1.05% = tier 1, not the top tier
-check("a 33% tier now sizes off 40, not 79", tier[0]==int(40*0.33), tier)
+check("a 40% tier now sizes off 40, not 79", tier[0]==int(40*0.4), tier)
 check("tier can never exceed what is held", tier[0] <= t.qty_remaining)
 
 st2,t2=mk(79)

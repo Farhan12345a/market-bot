@@ -730,11 +730,18 @@ trading:
   # (at 1000 the 2026-08-19 limit would have ended at exit 17 of 71, collecting
   # little data). Set back to 1000 now that measurement isn't the goal.
   #
+  # 1000 -> 500 for 2026-09-02, on request. This is a hard-stop CEILING, not
+  # an expected-loss target - normal days are meant to cost far less than
+  # this and mostly have (worst so far: -546.24 on 08-31). There is no
+  # separate "normal day" band yet; this single number does both jobs. See
+  # PENDING_WORK.md for tracking realized-loss velocity intraday as a softer
+  # warning before this hard cap fires.
+  #
   # REMINDER: this is a paper-account number. Before trading with real money,
   # re-derive it from actual account size and real risk tolerance rather than
   # carrying this value over - it was picked to keep a test session running,
   # not as a considered real-money risk limit.
-  max_daily_loss_usd: 1000  # Stop trading if daily loss exceeds this.
+  max_daily_loss_usd: 500  # Stop trading if daily loss exceeds this.
 
   # --- Burst throttle ---
   # When many symbols signal in the SAME poll they are rarely independent
@@ -801,9 +808,14 @@ trading:
   # the two best trades - HOOD ran to +4.66% and SOFI to +3.46% AFTER selling
   # half at ~+1%. Tiering keeps the early certainty while leaving a third of the
   # position free to run past +1.5%.
+  # 0.33/0.40/1.0 -> 0.40/0.30/1.0 for 2026-09-02, on request: take more off
+  # the first tier, leave the same 30% free to run past +1.5% (the top tier
+  # is "sell everything left," so it is still 30% of the original either way -
+  # 0.40 + 0.30 = 0.70 taken, 30% remaining, same shape the old 0.33/0.40 gave,
+  # weighted earlier.
   take_profit_tiers:
-    - {gain_pct: 1.0,  sell_fraction: 0.33}   # take a third off early
-    - {gain_pct: 1.25, sell_fraction: 0.40}   # 40% more of the original
+    - {gain_pct: 1.0,  sell_fraction: 0.40}   # take 40% off early
+    - {gain_pct: 1.25, sell_fraction: 0.30}   # 30% more of the original
     - {gain_pct: 1.5,  sell_fraction: 1.0}    # close out whatever is left
 
   # Legacy single-tier form, used ONLY if take_profit_tiers is absent. Kept so

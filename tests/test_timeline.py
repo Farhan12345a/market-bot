@@ -231,10 +231,17 @@ if prev.returncode == 0:
         # reach take-profit before the window closes. The halt's own -0.3%
         # floor is untouched - this is downstream of it, not a loosening of it.
         "entry_window_end": "10:15",
-        # 2000 -> 1000 for 2026-09-02. 2000 was raised in test to let a session
-        # run further before halting; set back now that measurement isn't the
-        # goal. See config.yaml for the real-money reminder attached to this.
-        "max_daily_loss_usd": 1000,
+        # 2000 -> 1000 -> 500 across 2026-09-02. 2000 was raised in test to let
+        # a session run further before halting; 500 is the number now live.
+        # See config.yaml for the real-money reminder attached to this.
+        "max_daily_loss_usd": 500,
+        # 0.33/0.40/1.0 -> 0.40/0.30/1.0 for 2026-09-02: take more off the
+        # first tier, same 30% of the original left to run past +1.5%.
+        "take_profit_tiers": [
+            {"gain_pct": 1.0, "sell_fraction": 0.4},
+            {"gain_pct": 1.25, "sell_fraction": 0.3},
+            {"gain_pct": 1.5, "sell_fraction": 1.0},
+        ],
     }
     for k, want in changed.items():
         check(f"{k} deliberately changed to {want}", t.get(k) == want,
@@ -244,7 +251,7 @@ if prev.returncode == 0:
             "rapid_increase_max_pct", "rapid_increase_lookback_minutes",
             "max_concurrent_positions", "max_daily_entries",
             "first_exit_loss_pct", "final_exit_loss_pct", "trailing_stop_pct",
-            "take_profit_tiers", "breakeven_tiers", "use_resistance_exit",
+            "breakeven_tiers", "use_resistance_exit",
             "use_breakeven_floor", "reentry_cooldown_minutes",
             "num_stocks_to_trade", "stream_max_subscriptions",
             "min_stock_price", "max_stock_price", "use_continuation_score"]

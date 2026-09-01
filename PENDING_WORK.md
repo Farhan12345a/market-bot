@@ -854,3 +854,56 @@ Real options, none of them free:
 The deeper point from 2026-08-28: `edge` was +1.03pp on both a winning and a
 losing session. Selection is adding value in both regimes. What is missing is
 something to be long OF on a day with no upside in it.
+
+## Backlog from the 2026-09-02 feature dump (not built, scoped for later)
+
+User provided a large batch of quant-strategy suggestions. Config-only asks
+(max_daily_loss_usd -> 500, take-profit tiers -> 40/30/30) were applied same
+day; the rest are real features, each its own piece of work:
+
+1. **Correlation limiter beyond sector.** max_positions_per_sector (08-31) is
+   a proxy - buckets by ETF membership, not measured return correlation.
+   Real version: rolling 5-min return correlation matrix across open
+   positions, refuse a new entry above a threshold. Sector cap should run a
+   few more weeks before deciding it's insufficient.
+
+2. **Market regime filter / position-size scaling.** Currently binary
+   (breadth_halt: trade or don't). Proposed: 100% size bullish, 50% neutral,
+   0-25% bearish, using SPY/QQQ trend + breadth. Would REPLACE breadth_halt,
+   not sit alongside it - smoother than a hard on/off.
+
+3. **Dynamic, ATR/MAE-based stops.** The most technically sound of the
+   batch. Stop = f(1-min ATR, historical MAE at 50/75/90/95th pctile per
+   symbol/regime), recalculated at discrete milestones (entry, +0.5%, +1.0%)
+   NOT continuously - user explicitly flagged thrashing risk of recalculating
+   every tick. Needs: ATR calculator, rolling MAE-percentile store, a
+   stop-placement function. MAE/MFE are already logged per trade
+   (excursions()) - this is the analysis layer on top of data that exists.
+
+4. **Opening-burst multi-factor gate.** Currently: move >= min_move_pct,
+   nothing else. Proposed: %move as a candidate filter, then rank by
+   rel-strength/volume/VWAP/momentum-acceleration before buying - same
+   cf_score machinery already in continuation.py, just not wired into the
+   burst path. Burst already re-evaluates continuously per poll (not
+   "wait to 09:33"), so this is additive, not a redesign of the loop shape.
+
+5. **Continuation/quality composite (Market 20 / momentum 25 / rel-strength
+   25 / volume 20 / technical 10).** cf_score is a partial version, unweighted
+   pending the 2-week gate in PENDING_WORK item 4 (see the TWO-WEEK CHECKPOINT
+   trigger). Don't build a second scoring system in parallel - fit weights on
+   the existing one first.
+
+6. **Threshold grid search** (entry momentum 0.3-1.0%, ceiling 1.0-2.0%,
+   entry window variants). Needs more than 4 sessions of data or it fits
+   noise - explicitly the same trap continuation_weights was deferred to
+   avoid. Revisit alongside the 2-week continuation-weight checkpoint.
+
+7. **BE-outcome distribution tool**: after touching +0.15%, how often does a
+   position go on to +0.75% / +1% / -0.3% / back to entry. Buildable now as a
+   stdlib script in the shape of ops/breadth-counterfactual.py. Queued as the
+   next small tool, not part of this batch.
+
+8. **Soft loss-velocity warning below the hard max_daily_loss_usd ceiling.**
+   500 is currently doing double duty as both "circuit breaker" and "the only
+   number that exists." A softer intraday warning (realized-loss velocity)
+   before the hard stop fires is a real, separate feature.

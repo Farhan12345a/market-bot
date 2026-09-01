@@ -37,8 +37,11 @@ FIELDS = [
 
 
 def row(date, t, sym, taken, p15, p30):
+    # signal_time is a full ISO datetime (now.isoformat()) in the real
+    # journal, not a bare time - the fixture must match, since a bare "09:50:00"
+    # is exactly the shape that hid the [:5]-year bug this file caught.
     r = {k: 0 for k in FIELDS}
-    r.update(date=date, signal_time=t, symbol=sym, entry_method="RAPID_INCREASE",
+    r.update(date=date, signal_time=f"{date}T{t}-04:00", symbol=sym, entry_method="RAPID_INCREASE",
              price=100.0, signal_pct=0.3, taken=taken,
              skip_reason="" if taken == "1" else "breadth_halt",
              qty=10 if taken == "1" else 0, size_multiplier=1,
@@ -113,11 +116,31 @@ V1 = ["date", "signal_time", "symbol", "entry_method", "price",
 with open(fixture, "w", newline="") as fh:
     w = csv.writer(fh)
     w.writerow(V1)
-    w.writerow(["2026-09-01", "09:50:00", "OLD", "RAPID_INCREASE", 50.0, 0.3,
+    w.writerow(["2026-09-01", "2026-09-01T09:50:00-04:00", "OLD", "RAPID_INCREASE", 50.0, 0.3,
                 0, 0, 0, 0, 0, "0", "breadth_halt", 0, 0, 50.5, 1.0, 51.0, 2.0])
 res = run(fixture, "--date", "2026-09-01", "--after", "09:45")
 check("an old-schema row is read, not silently dropped",
       "signals at/after 09:45: 1" in res.stdout, res.stdout)
+
+print("\n=== 6. hhmm() PARSES THE REAL FORMAT, NOT A GUESS ===")
+from importlib import util as _ilu
+spec = _ilu.spec_from_file_location("bc", repo_file("ops", "breadth-counterfactual.py"))
+bc = _ilu.module_from_spec(spec)
+spec.loader.exec_module(bc)
+# The exact shape signal_journal.py writes: now.isoformat().
+check("a real isoformat timestamp yields HH:MM",
+      bc.hhmm("2026-09-01T09:45:12.345678-04:00") == "09:45",
+      bc.hhmm("2026-09-01T09:45:12.345678-04:00"))
+# The bug this file caught in production: slicing [:5] off an isoformat
+# string gives the YEAR ("2026-"), which sorts after any bare "HH:MM" and
+# silently put every 2026-09-01 signal in the "after" bucket regardless of
+# --after. Confirm the wrong answer is no longer possible.
+check("...and it is NOT the year", bc.hhmm("2026-09-01T09:45:12-04:00") != "2026-",
+      bc.hhmm("2026-09-01T09:45:12-04:00"))
+check("a space-separated timestamp also works",
+      bc.hhmm("2026-09-01 09:45:12") == "09:45")
+check("a bare HH:MM:SS (no date prefix) still works",
+      bc.hhmm("09:45:12") == "09:45")
 
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)
