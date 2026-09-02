@@ -1739,9 +1739,15 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
             # is one value per poll so it cannot reorder candidates within a
             # poll, and volume history is not threaded into this function.
             # See PENDING_WORK.md item 4 for the fuller cf_score version.
+            # ONE quote per candidate, not two. The spread gate and the
+            # context row both want this number, and both used to fetch it -
+            # doubling the broker quote calls inside the 09:30-09:33 window,
+            # which is the most latency-sensitive three minutes of the day and
+            # the one where the burst is racing a decide_by deadline.
+            spread_pct = _spread_pct(market_data, symbol, price)
+
             ratio = ob.get("min_move_to_spread_ratio", 0)
             if ratio:
-                spread_pct = _spread_pct(market_data, symbol, price)
                 if spread_pct and move < spread_pct * ratio:
                     logger.info(
                         f"{symbol}: opening move +{move:.3f}% refused - spread "
@@ -1781,7 +1787,7 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
             # honest record of that; a zero would be a false reading.
             burst_ctx = _entry_context(
                 {"signal_pct": round(move, 3),
-                 "spread_pct": _spread_pct(market_data, symbol, price),
+                 "spread_pct": spread_pct,
                  "cont": {}},
                 spy_pct,
                 _window_pct_change(qqq_history) if qqq_history else None,
@@ -2124,6 +2130,14 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     opening_state = {"baseline": {}, "taken": [], "done": False}
     breadth_state = {"open_px": {}}
     regime_state = {}
+    # RESET THE CARRY-OVER, explicitly. This process reuses one Executor for
+    # every session it ever runs, and regime_size_multiplier lives on it. A
+    # session that ended bearish leaves 0.0 there, and the opening burst runs
+    # EARLIER in the poll than the regime check does - so the next morning's
+    # burst would size every entry to zero shares and take nothing, silently,
+    # with no bearish tape to explain it. Same class of bug as strategy.trades
+    # surviving a day, which this file already guards against elsewhere.
+    executor.regime_size_multiplier = 1.0
     market_open_dt = parse_hhmm_today("09:30", et)
     sector_history = {}
     # Only the sectors this watchlist actually needs. Computed once here rather

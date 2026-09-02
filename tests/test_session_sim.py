@@ -624,5 +624,91 @@ if True:
             check("...producing a finite result per trade",
                   all(isinstance(r["gain_pct"], float) for r in rows))
 
+    print("\n=== 9. TWO SESSIONS, ONE PROCESS: no state may leak across the day ===")
+    # This process reuses ONE Executor and ONE Strategy for every session it
+    # ever runs - a systemd service started once and left up for weeks. Any
+    # per-day state living on those objects has to be reset at session start
+    # or it silently poisons the next morning. regime_size_multiplier was
+    # exactly that: a bearish close leaves 0.0 on the executor, the opening
+    # burst runs EARLIER in the poll than the regime check, so day two's burst
+    # would have sized every entry to zero shares and taken nothing.
+    import src.main as M9
+    from src.executor.executor import Executor as Ex9
+    from src.strategy.strategy import Strategy as St9
+
+    cfg9 = base_config()
+    bear = [(0, 0.0), (1, 0.3), (8, -0.6), (20, -1.0), (60, -1.3)]
+    bull = [(0, 0.0), (5, 0.3), (20, 0.5), (60, 0.7)]
+
+    # NOTE: the executor holds its own broker reference, so a second
+    # FakeBroker created for day two would never be used - the orders would
+    # silently land in day one's. One broker across both days is also the
+    # honest model: the ACCOUNT persists overnight, only the market changes.
+    def one_day(market, executor, strategy, clock, stop_at):
+        rdt, rsl = M9.datetime, M9.time.sleep
+
+        def gs(sec):
+            clock.sleep(sec)
+            if clock.t > stop_at:
+                raise KeyboardInterrupt
+        M9.datetime = ClockDatetime(clock); M9.time.sleep = gs
+        try:
+            M9.run_trading_day(cfg9, market, strategy, executor,
+                               [s for s in market.scripts if s not in ("SPY", "QQQ")],
+                               {s: 55.0 for s in market.scripts},
+                               FakeNotifier(), ET,
+                               signal_journal=M9.SignalJournal(cfg9))
+        except KeyboardInterrupt:
+            pass
+        finally:
+            M9.datetime, M9.time.sleep = rdt, rsl
+
+    today9 = datetime.now(ET).replace(second=0, microsecond=0)
+
+    # --- DAY ONE: bearish, must end standing down at 0x ---
+    c1 = FakeClock(today9.replace(hour=9, minute=26))
+    m1 = FakeMarketData({"AAA": Script(100.0, [(0, 0.0), (1, 0.6), (10, 1.2)]),
+                         "SPY": Script(500.0, bear), "QQQ": Script(400.0, bear)},
+                        c1, today9.replace(hour=9, minute=30))
+    b1 = FakeBroker(m1)
+    ex9, st9_ = Ex9(b1, cfg9), St9(cfg9)
+    one_day(m1, ex9, st9_, c1, today9.replace(hour=16, minute=5))
+    check("day one ends bearish, multiplier left at 0x on the executor",
+          ex9.regime_size_multiplier == 0.0, ex9.regime_size_multiplier)
+
+    # --- DAY TWO: bullish, SAME executor and strategy objects ---
+    # A DIFFERENT symbol on day two, deliberately. The re-entry cooldown is
+    # keyed on time.monotonic() - real wall-clock, not the fake session clock -
+    # and these two simulated days run milliseconds apart in real time, so day
+    # one's losing exit on AAA still holds a live cooldown here. In production
+    # the two sessions are ~17 hours apart and it expires long before the bell.
+    # Using a fresh name isolates the thing under test (regime carry-over)
+    # from that artifact instead of silently testing the cooldown instead.
+    # Day two is a genuinely DIFFERENT calendar day, as in production. The
+    # realized-P&L accumulator rolls over on the date, so running both days
+    # under one date would carry day one's losses into day two and trip the
+    # daily-loss limit before the bell - testing the accumulator instead of
+    # the thing under test.
+    tomorrow9 = today9 + timedelta(days=1)
+    c2 = FakeClock(tomorrow9.replace(hour=9, minute=26))
+    m2 = FakeMarketData({"ZZZ": Script(100.0, [(0, 0.0), (1, 0.7), (6, 1.2), (20, 1.6)]),
+                         "SPY": Script(500.0, bull), "QQQ": Script(400.0, bull)},
+                        c2, tomorrow9.replace(hour=9, minute=30))
+    # Same broker (same account), repointed at day two's market.
+    b1.market = m2
+    orders_before = len(b1.orders)
+    one_day(m2, ex9, st9_, c2, tomorrow9.replace(hour=16, minute=5))
+    day2_orders = b1.orders[orders_before:]
+
+    check("day two is NOT poisoned by day one's bearish multiplier",
+          ex9.regime_size_multiplier != 0.0, ex9.regime_size_multiplier)
+    check("...and it actually traded on the bullish day",
+          any(o[2] == "buy" for o in day2_orders), day2_orders[:5])
+    check("...leaving nothing open at the end", b1.positions == {}, list(b1.positions))
+    check("strategy tracking is clean between days",
+          st9_.get_open_trades() == {}, list(st9_.get_open_trades()))
+    check("the reset is explicit at session start, not a side effect",
+          "executor.regime_size_multiplier = 1.0" in open(repo_file("src", "main.py")).read())
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)
