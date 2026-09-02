@@ -248,20 +248,37 @@ sell in a falling stock does not fill, which turns a stop into a suggestion.
 
 See 0b. Two concrete changes:
 
-1. `_get_volatility_percentile` returns one of five hardcoded values
-   (10/30/50/75/95) by ATR band. Make it a TRUE percentile: score every
-   candidate's ATR%, then rank each against that day's distribution. This is
-   the 35-point term - it should separate names, not bucket them.
+1. ~~`_get_volatility_percentile` returns one of five hardcoded values~~
+   **FIXED 2026-09-02.** The raw `atr_pct` was already being computed one
+   line above the bucketing and thrown away; it is now kept, and
+   `StockScreener._rank_volatility_percentiles` ranks every candidate's ATR%
+   against that day's distribution after scoring, adjusting each score by the
+   difference between its band value and its percentile value. Below 5
+   measurable candidates the fixed bands are kept rather than pretending a
+   3-name distribution has quartiles, and a symbol whose ATR could not be
+   measured keeps its band value ("not measurable" is not "not volatile").
+   Tested in `tests/test_volrank.py`, including the 2026-08-21 case of three
+   names sharing an identical 26.2. **This also unblocks the ATR half of the
+   dynamic-stops item** (backlog item 3), which was explicitly waiting on
+   this - a real ATR% now exists per symbol instead of a 5-bucket proxy.
 2. Establish whether RVOL at exactly 1.00x pre-market is legitimate (no
    intraday volume yet) or the 2026-08-20 `end=today` bug in another path. If
    the former, exclude RVOL from the PRE-OPEN ranking rather than letting every
    candidate carry an identical 0 - a term that never varies is noise with a
    weight attached.
 
-Also: drop ETFs from the tradeable list. `max_stock_price: 300` already blocks
-QQQ at $711 by accident, but an ETF at $80 would sail through, and an index
-fund cannot burst the way a single name does. A simple `exclude_symbols` list,
-or a flag on known ETFs, is enough.
+~~Also: drop ETFs from the tradeable list.~~ **DONE 2026-09-02**
+(`src/screener/exclusions.py`, `exclude_leveraged_etfs` /
+`exclude_basket_etfs` / `exclude_symbols`). Stopped being theoretical on
+2026-09-01: SOXL and TQQQ were both watched and **SOXL was the first
+opening-burst entry of the day**, inside a 4-trade 0W/4L block. Enforced at
+three layers mirroring the price band - screener before ranking, watchlist,
+and entry time. Two reasons kept separate in the code because they are
+different arguments: a basket cannot burst the way a single name can (and
+defeats the sector cap - SOXL *is* the semi complex, held beside
+INTC/NVDA/KLAC), and leverage breaks every percentage threshold in the config
+(a 3x fund hits the -0.5% first exit on a -0.17% move in the underlying).
+Tested in `tests/test_exclusions.py`.
 
 ---
 
@@ -304,6 +321,40 @@ which puts it after the ranking work (item 4) and alongside it. Not blocked on
 anything else.
 
 ---
+
+## 1-SIP. SETTLED 2026-09-02: do NOT buy Alpaca Algo Trader Plus yet
+
+The 2026-09-01 readiness ramp is the first clean reading the experiment ever
+produced, and it answers the $99/mo question in the negative:
+
+    09:30:17   stream is serving  2/26   (0 with a baseline)
+    09:30:54   stream is serving  2/26   (2 with a baseline)
+    09:31:28   stream is serving 14/26   (14 with a baseline)
+
+**All 14 SUBSCRIBED symbols delivered a baseline within ~70 seconds.** The
+other 12 were never subscribed - they were on REST by design, because
+`use_trade_ticks_for_entry` costs a second subscription per symbol and
+halves reach against the 28-subscription budget.
+
+So the failure SIP fixes - thin IEX prints at the open, the ~2%-of-volume
+problem - **did not occur**. The gap between 14 and 26 was a SETTING. The
+decision rule from 2026-08-31 was "if the stream serves ~20/25 by 09:31 on
+the free feed, save the money"; it served 100% of what was asked for.
+
+Two free levers exist and BOTH must be tried before spending anything:
+
+1. `use_trade_ticks_for_entry: false` - **pulled for 2026-09-02.** 14 -> 26
+   symbols streamed. Check the log for "PriceStream opening iex connection
+   for 26 symbols".
+2. The subscription-counting question below (item 1-MON) - **deliberately
+   NOT pulled at the same time.** If both moved and coverage changed,
+   neither would be attributable. That is the next session's variable.
+
+What SIP would still genuinely buy: compressing the ~70-second ramp, during
+which the burst could only see 2 symbols and bought from a field of 2 (SOXL,
+RGTI). Real, but far smaller than "the mechanism cannot run at all" - and
+note both of those were phantom entries that never filled, so the ramp was
+not what cost that money either.
 
 ## 1-MON. AFTER MONDAY'S RUN: settle the subscription-counting question
 
@@ -762,7 +813,32 @@ to move, they were stocks moving against a long-only book. **The gap is
 direction, and direction is the hard half.** More volatility modelling buys more
 of what the bot already has.
 
-## flatten_all_positions sells shorts deeper (found 2026-08-28, NOT fixed)
+## Both sign bugs — FIXED 2026-09-02
+
+`Executor.submit_exit_order` now takes a `side` parameter (default `"sell"`,
+so every existing caller is unchanged), and:
+
+- **`flatten_all_positions`** reads the raw `position.qty`, derives
+  `side = "buy" if raw_qty < 0 else "sell"`, and logs an ERROR naming the
+  short when it covers one. The 16:00 time stop therefore closes a short
+  instead of doubling it.
+- **`reconcile_existing_positions`** now REFUSES to adopt a short rather than
+  silently flipping it to a long. Loud ERROR, position left untracked, the
+  side-aware 16:00 flatten still closes it. Refusing rather than managing,
+  per the original write-up: this bot is long-only, so a short in the account
+  is already evidence of a different bug.
+- Everything with a direction to it flips consistently for a cover — P&L
+  (`direction * (price - entry)`), the buying-power cache (covering SPENDS
+  cash), and what counts as "closed at a loss" for the re-entry cooldown.
+
+Tested in `tests/test_signs.py`, including the exact 2026-08-28 CRWD case
+(-39 @ 212.74 against a ~228 market) and a mixed long/short book flattening
+in one sweep. `no_shorting` on the account stays on as the backstop; it is no
+longer the only thing preventing the damage.
+
+Original write-ups below.
+
+## flatten_all_positions sells shorts deeper (found 2026-08-28, FIXED 2026-09-02)
 
 `Executor.flatten_all_positions` calls `submit_exit_order`, which is hardcoded
 to `side="sell"`. On a long that closes the position; on a short it doubles it.
@@ -782,7 +858,7 @@ Fix: give `submit_exit_order` the position sign, or have `flatten_all_positions`
 call `broker.trading_client.close_position(symbol)` per symbol. Add a test with
 a negative-qty position asserting the order side is BUY.
 
-## reconcile_existing_positions drops the position sign (found 2026-08-28, NOT fixed)
+## reconcile_existing_positions drops the position sign (found 2026-08-28, FIXED 2026-09-02)
 
 `src/main.py`, in `reconcile_existing_positions`:
 
@@ -855,37 +931,80 @@ The deeper point from 2026-08-28: `edge` was +1.03pp on both a winning and a
 losing session. Selection is adding value in both regimes. What is missing is
 something to be long OF on a day with no upside in it.
 
-## Backlog from the 2026-09-02 feature dump (not built, scoped for later)
+## Backlog from the 2026-09-02 feature dump (updated 2026-09-02, second pass)
 
 User provided a large batch of quant-strategy suggestions. Config-only asks
 (max_daily_loss_usd -> 500, take-profit tiers -> 40/30/30) were applied same
-day; the rest are real features, each its own piece of work:
+day; the rest are real features, each its own piece of work. A second pass
+the same day, framed around the user's own diagnosis - "what's missing is
+breadth, not better picking of what's there" - shipped three of these
+(2, 3-partial, 4-partial) and a promised tool (7); the rest are explicitly
+scoped below rather than rushed.
 
-1. **Correlation limiter beyond sector.** max_positions_per_sector (08-31) is
-   a proxy - buckets by ETF membership, not measured return correlation.
-   Real version: rolling 5-min return correlation matrix across open
-   positions, refuse a new entry above a threshold. Sector cap should run a
-   few more weeks before deciding it's insufficient.
+1. **Correlation limiter beyond sector - RECOMMENDATION: WAIT, do not build
+   yet.** max_positions_per_sector (08-31) is a proxy - buckets by ETF
+   membership, not measured return correlation - and a real version (rolling
+   5-min return correlation matrix, refuse a new entry above a threshold)
+   would only ever REDUCE how many positions the bot is willing to hold at
+   once. That cuts directly against the thing 2026-08-28's session already
+   showed: `edge` (taken vs. do-nothing) is positive even on losing days, so
+   selection isn't the constraint - opportunity is. Tightening a limiter
+   before the sector cap has even been evaluated (it needs a few more weeks
+   running first, per the original note below) would add a second,
+   overlapping restriction to an already breadth-starved book, in the
+   opposite direction from every other change made this session (regime
+   sizing REPLACING a hard halt, the spread gate ADDING selectivity only
+   where evidence already flagged real noise). A reminder was scheduled via
+   send_later to revisit this after the sector cap has run a few more weeks -
+   check whether P&L-by-sector-complex data (in the daily report) shows
+   max_positions_per_sector actually binding often enough to need a sharper
+   tool, or whether it's rarely hit and the real version is solving a
+   problem that mostly isn't occurring.
 
-2. **Market regime filter / position-size scaling.** Currently binary
-   (breadth_halt: trade or don't). Proposed: 100% size bullish, 50% neutral,
-   0-25% bearish, using SPY/QQQ trend + breadth. Would REPLACE breadth_halt,
-   not sit alongside it - smoother than a hard on/off.
+2. **Market regime filter / position-size scaling - SHIPPED 2026-09-02.**
+   `trading.regime_sizing` in config.yaml, `_regime_multiplier` in
+   src/main.py. 100% size bullish, 50% neutral, 15% bearish (the requested
+   0-25% band's midpoint), read from the watchlist's own breadth (reused
+   from breadth_halt's measurement) plus SPY's move since the open.
+   REPLACES breadth_halt's binary halt - breadth_halt stays enabled in
+   config so its measurement keeps running, but main.py now only lets it
+   actually halt when regime_sizing is off. QQQ was deliberately left out of
+   the trend reading (not currently streamed/benchmarked anywhere in this
+   file); adding it is real future work, not a blocker. Tested:
+   tests/test_regime.py (19 cases). UNPROVEN, same status breadth_halt
+   shipped with - watch the REGIME log line against session-metrics.py
+   after a few live sessions.
 
-3. **Dynamic, ATR/MAE-based stops.** The most technically sound of the
-   batch. Stop = f(1-min ATR, historical MAE at 50/75/90/95th pctile per
-   symbol/regime), recalculated at discrete milestones (entry, +0.5%, +1.0%)
-   NOT continuously - user explicitly flagged thrashing risk of recalculating
-   every tick. Needs: ATR calculator, rolling MAE-percentile store, a
-   stop-placement function. MAE/MFE are already logged per trade
-   (excursions()) - this is the analysis layer on top of data that exists.
+3. **Dynamic, ATR/MAE-based stops - PARTIALLY BUILT, NOT wired to live
+   stops.** The MAE-percentile half is done: `ops/mae-percentiles.py`,
+   per-symbol and pooled percentile bands (50/75/90/95th) from mae_pct
+   already logged per trade, with a --min-n guard so a thin sample doesn't
+   get its own row. Deliberately not wired into any stop-placement decision
+   yet, for two reasons: (a) most symbols have too few trades to trust a
+   per-symbol percentile while the dynamic universe keeps reshuffling the
+   pool daily, and (b) the OTHER half of this item - a true 1-min ATR
+   calculator - is not built. `_get_volatility_percentile` in
+   stock_screener.py is still the 5-bucket ladder flagged unfixed in item 0d
+   above; combining a real MAE percentile with a 5-bucket volatility proxy
+   would be a stop built on a proxy for a proxy. Fix 0d (or pull real minute
+   bars for a proper ATR) before wiring this into final_exit_loss_pct.
+   Milestone-based recalculation (entry, +0.5%, +1.0%, not continuous - the
+   user's own thrashing-risk flag) is still just a design, no code.
 
-4. **Opening-burst multi-factor gate.** Currently: move >= min_move_pct,
-   nothing else. Proposed: %move as a candidate filter, then rank by
-   rel-strength/volume/VWAP/momentum-acceleration before buying - same
-   cf_score machinery already in continuation.py, just not wired into the
-   burst path. Burst already re-evaluates continuously per poll (not
-   "wait to 09:33"), so this is additive, not a redesign of the loop shape.
+4. **Opening-burst multi-factor gate - PARTIALLY BUILT.** Shipped a spread
+   gate (`opening_burst.min_move_to_spread_ratio`, default 2.0): refuses a
+   move that isn't at least 2x its own bid-ask spread, operationalizing the
+   HOOD example already documented in this mode's own config comments (a
+   0.593% median spread wider than the move thresholds tried here). Did
+   NOT wire in the full cf_score composite as originally proposed - by
+   09:32-09:33 this mode decides within, vwap_pos/exhaustion/sector_strength
+   all need a window that does not exist yet (opening_range_minutes is 5;
+   the mode closes before that), and spy_pct is one value per poll so it
+   cannot reorder candidates WITHIN a poll (every candidate in the same poll
+   shares it) - a composite built mostly from None or from a constant offset
+   would not be doing what "multi-factor" implies. Revisit once there is
+   ~5 minutes of intraday history to compute those factors from, i.e. this
+   naturally waits on nothing except time-of-day.
 
 5. **Continuation/quality composite (Market 20 / momentum 25 / rel-strength
    25 / volume 20 / technical 10).** cf_score is a partial version, unweighted
@@ -894,16 +1013,62 @@ day; the rest are real features, each its own piece of work:
    the existing one first.
 
 6. **Threshold grid search** (entry momentum 0.3-1.0%, ceiling 1.0-2.0%,
-   entry window variants). Needs more than 4 sessions of data or it fits
-   noise - explicitly the same trap continuation_weights was deferred to
-   avoid. Revisit alongside the 2-week continuation-weight checkpoint.
+   entry window variants) - **methodology recommendation, 2026-09-02: change
+   ONE variable at a time, one config per week (or two), never a full
+   combinatorial sweep.** At ~20-70 trades/day a week is already a thin
+   sample per config; splitting that further across a grid (e.g. 3
+   parameters x 4 values = 64 combinations) would need over a year of
+   sessions to fill honestly, and a shorter run per cell just fits noise -
+   the exact trap continuation_weights was deferred to avoid, at greater
+   scale. Concretely: pick the single highest-uncertainty parameter, hold
+   everything else fixed for a week, compare against the prior week's
+   edge/expectancy via session-metrics.py and the signal journal's
+   forward-return columns (which record EVERY signal, taken or not, so a
+   parameter's effect on what got skipped is measurable too), then move to
+   the next parameter. This is the same discipline already visible
+   throughout this file's history (rapid_increase_pct, entry_window_start,
+   take_profit_tiers, etc. each changed alone with the before/after evidence
+   recorded) - it just names it as a deliberate procedure rather than
+   something that happened to be the style. Data collection for this needs
+   no new work: `analytics.log_signals` is already on and already records
+   forward returns at 15/30 min for every signal, taken or skipped.
 
-7. **BE-outcome distribution tool**: after touching +0.15%, how often does a
-   position go on to +0.75% / +1% / -0.3% / back to entry. Buildable now as a
-   stdlib script in the shape of ops/breadth-counterfactual.py. Queued as the
-   next small tool, not part of this batch.
+7. **BE-outcome distribution tool - SHIPPED 2026-09-02.**
+   `ops/be-outcomes.py`. For trades whose mfe_pct cleared a trigger (default
+   0.15%, the opening-burst tier), reports how many also ran to +0.75%,
+   +1.0%, closed at -0.3% or worse despite touching the trigger, or
+   scratched via BREAKEVEN_STOP, plus the full exit_reason breakdown and
+   whether BREAKEVEN_STOP's mean pl_pct actually lands near the intended
+   +0.05% floor. Tested: tests/test_be_outcomes.py (14 cases, hand-checked
+   fixture). Cannot answer event ORDER (did it fall to -0.3% before or after
+   touching the trigger) - mae_pct/mfe_pct don't carry timing, and the tool
+   says so rather than assuming it.
 
-8. **Soft loss-velocity warning below the hard max_daily_loss_usd ceiling.**
-   500 is currently doing double duty as both "circuit breaker" and "the only
-   number that exists." A softer intraday warning (realized-loss velocity)
-   before the hard stop fires is a real, separate feature.
+8. **Soft loss-velocity warning below the hard max_daily_loss_usd ceiling -
+   SHIPPED 2026-09-02** (`trading.loss_velocity_warning` in config.yaml,
+   `Executor.check_loss_velocity`). Fires once per threshold at 40/60/80% of
+   max_daily_loss_usd (-$200/-$300/-$400 at today's $500), reporting BOTH
+   depth and velocity ($/min since the first check, projected to when the
+   ceiling would be reached at that rate) - because -$300 by 10:00 and -$300
+   by 15:30 are the same depth and very different days. Warning only: it
+   never halts, resizes, or blocks an entry, and `tests/test_velocity.py`
+   asserts that directly. Original write-up: 500 is currently doing
+   double duty as both "circuit breaker" and "the only number that exists" -
+   there is no distinction yet between a normal day's expected drawdown
+   (worst so far: -$546.24 on 08-31, i.e. already over the current $500
+   ceiling once) and the exceptional-event ceiling itself. Still not built.
+   Shape: track realized-loss velocity intraday (e.g. $ lost per N minutes,
+   or loss as a fraction of max_daily_loss_usd reached by a given clock
+   time) and log/notify a soft warning well before the hard stop fires,
+   without changing the hard stop's own behavior. Worth doing before the
+   next real-money re-derivation of max_daily_loss_usd (see the REMINDER
+   already on that config key) - a soft warning gives an early read on
+   whether the hard number is even the right order of magnitude.
+
+**Weekly (not just daily) analysis - already covered, no new tool needed.**
+`ops/session-metrics.py` already re-derives its tables from the FULL
+history in `logs/trade_history.csv` and `logs/signal_journal.csv` on every
+run (not a rolling daily snapshot) - `--since` narrows it to any window,
+including a trailing week (`--since $(date -d '7 days ago' +%F)` on the
+VPS). Nothing needs to be built to get a weekly rollup; the data is already
+continuously accumulated and the tool already re-reads all of it each time.

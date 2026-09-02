@@ -1,3 +1,4 @@
+import bisect
 import pandas as pd
 import logging
 from datetime import datetime, timedelta
@@ -6,6 +7,11 @@ import yfinance as yf
 from typing import List, Dict, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Below this many measurable candidates, a "percentile" is a rank among
+# almost nothing - fall back to the fixed ATR bands instead of pretending a
+# 3-name distribution has quartiles.
+MIN_CANDIDATES_FOR_TRUE_PERCENTILE = 5
 
 class StockScreener:
     """Daily pre-market screener to identify high-volatility candidates"""
@@ -227,8 +233,22 @@ class StockScreener:
 
     def _get_volatility_percentile(self, symbol) -> float:
         """
-        Calculate where this stock's volatility ranks among candidates (0-100).
-        Uses ATR (Average True Range) as volatility metric.
+        This stock's volatility as a 0-100 figure. Uses ATR (Average True
+        Range) as the volatility metric.
+
+        NOTE ON WHAT THIS RETURNS. Per symbol, in isolation, the only honest
+        answer is a BAND - a percentile needs a distribution, and this call
+        sees one stock. So this returns the fixed-band value below, and
+        records the raw atr_pct in self._atr_pct for screen() to convert into
+        a TRUE percentile across the day's candidate set once every candidate
+        has been measured (see _rank_volatility_percentiles).
+
+        That two-step exists because the bands alone were the whole story
+        until 2026-09-02, and they discriminate far less than the name
+        "percentile" suggests: five hardcoded outputs (10/30/50/75/95) meant
+        three earnings candidates on 2026-08-21 all scored an identical 26.2
+        on the heaviest-weighted term, so the ranking was effectively decided
+        by the gap term alone (PENDING_WORK.md item 0d).
         """
         try:
             end = datetime.now(self.et).date()
@@ -251,7 +271,16 @@ class StockScreener:
             atr = df["tr"].tail(14).mean()
             atr_pct = (atr / df.iloc[-1]["close"]) * 100
 
-            # Percentile relative to typical stock (assume 1-3% ATR is median)
+            # The real number, kept rather than thrown away. screen() ranks
+            # these against each other afterwards; without this the actual
+            # ATR% was computed here and then immediately discarded into one
+            # of five buckets.
+            if not hasattr(self, "_atr_pct"):
+                self._atr_pct = {}
+            self._atr_pct[symbol] = float(atr_pct)
+
+            # Fallback bands, used when there aren't enough candidates to rank
+            # against (and by any caller that scores a single symbol).
             if atr_pct < 0.5:
                 return 10
             elif atr_pct < 1.0:
@@ -477,6 +506,10 @@ class StockScreener:
             score += vol_rank_score
             details["volatility_percentile"] = vol_percentile
             details["volatility_score"] = vol_rank_score
+            # The raw measurement behind that band, so screen() can rank it
+            # against the rest of today's candidates. None when the ATR call
+            # failed - "not measurable" stays distinct from "not volatile".
+            details["atr_pct"] = getattr(self, "_atr_pct", {}).get(symbol)
 
             # Opening-move history (configurable points, default 15).
             # Off by default in code; config turns it on. Scored SEPARATELY from
@@ -523,6 +556,66 @@ class StockScreener:
             logger.error(f"Error scoring {symbol}: {e}")
             return 0, details
 
+    def _rank_volatility_percentiles(self, scores, details_dict):
+        """
+        Turn the volatility term into a real percentile across today's
+        candidates, in place, after every candidate has been scored.
+
+        Fixes PENDING_WORK.md item 0d. The term is worth up to 20 points -
+        joint-heaviest in score_stock - and until now it took one of five
+        values, so it separated candidates into five piles rather than
+        ranking them. On 2026-08-21 three earnings names landed on an
+        IDENTICAL 26.2 for this term, which meant the gap term silently
+        decided the whole ranking. The ATR% behind those bands was already
+        being computed and thrown away.
+
+        Each symbol's score is adjusted by the DIFFERENCE between its band
+        score and its percentile score, so nothing else in the scoring is
+        disturbed. Symbols whose ATR could not be measured keep their band
+        value untouched - "not measurable" is not "not volatile", the same
+        rule the continuation score uses for missing factors.
+
+        Ranked across every scored candidate, including ones the price band
+        drops afterwards: the question this answers is "how volatile is this
+        name relative to what was available today", and that set is the
+        honest denominator.
+        """
+        measured = {
+            sym: (details_dict.get(sym) or {}).get("atr_pct")
+            for sym in scores
+        }
+        measured = {s: a for s, a in measured.items() if a is not None}
+        if len(measured) < MIN_CANDIDATES_FOR_TRUE_PERCENTILE:
+            if measured:
+                logger.info(
+                    f"Volatility percentile: only {len(measured)} candidate(s) had a "
+                    f"measurable ATR (need {MIN_CANDIDATES_FOR_TRUE_PERCENTILE}) - "
+                    f"keeping the fixed ATR bands for this run"
+                )
+            return
+
+        ordered = sorted(measured.values())
+        n = len(ordered)
+        for sym, atr in measured.items():
+            # Share of the candidate set at or below this ATR, 0-100. Ties get
+            # the same rank because bisect_right counts all equal values.
+            pctile = 100.0 * bisect.bisect_right(ordered, atr) / n
+            detail = details_dict.get(sym) or {}
+            old_score = detail.get("volatility_score") or 0.0
+            new_score = pctile * 0.2
+            scores[sym] = scores[sym] - old_score + new_score
+            detail["volatility_percentile"] = round(pctile, 1)
+            detail["volatility_score"] = new_score
+            detail["volatility_ranked"] = True
+
+        spread = ordered[-1] - ordered[0]
+        logger.info(
+            f"Volatility percentile: ranked {n} candidates by true ATR% "
+            f"(min {ordered[0]:.2f}%, median {ordered[n // 2]:.2f}%, "
+            f"max {ordered[-1]:.2f}%, spread {spread:.2f}pp) - "
+            f"replaces the five fixed bands"
+        )
+
     def screen(self, top_n: int = 25, min_score: float = 40) -> List[str]:
         """
         Run daily screen on all candidates.
@@ -548,6 +641,28 @@ class StockScreener:
             except Exception as e:
                 logger.warning(f"Error screening {symbol}: {e}")
                 continue
+
+        # Drop symbols this strategy must never trade BEFORE ranking, for the
+        # same reason the price band is applied here rather than at entry: a
+        # symbol that can never be bought should not occupy a top-N place, a
+        # stream subscription, or a poll cycle. On 2026-09-01 SOXL (a 3x
+        # leveraged semis ETF) was the first opening-burst entry of the day.
+        from src.screener.exclusions import is_excluded
+        excluded_out = []
+        for sym in list(scores):
+            excluded, reason = is_excluded(sym, self.config)
+            if excluded:
+                excluded_out.append(f"{sym} ({reason})")
+                scores.pop(sym, None)
+        if excluded_out:
+            logger.info(
+                f"Excluded {len(excluded_out)} untradeable symbol(s) before ranking: "
+                + ", ".join(excluded_out)
+            )
+
+        # Replace the fixed ATR bands with a TRUE percentile across today's
+        # candidate set, now that every candidate has been measured.
+        self._rank_volatility_percentiles(scores, details_dict)
 
         # Sort by score
         sorted_stocks = sorted(scores.items(), key=lambda x: x[1], reverse=True)

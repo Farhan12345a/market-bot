@@ -53,17 +53,66 @@ ps=mk(); ps.start([f"S{i}" for i in range(59)], priority=[])
 check("watchdog thread is running", ps._watchdog.is_alive())
 check("error watcher attached to alpaca's logger",
       ps._error_watcher in logging.getLogger(ALPACA_WS_LOGGER).handlers)
+# CHANGED 2026-09-02: a SYMBOL-COUNT rejection no longer costs the session.
+# The unique-symbol cap (29) is an empirical claim, so being wrong about it
+# must cost a reconnect with fewer symbols, not a fallback to ~15-min REST
+# for the whole day - which is what kept happening, and what would have
+# taken the opening-burst measurement with it. Every OTHER fatal error
+# (auth, entitlement) still gives up immediately: no symbol count fixes a
+# rejected key.
 t0=time.monotonic()
+before=len(ps._symbols)
 logging.getLogger(ALPACA_WS_LOGGER).error("error: symbol limit exceeded (405)")
 for _ in range(60):
-    if ps._gave_up: break
+    if len(ps._symbols) < before or ps._gave_up: break
     time.sleep(0.1)
 elapsed=time.monotonic()-t0
-check("gives up on the named error", ps._gave_up is True)
+check("does NOT give up on a symbol-count error - it retries smaller",
+      ps._gave_up is False, ps._gave_up)
+check("...with a reduced symbol count", len(ps._symbols) < before,
+      (before, len(ps._symbols)))
+check("...keeping the dropped ones on REST rather than losing them",
+      len(ps._symbols) + len(ps._dropped_symbols) == 59,
+      (len(ps._symbols), len(ps._dropped_symbols)))
 check(f"...in seconds, not the 120s timeout (took {elapsed:.1f}s)", elapsed < 10, elapsed)
+ps.stop()
 check("handler detached on stop",
       ps._error_watcher not in logging.getLogger(ALPACA_WS_LOGGER).handlers)
-check("is_healthy() reports false after giving up", ps.is_healthy() is False)
+
+print("\n=== B2. THE RETRY TERMINATES - IT CANNOT LOOP FOREVER ===")
+# The backoff is bounded. Without this, a feed that rejects every count
+# would reconnect in a tight loop for the whole session - a worse failure
+# than the one the retry replaced.
+ps_x=mk(); ps_x.start([f"T{i}" for i in range(59)], priority=[])
+for attempt in range(ST.SYMBOL_LIMIT_RETRIES + 2):
+    seen = getattr(ps_x, "_symbol_limit_retries", 0)
+    logging.getLogger(ALPACA_WS_LOGGER).error("error: symbol limit exceeded (405)")
+    # The watchdog polls every 2s, so each injected error needs more than one
+    # tick to be consumed - a tighter loop here races it and reads "no retry"
+    # when the retry simply had not happened yet.
+    for _ in range(100):
+        if ps_x._gave_up or getattr(ps_x, "_symbol_limit_retries", 0) > seen:
+            break
+        time.sleep(0.1)
+    if ps_x._gave_up: break
+check(f"gives up after at most {ST.SYMBOL_LIMIT_RETRIES} reductions",
+      ps_x._gave_up is True, (ps_x._gave_up, getattr(ps_x, "_symbol_limit_retries", 0)))
+check("is_healthy() reports false once it finally gives up", ps_x.is_healthy() is False)
+ps_x.stop()
+
+print("\n=== B3. NON-COUNT FATAL ERRORS STILL GIVE UP IMMEDIATELY ===")
+ps_a=mk(); ps_a.start([f"A{i}" for i in range(5)], priority=[])
+n_before=len(ps_a._symbols)
+logging.getLogger(ALPACA_WS_LOGGER).error("error: auth failed (402)")
+for _ in range(60):
+    if ps_a._gave_up: break
+    time.sleep(0.1)
+check("an auth failure gives up at once - no symbol count fixes a bad key",
+      ps_a._gave_up is True)
+check("...and does NOT pointlessly shed symbols first",
+      len(ps_a._symbols) == n_before, (n_before, len(ps_a._symbols)))
+check("is_healthy() reports false after giving up", ps_a.is_healthy() is False)
+ps_a.stop()
 
 print("\n=== C. NO FALSE GIVE-UPS ===")
 ps2=mk(); ps2.start(["A","B"])

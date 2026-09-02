@@ -242,6 +242,13 @@ if prev.returncode == 0:
             {"gain_pct": 1.25, "sell_fraction": 0.3},
             {"gain_pct": 1.5, "sell_fraction": 1.0},
         ],
+        # 28 -> 30 for 2026-09-02, together with the counting model. The cap
+        # is now a count of UNIQUE SYMBOLS rather than channel-subscriptions:
+        # the 2026-09-01 subscribe ack showed FOUR channels x 14 symbols
+        # accepted against a configured cap of 28, and 2026-08-21's 405 came
+        # at 59 SYMBOLS. Both fit a ~30 unique-symbol limit. The old model
+        # spent half the budget on nothing.
+        "stream_max_subscriptions": 29,
     }
     for k, want in changed.items():
         check(f"{k} deliberately changed to {want}", t.get(k) == want,
@@ -253,7 +260,7 @@ if prev.returncode == 0:
             "first_exit_loss_pct", "final_exit_loss_pct", "trailing_stop_pct",
             "breakeven_tiers", "use_resistance_exit",
             "use_breakeven_floor", "reentry_cooldown_minutes",
-            "num_stocks_to_trade", "stream_max_subscriptions",
+            "num_stocks_to_trade",
             "min_stock_price", "max_stock_price", "use_continuation_score"]
     for k in same:
         check(f"{k} unchanged", old.get(k) == t.get(k), (old.get(k), t.get(k)))

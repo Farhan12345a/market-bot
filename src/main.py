@@ -35,6 +35,7 @@ from src.screener.stock_screener import StockScreener
 from src.screener.list_builder import augment_symbols
 from src.notifications.email_notifier import EmailNotifier
 from src.analytics.signal_journal import SignalJournal
+from src.analytics import trade_recorder as TR
 
 # Setup logging
 logging.basicConfig(
@@ -147,7 +148,35 @@ def _breadth_halt(config, market_data, symbols, state, now, et):
     return False
 
 
-def _regime_multiplier(config, state, breadth_state, spy_history, now, et):
+def _pct_vs(price, level):
+    """`price` as a % above/below `level`, or None if either is missing.
+    None rather than 0.0 - "no VWAP yet" is not "exactly at VWAP"."""
+    try:
+        if not price or not level or level <= 0:
+            return None
+        return round((float(price) - float(level)) / float(level) * 100, 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _vs_vwap(vwap_acc, history, symbol):
+    """
+    An index's latest price as a % above/below its own session VWAP, or None
+    when either side is unavailable.
+
+    Positive means price is above VWAP - the session's average buyer is in
+    profit. Returns None rather than 0.0 on missing data: "no VWAP yet" and
+    "exactly at VWAP" are different states and only one of them is evidence.
+    """
+    vwap = _vwap(vwap_acc or {}, symbol)
+    last = history[-1][1] if history else None
+    if not vwap or not last or vwap <= 0:
+        return None
+    return (last - vwap) / vwap * 100
+
+
+def _regime_multiplier(config, state, breadth_state, spy_history, now, et,
+                       vwap_acc=None, qqq_history=None):
     """
     Scale new-entry SIZE by how the tape has behaved since the open, instead
     of breadth_halt's binary stop/don't-stop.
@@ -194,43 +223,74 @@ def _regime_multiplier(config, state, breadth_state, spy_history, now, et):
     if now < check_at:
         return 1.0, None
 
-    breadth_move = breadth_state.get("mean_move")
-    spy_open = (breadth_state.get("open_px") or {}).get("SPY")
-    spy_now = spy_history[-1][1] if spy_history else None
-    spy_move = ((spy_now - spy_open) / spy_open * 100) if spy_open and spy_now else None
-
-    readings = [m for m in (breadth_move, spy_move) if m is not None]
-    if not readings:
-        # Same "too thin to conclude anything" guard breadth_halt uses - stay
-        # at full size on no evidence rather than penalize for missing data.
-        return 1.0, None
-
-    bearish_floor = rc.get("bearish_below_pct", -0.3)
-    bullish_floor = rc.get("bullish_above_pct", 0.0)
     bullish_mult = rc.get("bullish_multiplier", 1.0)
     neutral_mult = rc.get("neutral_multiplier", 0.5)
-    bearish_mult = rc.get("bearish_multiplier", 0.15)
+    bearish_mult = rc.get("bearish_multiplier", 0.0)
 
-    # Either reading being bearish is enough to call the regime bearish - a
-    # weak market OR weak selection each independently argue for less size.
-    # BOTH must clear the bullish floor to call it bullish - one strong
-    # reading while the other is merely adequate is the neutral case, not the
-    # confident one.
-    if any(m < bearish_floor for m in readings):
-        mult, label = bearish_mult, "bearish"
-    elif all(m >= bullish_floor for m in readings):
-        mult, label = bullish_mult, "bullish"
+    # ---- PRIMARY RULE: SPY and QQQ against their own session VWAP --------
+    #
+    # Price above its own volume-weighted average price means the session's
+    # buyers are, on average, in profit - a cleaner statement of "is the tape
+    # supporting longs" than a move measured from a single opening print,
+    # which one gap or one bad tick can dominate. VWAP is also what the
+    # institutional flow is actually benchmarked against, so it is a level
+    # the market itself reacts to rather than one imposed on it.
+    #
+    #   both above  -> bullish, full size
+    #   one above   -> neutral, half size (the indices disagree; that IS the
+    #                  neutral case, not a weak bullish one)
+    #   both below  -> bearish. Default 0.0 = NO NEW LONGS, on the reasoning
+    #                  that a long scalp with both indices under VWAP is
+    #                  fighting the tape, and you do not have to trade every
+    #                  day. Set bearish_multiplier to 0.25 to take quarter
+    #                  size instead of standing down.
+    spy_v = _vs_vwap(vwap_acc, spy_history, "SPY")
+    qqq_v = _vs_vwap(vwap_acc, qqq_history, "QQQ")
+
+    if spy_v is not None and qqq_v is not None:
+        above = sum(1 for v in (spy_v, qqq_v) if v > 0)
+        if above == 2:
+            mult, label = bullish_mult, "bullish"
+        elif above == 1:
+            mult, label = neutral_mult, "neutral"
+        else:
+            mult, label = bearish_mult, "bearish"
+        detail = (f"SPY {spy_v:+.3f}% vs VWAP, QQQ {qqq_v:+.3f}% vs VWAP")
     else:
-        mult, label = neutral_mult, "neutral"
+        # ---- FALLBACK: the pre-VWAP rule ----------------------------------
+        # Used only when an index has no VWAP yet - it needs bars carrying
+        # volume, and a benchmark that fell back to REST may not have them.
+        # Falling back to "no opinion" (1.0x) would be worse: that is full
+        # size on no evidence, in the one situation the feature exists for.
+        breadth_move = breadth_state.get("mean_move")
+        spy_open = (breadth_state.get("open_px") or {}).get("SPY")
+        spy_now = spy_history[-1][1] if spy_history else None
+        spy_move = ((spy_now - spy_open) / spy_open * 100) if spy_open and spy_now else None
+
+        readings = [m for m in (breadth_move, spy_move) if m is not None]
+        if not readings:
+            # Same "too thin to conclude anything" guard breadth_halt uses.
+            return 1.0, None
+
+        bearish_floor = rc.get("bearish_below_pct", -0.3)
+        bullish_floor = rc.get("bullish_above_pct", 0.0)
+        if any(m < bearish_floor for m in readings):
+            mult, label = bearish_mult, "bearish"
+        elif all(m >= bullish_floor for m in readings):
+            mult, label = bullish_mult, "bullish"
+        else:
+            mult, label = neutral_mult, "neutral"
+        bm = f"{breadth_move:+.3f}%" if breadth_move is not None else "n/a"
+        sm = f"{spy_move:+.3f}%" if spy_move is not None else "n/a"
+        detail = f"NO VWAP - fell back to breadth {bm}, SPY {sm} since the open"
 
     state["multiplier"] = mult
     state["label"] = label
-    bm = f"{breadth_move:+.3f}%" if breadth_move is not None else "n/a"
-    sm = f"{spy_move:+.3f}%" if spy_move is not None else "n/a"
+    stand_down = " NO NEW LONGS." if mult == 0 else ""
     logger.warning(
-        f"===== REGIME at {now:%H:%M} ET: {label.upper()} (watchlist breadth "
-        f"{bm}, SPY {sm} since the open) - new entries sized at {mult:g}x for "
-        f"the rest of the day. Open positions and their exits are untouched. ====="
+        f"===== REGIME at {now:%H:%M} ET: {label.upper()} ({detail}) - new "
+        f"entries sized at {mult:g}x for the rest of the day.{stand_down} "
+        f"Open positions and their exits are untouched. ====="
     )
     return mult, label
 
@@ -250,7 +310,11 @@ def _benchmark_symbols(config, symbols):
     """
     if not config["trading"].get("stream_benchmarks", True):
         return []
-    out = ["SPY"]
+    # QQQ joins SPY as of 2026-09-02: regime_sizing's VWAP rule needs BOTH
+    # indices, and a regime read off a REST-delayed QQQ would be answering
+    # "was QQQ above its VWAP a quarter of an hour ago". Cheap now that the
+    # cap counts unique symbols (~30) rather than channel-subscriptions.
+    out = ["SPY", "QQQ"]
     try:
         from src.analytics import sectors as SEC
         out += SEC.sectors_for(symbols)
@@ -461,6 +525,7 @@ def select_symbols(config, screener, market_data):
         symbols = list(dict.fromkeys(default_list))
 
     symbols = _filter_watchlist_by_price(config, symbols)
+    symbols = _filter_watchlist_by_exclusions(config, symbols)
     _warn_if_watchlist_outruns_the_stream(config, symbols)
 
     logger.info(
@@ -682,6 +747,57 @@ def _opening_move_fields(details_by_symbol, symbol):
     }
 
 
+def _is_excluded_symbol(config, symbol):
+    """(True, reason) if this symbol must never be traded. Never raises - a
+    failure here must not be able to block an otherwise valid entry."""
+    try:
+        from src.screener.exclusions import is_excluded
+        return is_excluded(symbol, config.get("trading") or {})
+    except Exception as e:
+        logger.debug(f"exclusion check skipped for {symbol}: {e}")
+        return False, None
+
+
+def _filter_watchlist_by_exclusions(config, symbols):
+    """
+    Drop symbols this strategy must never trade (leveraged/inverse ETFs,
+    index baskets, anything in exclude_symbols) from the WATCHLIST.
+
+    Second of the three layers, mirroring the price band exactly: the
+    screener excludes before ranking, this cleans anything that arrives
+    through a path the screener did not rank (the static stock_universe, the
+    earnings and QQQ lists, a screener fallback), and _attempt_entry keeps a
+    backstop at the moment of purchase.
+
+    Evidenced 2026-09-01: SOXL and TQQQ were both watched and SOXL was the
+    first opening-burst entry of the day. max_stock_price only blocks QQQ at
+    ~$711 by accident; a leveraged fund at $106 sails through.
+    """
+    from src.screener.exclusions import is_excluded
+    trading = config.get("trading") or {}
+
+    kept, dropped = [], []
+    for sym in symbols:
+        excluded, reason = is_excluded(sym, trading)
+        (dropped if excluded else kept).append((sym, reason) if excluded else sym)
+
+    if dropped:
+        logger.info(
+            f"Watchlist exclusions: dropped {len(dropped)} untradeable symbol(s) - "
+            + ", ".join(f"{s} ({r})" for s, r in dropped)
+        )
+    if symbols and not kept:
+        # Watching nothing guarantees a blank day, so keep the list and let
+        # the entry-time gate reject individually - the same guard
+        # _filter_watchlist_by_price uses for the identical reason.
+        logger.warning(
+            "Every watchlist symbol is on the exclusion list - keeping the list "
+            "intact and letting the entry-time check reject individually"
+        )
+        return list(symbols)
+    return kept
+
+
 def _filter_watchlist_by_price(config, symbols):
     """
     Drop symbols outside the tradeable price band from the WATCHLIST.
@@ -753,9 +869,14 @@ def _warn_if_watchlist_outruns_the_stream(config, symbols):
         )
         return
 
+    # MUST match PriceStream.symbol_budget() - this used to divide by 2 when
+    # trade ticks were on, which stopped being true on 2026-09-02 when the
+    # cap became a count of UNIQUE SYMBOLS rather than channel-subscriptions.
+    # Left unfixed it would report "44 symbols on REST" for a watchlist where
+    # only 29 actually are, i.e. the operator's own pre-flight readout would
+    # disagree with what the stream then did.
     cap = t.get("stream_max_subscriptions", 30)
-    per_symbol = 2 if t.get("use_trade_ticks_for_entry", False) else 1
-    budget = max(1, cap // per_symbol)
+    budget = max(1, cap)
 
     if len(symbols) <= budget:
         logger.info(
@@ -1284,8 +1405,94 @@ def _opening_exit_config(config):
     return out
 
 
+def _burst_rank_multifactor(config, measured, market_data, spy_pct, price_history,
+                            volume_history, vwap_acc, sector_returns):
+    """
+    Re-order the opening burst's qualifying candidates by continuation score
+    instead of raw move size. Returns (ordered_measured, note).
+
+    PENDING_WORK backlog item 4. The burst has always sorted by % move alone;
+    this feeds the same cf_score machinery the normal entry path uses.
+
+    WHAT IS AND IS NOT MEASURABLE AT 09:31. This runs 1-3 minutes after the
+    bell, and several continuation factors are structurally blind that early:
+    opening_range_minutes is 5, so there is no opening high to break out of;
+    VWAP has about a minute of prints behind it; sector returns need a window
+    the session has not accumulated. Those come back None, and
+    continuation_score already renormalises over missing factors rather than
+    scoring them zero - "not measurable" is not "bad".
+
+    So this is honest about being a PARTIAL score early on: it ranks on
+    whatever is genuinely computable (efficiency, volume acceleration, rvol,
+    spread, and relative strength once SPY has a window), and falls back to
+    move-order when nothing scores. Ranking, never gating - it changes WHICH
+    of the qualifying candidates get the budget, never how many, which is the
+    same weaker-claim argument _rank_burst was built on.
+    """
+    if not config["trading"].get("use_continuation_score", False):
+        return measured, None
+    if not (config["trading"].get("opening_burst") or {}).get("multifactor_rank", False):
+        return measured, None
+    if len(measured) < 2:
+        return measured, None
+
+    scored = []
+    for move, symbol, price, base in measured:
+        cont = {}
+        try:
+            cont = _continuation_fields(
+                config, symbol, price, move, spy_pct,
+                [p for _, p in (price_history or {}).get(symbol, [])],
+                list((volume_history or {}).get(symbol, [])),
+                _vwap(vwap_acc, symbol) if vwap_acc is not None else None,
+                # No opening_high: opening_range_minutes is 5 and this mode
+                # decides by 09:33, so the opening range does not exist yet.
+                # Omitted rather than passed as None-from-a-local that only
+                # exists inside run_trading_day - cf_breakout scores None and
+                # continuation_score renormalises over it.
+                dict(screener_details.get(symbol) or {}),
+                rvol=None,
+                spread_pct=_spread_pct(market_data, symbol, price),
+                sector_returns=sector_returns,
+            )
+        except Exception as e:
+            logger.debug(f"burst cf_score unavailable for {symbol}: {e}")
+        scored.append(((move, symbol, price, base), cont.get("cf_score")))
+
+    # A score being NON-NULL is not the same as it being INFORMATIVE, and
+    # this is where that distinction bites. At 09:31 continuation_score
+    # renormalises over whatever factors exist, so a candidate with one
+    # minute of history still returns a number - computed from almost
+    # nothing. Trusting it reorders the burst on noise: the first live-shaped
+    # test of this ranked a +0.2% mover ABOVE a +3.0% one, which is the exact
+    # inversion of the only factor with real evidence behind it.
+    #
+    # So require a MAJORITY of candidates to have produced a score before
+    # letting it reorder anything. Below that, move order stands - it is the
+    # better-evidenced ranking and the one this mode has always used.
+    have = [s for _, s in scored if s is not None]
+    need = max(2, int(len(scored) * float(
+        (config["trading"].get("opening_burst") or {}).get("min_scored_fraction", 0.5))))
+    if len(have) < need:
+        return measured, (
+            f"multi-factor rank SKIPPED - only {len(have)}/{len(scored)} candidates "
+            f"produced a continuation score (need {need}); keeping move order"
+        )
+
+    # Unscored candidates sort last but are NOT dropped, matching _rank_burst.
+    scored.sort(key=lambda kv: (0, 0.0) if kv[1] is None else (1, kv[1]), reverse=True)
+    ordered = [row for row, _ in scored]
+    shown = ", ".join(
+        f"{row[1]}={score:.0f}" if score is not None else f"{row[1]}=n/a"
+        for row, score in scored
+    )
+    return ordered, f"burst ranked by continuation score: {shown}"
+
+
 def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_values,
-                       state, now, et, signal_journal=None, spy_pct=None):
+                       state, now, et, signal_journal=None, spy_pct=None,
+                       price_history=None, volume_history=None, vwap_acc=None,
+                       sector_returns=None):
     """
     The opening-move experiment: measure each streamed symbol from the 09:30
     baseline and buy the ones that are up, deciding by 09:32.
@@ -1467,14 +1674,35 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
             + ", ".join(f"{sym} {mv:+.2f}%" for mv, sym, _, _ in measured[:8])
         )
 
+    # %MOVE AS A CANDIDATE FILTER, THEN RANK THE SURVIVORS.
+    #
+    # The threshold is applied HERE, before any re-ranking, rather than by
+    # the `break` that used to sit in the loop below. That break relied on
+    # the list being move-sorted - true when move was the only ordering, and
+    # false the moment a continuation score reorders it, at which point it
+    # would stop at the first sub-threshold row and silently skip qualifying
+    # candidates ranked after it.
+    _floor = ob.get("min_move_pct", 0.0)
+    measured = [row for row in measured if row[0] >= _floor]
+
+    # Multi-factor re-rank, if enabled. With the flag off (or nothing
+    # scoreable this early) the order stays exactly the move-ranked one this
+    # mode has always used.
+    measured, _mf_note = _burst_rank_multifactor(
+        config, measured, market_data, spy_pct, price_history,
+        volume_history, vwap_acc, sector_returns,
+    )
+    if _mf_note:
+        logger.info(f"OPENING BURST {_mf_note}")
+
     for move, symbol, price, base in measured:
         try:
             if symbol in taken or symbol in strategy.get_open_trades():
                 continue
             if len(taken) >= max_positions:
                 break          # budget spent; the rest are ranked below these
-            if move < ob.get("min_move_pct", 0.0):
-                break          # sorted, so nothing after this qualifies either
+            # min_move_pct is applied above, before ranking - see the
+            # candidate-filter comment. Nothing reaching this loop is below it.
 
             # Multi-factor gate, added 2026-09-02: refuse a move that is not
             # comfortably bigger than the symbol's OWN spread. min_move_pct
@@ -1555,9 +1783,40 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
     return entries
 
 
+def _entry_context(cand, spy_pct, qqq_pct, spy_vs_vwap, qqq_vs_vwap,
+                   breadth_state, regime_state, stock_vs_vwap, size_multiplier):
+    """
+    The market and stock state AT THE ENTRY INSTANT, for trade_context.csv.
+
+    Captured here rather than reconstructed later because most of it is
+    genuinely unrecoverable after the fact: VWAP position, breadth and the
+    regime label are all session-state that no post-hoc bar fetch can rebuild
+    faithfully. Everything is None-tolerant - a reading that could not be
+    taken is recorded as blank, never as zero, since these become filter
+    conditions ("SPY above VWAP AND rvol > 3x") where a false zero silently
+    moves trades into the wrong bucket.
+    """
+    cont = (cand or {}).get("cont") or {}
+    return {
+        "size_multiplier": size_multiplier,
+        "spy_return": spy_pct,
+        "qqq_return": qqq_pct,
+        "spy_vs_vwap": spy_vs_vwap,
+        "qqq_vs_vwap": qqq_vs_vwap,
+        "market_breadth": (breadth_state or {}).get("mean_move"),
+        "regime": (regime_state or {}).get("label"),
+        "stock_vs_vwap": stock_vs_vwap,
+        "relative_volume": (cand or {}).get("rvol"),
+        "momentum": (cand or {}).get("signal_pct"),
+        "continuation_score": cont.get("cf_score"),
+        "sector_strength": cont.get("cf_sector_strength"),
+        "spread_pct": (cand or {}).get("spread_pct"),
+    }
+
+
 def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi,
                    size_multiplier=1.0, burst_note=None, signal_pct=None,
-                   skip_cooldown=False, exit_config=None):
+                   skip_cooldown=False, exit_config=None, context=None):
     """
     Shared entry path for all three entry signals (three-bar momentum, rapid
     increase immediate, pullback resumption). Returns True if a position was
@@ -1578,7 +1837,18 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     """
     qty = int(_position_size(config, executor, price) * size_multiplier)
     if qty <= 0:
-        logger.info(f"{symbol}: entry skipped - position size worked out to 0 shares at {price:.2f}")
+        # Distinguish "the regime says stand down" from "the arithmetic came
+        # out at zero shares". Both refuse the entry, but only one of them is
+        # a decision - and reading a deliberate stand-down as a sizing
+        # rounding error is how a working risk control gets tuned away.
+        if getattr(executor, "regime_size_multiplier", 1.0) == 0:
+            logger.info(
+                f"{symbol}: entry skipped - regime is bearish (both indices below "
+                f"VWAP), no new longs today. This is regime_sizing standing down, "
+                f"not a sizing failure."
+            )
+        else:
+            logger.info(f"{symbol}: entry skipped - position size worked out to 0 shares at {price:.2f}")
         return False
     if not strategy.can_enter(symbol, qty):
         return False
@@ -1600,6 +1870,15 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     # Enforced here rather than by pruning the watchlist at selection time: this
     # is the price actually being paid at the moment of entry, and it costs no
     # extra API calls.
+    # Exclusion backstop, third of the three layers (screener pre-ranking,
+    # watchlist filter, here). Enforced at the moment of purchase for the same
+    # reason the price band is: this is the last point before real money moves,
+    # and a symbol can reach here through a path neither earlier layer saw.
+    _excluded, _reason = _is_excluded_symbol(config, symbol)
+    if _excluded:
+        logger.info(f"{symbol}: entry skipped - {_reason}")
+        return False
+
     min_price = config["trading"].get("min_stock_price")
     max_price = config["trading"].get("max_stock_price")
     if min_price and price < min_price:
@@ -1635,6 +1914,11 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
 
     strategy.confirm_entry(symbol, price, qty, config_override=exit_config)
     executor.entry_meta.setdefault(symbol, {})["list_source"] = symbol_source.get(symbol, "screener")
+    # Market/stock state at the entry instant, for trade_context.csv. Stored
+    # on entry_meta because that is what survives to the exit, where the row
+    # is finally written with its outcome attached.
+    if context:
+        executor.entry_meta.setdefault(symbol, {})["context"] = dict(context)
     # Where this symbol placed in the dynamic universe's merit ranking. Absent
     # on a static-pool session, which is the correct reading of "there was no
     # ranking" rather than a rank of zero.
@@ -1786,6 +2070,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     stream_warned = False
     volume_history = {symbol: deque(maxlen=20) for symbol in symbols}  # for intraday RVOL
     spy_history = deque()          # SPY samples, for excess-return-vs-market
+    qqq_history = deque()          # QQQ samples, for the two-index regime rule
     # {etf: deque} - one benchmark per sector represented on the watchlist, so a
     # symbol can be compared to what it actually moves with rather than only to
     # the index. Built from the watchlist, so an all-semis day fetches one ETF
@@ -1867,6 +2152,14 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 )
                 stream_warned = True
 
+        # Soft warning on the way down, checked BEFORE the hard limit so a day
+        # that crosses several thresholds in one poll still reports where it
+        # got to before it stopped. Warning only - it never halts anything.
+        try:
+            executor.check_loss_velocity()
+        except Exception as e:
+            logger.debug(f"loss-velocity check skipped: {e}")
+
         if executor.check_daily_loss_limit():
             logger.warning("Daily loss limit hit, flattening all positions")
             flattened = executor.flatten_all_positions()
@@ -1876,11 +2169,39 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             return entries_triggered
 
         # ---- EXIT CHECKS: every open position, every cycle, from the moment it opens ----
+        # Flushed once at the end of the exit sweep rather than per symbol -
+        # one file open per poll instead of one per open position.
+        _path_buffer = []
         for symbol in list(strategy.get_open_trades().keys()):
             try:
                 current_bar = market_data.get_latest_bar(symbol, "1Min")
                 if not current_bar:
                     continue
+
+                # INTRA-TRADE PRICE PATH, sampled every poll a position is
+                # open. This is the file exit-rule replay actually runs on:
+                # mfe_pct/mae_pct give the extremes but NOT their order, and
+                # every stop question ("did it reach +1% BEFORE -0.5%?") is a
+                # question about order. Appended per sample rather than
+                # buffered to the exit, so a crash costs the tail of one path
+                # rather than the whole day's.
+                try:
+                    _tr = strategy.trades.get(symbol)
+                    _px = market_data.get_entry_price(symbol, current_bar)
+                    if _tr is not None and _px:
+                        _meta = executor.entry_meta.get(symbol) or {}
+                        _entry_px = getattr(_tr, "entry_price", None)
+                        _path_buffer.append({
+                            "trade_id": TR.make_trade_id(symbol, _meta.get("entry_time")),
+                            "symbol": symbol,
+                            "date": now.strftime("%Y-%m-%d"),
+                            "timestamp": now.isoformat(),
+                            "price": _px,
+                            "gain_pct": (round((_px - _entry_px) / _entry_px * 100, 4)
+                                         if _entry_px else ""),
+                        })
+                except Exception as _pe:
+                    logger.debug(f"path sample skipped for {symbol}: {_pe}")
 
                 exit_info = strategy.check_exit(symbol, current_bar)
                 if exit_info:
@@ -1933,6 +2254,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 logger.error(f"Error checking exits for {symbol}: {e}")
                 continue
 
+        if _path_buffer:
+            TR.record_path_samples(_path_buffer)
+
         # ---- OPENING BURST: runs BEFORE and independently of the normal window ----
         # Its own budget, its own settings, its own entry-method tag. Kept
         # separate so a normal testing session and this experiment can share a
@@ -1944,6 +2268,13 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 config, market_data, strategy, executor, symbols, rsi_values,
                 opening_state, now, et, signal_journal=signal_journal,
                 spy_pct=_window_pct_change(spy_history),
+                # For the multi-factor rank. Passed rather than recomputed:
+                # these are the same series the normal entry path scores on.
+                price_history=price_history,
+                volume_history=volume_history,
+                vwap_acc=vwap_acc,
+                sector_returns={etf: _window_pct_change(hist)
+                                for etf, hist in sector_history.items()},
             )
             if opened:
                 entries_triggered += opened
@@ -1996,7 +2327,10 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         breadth_would_halt = _breadth_halt(config, market_data, symbols, breadth_state, now, et)
         halted = breadth_would_halt and not regime_active
         if regime_active:
-            _mult, _ = _regime_multiplier(config, regime_state, breadth_state, spy_history, now, et)
+            _mult, _ = _regime_multiplier(
+                config, regime_state, breadth_state, spy_history, now, et,
+                vwap_acc=vwap_acc, qqq_history=qqq_history,
+            )
             executor.regime_size_multiplier = _mult
 
         # Sector scoreboard, logged with the breadth check and again at the halt
@@ -2058,8 +2392,28 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     # role breadth_state["open_px"] already plays per symbol.
                     if spy_close and "SPY" not in breadth_state["open_px"]:
                         breadth_state["open_px"]["SPY"] = spy_close
+                    # Session VWAP for the index itself - the primary regime
+                    # input. Same accumulator the watchlist uses, so a
+                    # benchmark on REST simply never accumulates and the
+                    # regime read falls back rather than reading a wrong one.
+                    _update_vwap(vwap_acc, "SPY", spy_bar)
             except Exception as e:
                 logger.debug(f"SPY benchmark unavailable this poll: {e}")
+
+            # QQQ, sampled exactly like SPY. regime_sizing's rule is a
+            # two-index agreement test, so a missing QQQ is not a missing
+            # nicety - it is half the signal.
+            try:
+                qqq_bar = market_data.get_latest_bar("QQQ", "1Min")
+                if qqq_bar:
+                    qqq_ts = qqq_bar.get("timestamp", now)
+                    qqq_history.append((qqq_ts, qqq_bar.get("close", 0)))
+                    qqq_cutoff = qqq_ts - lookback
+                    while qqq_history and qqq_history[0][0] < qqq_cutoff:
+                        qqq_history.popleft()
+                    _update_vwap(vwap_acc, "QQQ", qqq_bar)
+            except Exception as e:
+                logger.debug(f"QQQ benchmark unavailable this poll: {e}")
 
             # Sector ETFs, sampled exactly like SPY and for the same reason one
             # step further in. Excess return over SPY separates "this stock is
@@ -2350,14 +2704,43 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 symbol, price = cand["symbol"], cand["price"]
                 taken, skip_reason = False, None
 
+                # Correlation limiter, checked here rather than inside
+                # _attempt_entry because this is where price_history is in
+                # scope - and recorded as a skip_reason so the journal can
+                # price what it costs: refused signals still carry forward
+                # returns, so "did the limiter block winners" stays an
+                # answerable question rather than an invisible one.
+                _corr_blocked, _corr_reason = (False, None)
+                try:
+                    from src.analytics.correlation import correlation_block
+                    _corr_blocked, _corr_reason = correlation_block(
+                        config, symbol,
+                        {s: [p for _, p in price_history[s]] for s in price_history},
+                        list(strategy.get_open_trades().keys()),
+                    )
+                except Exception as e:
+                    logger.debug(f"correlation check skipped for {symbol}: {e}")
+
                 if max_daily_entries and entries_triggered >= max_daily_entries:
                     skip_reason = "max_daily_entries"
                 elif burst_max is not None and index >= burst_max:
                     skip_reason = "burst_throttle"
+                elif _corr_blocked:
+                    skip_reason = "correlation_limit"
+                    logger.info(f"{symbol}: entry skipped - {_corr_reason}")
                 else:
                     taken = _attempt_entry(
                         config, strategy, executor, symbol, price, cand["method"], cand["rsi"],
                         size_multiplier=burst_size, burst_note=burst_note,
+                        context=_entry_context(
+                            cand, spy_pct,
+                            _window_pct_change(qqq_history),
+                            _vs_vwap(vwap_acc, spy_history, "SPY"),
+                            _vs_vwap(vwap_acc, qqq_history, "QQQ"),
+                            breadth_state, regime_state,
+                            _pct_vs(price, _vwap(vwap_acc, symbol)),
+                            burst_size,
+                        ),
                     )
                     if taken:
                         entries_triggered += 1
@@ -2764,8 +3147,36 @@ def reconcile_existing_positions(broker, strategy, executor):
         if symbol in strategy.trades:
             continue
         try:
-            qty = int(abs(float(position.qty)))
+            raw_qty = float(position.qty)
+            qty = int(abs(raw_qty))
             if qty <= 0:
+                continue
+
+            # REFUSE to adopt a short. This used to read
+            # int(abs(float(position.qty))), which silently turned a short into
+            # a long of the same size - and then every downstream rule ran
+            # backwards on it. On 2026-08-28 CRWD at -39 @ 212.74 against a
+            # ~228 market was read as +7.2% PROFIT and would have fired a
+            # take-profit SELL, which shorts 39 more; worse, submit_exit_order
+            # cancels working orders for the symbol first, so that sell would
+            # also have cancelled the buy-to-cover queued against it.
+            #
+            # Refusing rather than managing it: this bot has no intent to be
+            # short, so a short in the account is already evidence of a
+            # different bug, and adopting it would mean silently running
+            # long-only exit logic against a position it does not fit. The
+            # 16:00 flatten is now side-aware (Executor.flatten_all_positions)
+            # and will close it correctly, and no_shorting on the account
+            # blocks new ones - so this is loud, visible, and still safe.
+            if raw_qty < 0:
+                logger.error(
+                    f"{symbol}: REFUSING to adopt a SHORT position ({raw_qty:g} shares) "
+                    f"on startup - this bot is long-only and its exit rules would run "
+                    f"backwards on it. Left untracked and unmanaged; the 16:00 flatten "
+                    f"closes it side-correctly. Investigate how a short was opened at all "
+                    f"(phantom-entry path is the known cause), and close it by hand from "
+                    f"the Alpaca dashboard if it should not be held."
+                )
                 continue
 
             avg_entry = getattr(position, "avg_entry_price", None)

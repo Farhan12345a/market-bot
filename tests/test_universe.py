@@ -261,7 +261,11 @@ watch = "ADBE CIFR CLSK CMG COIN CVNA DASH HOOD IONQ MARA MTCH RIOT WULF XPEV".s
 bm = M._benchmark_symbols(CFG, watch)
 check("SPY is included", "SPY" in bm, bm)
 check("the day's sector ETFs are included", "WGMI" in bm and "XLK" in bm, bm)
-check("only sectors this watchlist needs", set(bm) - {"SPY"} == set(SEC.sectors_for(watch)), bm)
+# QQQ joined SPY as a permanent benchmark on 2026-09-02: regime_sizing's
+# rule is a two-index VWAP agreement test, so QQQ has to be streamed or
+# the regime is read off a ~15-min-delayed price.
+check("QQQ is included, for the two-index regime rule", "QQQ" in bm, bm)
+check("only sectors this watchlist needs", set(bm) - {"SPY", "QQQ"} == set(SEC.sectors_for(watch)), bm)
 check("no duplicates", len(bm) == len(set(bm)), bm)
 check("a benchmark that is ALSO a traded symbol is not double-subscribed",
       "SPY" not in M._benchmark_symbols(CFG, watch + ["SPY"]), M._benchmark_symbols(CFG, watch + ["SPY"]))
@@ -270,9 +274,9 @@ check("watchlist + benchmarks fits the subscription budget",
       len(watch) + len(bm))
 off = copy.deepcopy(CFG); off["trading"]["stream_benchmarks"] = False
 check("disabling the flag restores the old behaviour", M._benchmark_symbols(off, watch) == [])
-check("an all-unmapped watchlist still streams SPY",
-      M._benchmark_symbols(CFG, ["NOSUCH1", "NOSUCH2"]) == ["SPY"])
-check("an empty watchlist is safe", M._benchmark_symbols(CFG, []) == ["SPY"])
+check("an all-unmapped watchlist still streams both indices",
+      M._benchmark_symbols(CFG, ["NOSUCH1", "NOSUCH2"]) == ["SPY", "QQQ"])
+check("an empty watchlist is safe", M._benchmark_symbols(CFG, []) == ["SPY", "QQQ"])
 check("live config has benchmarks on", CFG["trading"]["stream_benchmarks"] is True)
 
 print("\n=== 16. SIGNAL CEILING REPORTING ===")

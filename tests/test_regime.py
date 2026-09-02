@@ -49,6 +49,17 @@ RC = {
 }
 
 
+def vwap_acc(spy=None, qqq=None):
+    """{symbol: [price*vol, vol]} - _vwap divides the two, so a VWAP of 100
+    is just [100.0, 1.0]."""
+    acc = {}
+    if spy is not None:
+        acc["SPY"] = [float(spy), 1.0]
+    if qqq is not None:
+        acc["QQQ"] = [float(qqq), 1.0]
+    return acc
+
+
 def breadth(mean_move=None, spy_open=None):
     b = {"open_px": {}}
     if mean_move is not None:
@@ -95,6 +106,67 @@ check("first call at check_time computes bearish", m1 == 0.15 and l1 == "bearish
 m2, l2 = M._regime_multiplier(RC, state, breadth(2.0, 100.0), [(0, 105.0)], dt("10:30"), ET)
 check("a later bullish-looking reading does NOT un-latch it",
       m2 == 0.15 and l2 == "bearish", (m2, l2))
+
+print("\n=== 5b. PRIMARY RULE: SPY AND QQQ vs THEIR OWN VWAP ===")
+# VWAP 100 for both; price above/below decides the band.
+VW = vwap_acc(spy=100.0, qqq=100.0)
+
+
+def regime(spy_px, qqq_px, cfg=RC, bstate=None):
+    return M._regime_multiplier(
+        cfg, {}, bstate if bstate is not None else breadth(0.0, 100.0),
+        [(0, spy_px)], dt("09:45"), ET,
+        vwap_acc=VW, qqq_history=[(0, qqq_px)],
+    )
+
+
+m, label = regime(100.5, 100.5)
+check("both indices above VWAP -> bullish, full size", m == 1.0 and label == "bullish", (m, label))
+m, label = regime(100.5, 99.5)
+check("SPY above, QQQ below -> neutral, half size", m == 0.5 and label == "neutral", (m, label))
+m, label = regime(99.5, 100.5)
+check("QQQ above, SPY below -> also neutral (disagreement is the case)",
+      m == 0.5 and label == "neutral", (m, label))
+m, label = regime(99.5, 99.5)
+check("both below VWAP -> bearish", m == 0.15 and label == "bearish", (m, label))
+
+stand_down = copy.deepcopy(RC)
+stand_down["trading"]["regime_sizing"]["bearish_multiplier"] = 0.0
+m, label = M._regime_multiplier(
+    stand_down, {}, breadth(0.0, 100.0), [(0, 99.5)], dt("09:45"), ET,
+    vwap_acc=VW, qqq_history=[(0, 99.5)],
+)
+check("bearish_multiplier 0.0 -> NO NEW LONGS, the shipped default",
+      m == 0.0 and label == "bearish", (m, label))
+
+print("\n=== 5c. VWAP BEATS THE FALLBACK, AND THE FALLBACK STILL WORKS ===")
+# Breadth says bullish, but both indices are under VWAP -> VWAP wins.
+m, label = regime(99.5, 99.5, bstate=breadth(1.5, 100.0))
+check("VWAP is the primary rule - strong breadth does not override it",
+      label == "bearish", (m, label))
+# No VWAP at all -> falls back to breadth + SPY-since-open, not to 1.0x.
+m, label = M._regime_multiplier(
+    RC, {}, breadth(-0.5, 100.0), [(0, 100.6)], dt("09:45"), ET,
+    vwap_acc={}, qqq_history=[],
+)
+check("no VWAP -> falls back to the breadth rule rather than 'no opinion'",
+      m == 0.15 and label == "bearish", (m, label))
+# Only ONE index has a VWAP - not enough for a two-index agreement test.
+m, label = M._regime_multiplier(
+    RC, {}, breadth(-0.5, 100.0), [(0, 100.6)], dt("09:45"), ET,
+    vwap_acc=vwap_acc(spy=100.0), qqq_history=[(0, 99.0)],
+)
+check("one index missing its VWAP -> fallback, not a half-measured verdict",
+      label == "bearish", (m, label))
+
+print("\n=== 5d. QQQ IS ACTUALLY STREAMED ===")
+_msrc = open(repo_file("src", "main.py")).read()
+check("QQQ is a benchmark symbol, so its VWAP is not built on stale REST bars",
+      'out = ["SPY", "QQQ"]' in _msrc)
+check("QQQ's own VWAP is accumulated each poll", '_update_vwap(vwap_acc, "QQQ", qqq_bar)' in _msrc)
+check("SPY's is too", '_update_vwap(vwap_acc, "SPY", spy_bar)' in _msrc)
+check("a 0x regime is reported as a stand-down, not a sizing rounding error",
+      "regime_sizing standing down" in _msrc)
 
 print("\n=== 6. _position_size COMPOSES executor.regime_size_multiplier ===")
 sizing_cfg = {"trading": {
@@ -144,6 +216,10 @@ check("breadth_halt stays enabled too - its measurement is reused, only the halt
       CFG["trading"].get("breadth_halt", {}).get("enabled") is True)
 check("bearish floor mirrors breadth_halt's own min_mean_pct",
       rc_live.get("bearish_below_pct") == CFG["trading"]["breadth_halt"]["min_mean_pct"])
+check("bearish ships as NO NEW LONGS (0.0), the stronger claim to test first",
+      rc_live.get("bearish_multiplier") == 0.0, rc_live.get("bearish_multiplier"))
+check("the three bands are ordered bullish > neutral > bearish",
+      rc_live["bullish_multiplier"] > rc_live["neutral_multiplier"] >= rc_live["bearish_multiplier"])
 
 print(f"\n{P} passed, {F} failed")
 import sys

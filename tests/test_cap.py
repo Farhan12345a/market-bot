@@ -19,7 +19,9 @@ def mk(trades=False, cap=30):
 
 print("=== A. BUDGET ===")
 check("bars only, cap 30 -> 30 symbols", mk(False,30).symbol_budget()==30)
-check("bars+trades, cap 30 -> 15 symbols", mk(True,30).symbol_budget()==15)
+# Counting model corrected 2026-09-02: the cap is UNIQUE SYMBOLS, not
+# channel-subscriptions, so trade ticks no longer halve the reach.
+check("bars+trades, cap 30 -> 30 symbols (ticks are free)", mk(True,30).symbol_budget()==30)
 check("cap 1 -> at least 1 (never 0)", mk(True,1).symbol_budget()==1)
 check("cap 0 -> still 1, never subscribes nothing", mk(True,0).symbol_budget()==1)
 check("larger cap scales", mk(False,200).symbol_budget()==200)
@@ -30,12 +32,12 @@ today = ["HOOD","MRVL","CMG","CADL","COIN","AMZN","QQQ","ADBE"] + \
 check("reproduces the 59-symbol watchlist", len(today)==59, len(today))
 ps = mk(True,30)
 ps.start(today, priority=["HOOD","MRVL","CMG","CADL","COIN","AMZN","QQQ","ADBE","BJ","BEKE","BKE"])
-check("subscribes within budget (was 59)", len(ps._symbols)==15, len(ps._symbols))
+check("subscribes within budget (was 59)", len(ps._symbols)==30, len(ps._symbols))
 check("all screener picks streamed", {"HOOD","MRVL","CMG","COIN","AMZN","ADBE"} <= set(ps._symbols))
 check("all earnings adds streamed", {"BJ","BEKE","BKE"} <= set(ps._symbols), ps._symbols)
 check("priority names come first", ps._symbols[:11]==["HOOD","MRVL","CMG","CADL","COIN","AMZN","QQQ","ADBE","BJ","BEKE","BKE"], ps._symbols[:11])
 check("static universe fills the remainder", all(s.startswith("D") for s in ps._symbols[11:]), ps._symbols[11:])
-check("dropped list recorded", len(ps._dropped_symbols)==44, len(ps._dropped_symbols))
+check("dropped list recorded", len(ps._dropped_symbols)==29, len(ps._dropped_symbols))
 check("nothing lost - kept + dropped == requested",
       set(ps._symbols)|set(ps._dropped_symbols)==set(today))
 
@@ -60,7 +62,7 @@ check("priority name that IS present is promoted", ps7._symbols[0]=="S39", ps7._
 ps8 = mk(True,30); ps8.start([f"S{i}" for i in range(40)])
 check("no priority given -> falls back to list order", ps8._symbols[0]=="S0")
 ps9 = mk(True,30); ps9.start([f"S{i}" for i in range(40)], priority=[f"S{i}" for i in range(40)])
-check("priority longer than budget -> truncated, no crash", len(ps9._symbols)==15)
+check("priority longer than budget -> truncated, no crash", len(ps9._symbols)==30)
 
 print("\n=== E. CONFIG ===")
 t=CFG["trading"]
@@ -71,7 +73,7 @@ check("stream_max_subscriptions present", "stream_max_subscriptions" in t)
 check("cap sits at or under the free-tier limit", 0 < t["stream_max_subscriptions"] <= 30, t.get("stream_max_subscriptions"))
 check("cap leaves headroom under the limit", t["stream_max_subscriptions"] < 30, t.get("stream_max_subscriptions"))
 check("trade ticks still on", t["use_trade_ticks_for_entry"] is True)
-budget = t["stream_max_subscriptions"] // (2 if t["use_trade_ticks_for_entry"] else 1)
+budget = t["stream_max_subscriptions"]   # unique symbols; ticks are free
 check(f"live config yields {budget} streamed symbols", budget >= 1, budget)
 check("default constant matches the free tier", ST.DEFAULT_MAX_SUBSCRIPTIONS==30)
 ps10 = PriceStream("k","s")

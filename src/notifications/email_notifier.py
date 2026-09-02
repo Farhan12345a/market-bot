@@ -442,6 +442,57 @@ class EmailNotifier:
             '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
         )
 
+    def _replay_progress_html(self, context_file="logs/trade_context.csv"):
+        """
+        How much replay data exists, and what it currently supports.
+
+        Shown every day because the number changes every day and because the
+        honest answer to "what stop should I use?" depends entirely on it.
+        Without this the temptation is to run ops/grid.py after three
+        sessions, read the top row, and deploy a config that is pure noise -
+        at 64 cells and 30 trades the best-looking cell sits about 2.5
+        standard errors high by chance alone. See docs/REPLAY.md.
+        """
+        try:
+            import csv as _csv
+            import os as _os
+            if not _os.path.exists(context_file):
+                n = 0
+            else:
+                with open(context_file, newline="") as fh:
+                    n = sum(1 for _ in _csv.DictReader(fh))
+        except Exception:
+            return ""
+
+        if n < 50:
+            stage, colour = "Not enough to conclude anything about a single config.", "#ef4444"
+            advice = ("The marginal tables in ops/grid.py are a weak hint at best. "
+                      "Do not read the leaderboard.")
+        elif n < 200:
+            stage, colour = "Plateau regions are becoming readable.", "#f59e0b"
+            advice = ("Read the STOP / BREAKEVEN / TAKE-PROFIT marginal tables for a "
+                      "region that is good across the board. Still no single winner.")
+        elif n < 400:
+            stage, colour = "Real differences (~$10/trade) start to separate.", "#3b82f6"
+            advice = "Leaderboard intervals are becoming meaningful. Confirm across regimes."
+        else:
+            stage, colour = "A specific configuration can be defended.", "#10b981"
+            advice = "Check --by-regime before settling on one global config."
+
+        target = 400
+        pct = min(100, int(round(100 * n / target)))
+        return (
+            '<div style="background:#f8fafc;border-left:4px solid ' + colour + ';'
+            'padding:12px 15px;border-radius:8px;margin-bottom:20px;">'
+            '<h3 style="margin:0 0 4px 0;font-size:13px;color:#334155;'
+            'text-transform:uppercase;letter-spacing:.04em;">Exit-tuning data</h3>'
+            f'<div style="font-size:14px;"><strong>{n}</strong> replayable trade(s) '
+            f'recorded &mdash; {pct}% of the ~{target} that supports a defensible '
+            f'single config.<br>'
+            f'<span style="color:{colour};font-weight:600;">{stage}</span><br>'
+            f'<span style="color:#64748b;">{advice}</span></div></div>'
+        )
+
     def _opening_burst_html(self, trades):
         """
         The opening-move experiment, reported entirely on its own.
@@ -608,6 +659,7 @@ class EmailNotifier:
         pl_color = "#10b981" if total_pl >= 0 else "#ef4444"
 
         run_context_html = self._run_context_html()
+        replay_progress_html = self._replay_progress_html()
         opening_burst_html = self._opening_burst_html(trades)
         open_positions_html = self._open_positions_html(open_positions)
         unrealized_pl = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
@@ -677,6 +729,7 @@ class EmailNotifier:
                     </div>
                 </div>
                 {run_context_html}
+                {replay_progress_html}
                 {open_summary_html}
 
                 <div style="background:#f5f7fa;border-left:4px solid #6366f1;padding:12px 15px;border-radius:8px;margin-bottom:20px;">

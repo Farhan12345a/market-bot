@@ -79,7 +79,7 @@ check("cancel raising mid-loop still lets the exit through",
       ex5.submit_exit_order("HOOD",79,"RESISTANCE",price=99.0,qty_before=79) is not None)
 src=open(repo_file("src", "executor", "executor.py")).read()
 check("cancel happens BEFORE the sell is submitted",
-      src.index("cancel_open_orders(symbol)") < src.index('submit_market_order(symbol, qty, side="sell")'))
+      src.index("cancel_open_orders(symbol)") < src.index("submit_market_order(symbol, qty, side=side)"))
 bsrc=open(repo_file("src", "broker", "alpaca_broker.py")).read()
 check("broker exposes cancel_open_orders", "def cancel_open_orders" in bsrc)
 check("broker filters to the ONE symbol", "symbols=[symbol]" in bsrc)

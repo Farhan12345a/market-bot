@@ -3,7 +3,7 @@ import logging
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from src.analytics.csv_schema import repair_header
@@ -116,6 +116,13 @@ class Executor:
         self.open_entries = {}  # symbol -> entry price, used to compute P&L when the matching exit(s) happen
         self.entry_meta = {}  # symbol -> {method, rsi, entry_time, burst_logic}, for the daily trade report
         self.day_burst_summary = ""  # one-line description of the burst logic actually used today
+        # Soft loss-velocity warnings raised today (see check_loss_velocity).
+        # Kept so the daily report can show that the day was flagged on its way
+        # down, not only that it ended down.
+        self.loss_velocity_notes = []
+        self._loss_warnings_fired = set()
+        self._loss_warn_day = None
+        self._loss_watch_started_at = None
         self._csv_appended_count = 0  # how many trades_log rows have already been written to trade_history.csv -
         # trades_log is never cleared across days in a long-running process, so without this cursor,
         # calling save_trades_log() on day 2 would re-append day 1's trades to the CSV a second time.
@@ -550,7 +557,7 @@ class Executor:
         return order
 
     def submit_exit_order(self, symbol, qty, reason="", price=None, exit_rsi=None,
-                          mfe_pct=None, mae_pct=None, qty_before=None):
+                          mfe_pct=None, mae_pct=None, qty_before=None, side="sell"):
         """
         Submit a market order to exit a position and record a documented
         trade row. Returns the order on success, or None on failure (does NOT
@@ -560,7 +567,27 @@ class Executor:
         fails, the position must stay fully tracked so the same exit
         condition gets retried on the next poll cycle instead of the bot
         silently forgetting it still holds (and needs to protect) it.
+
+        `side` exists because this was hardcoded to "sell" until 2026-09-02,
+        which is correct for a long and catastrophic for a short: selling a
+        short position DOUBLES it. flatten_all_positions (the 16:00 time stop)
+        runs through here, so any short the bot was holding at 16:00 got
+        bigger instead of closing - found 2026-08-28, after ~$1,015 of damage
+        from positions that reached short via the phantom-entry path.
+        `qty` is always a POSITIVE magnitude; `side` says which way to trade
+        it. Callers holding a broker position should derive it from the sign
+        of position.qty rather than assuming.
+
+        The bot never intends to open a short, so side="buy" here always means
+        "close something that should not exist" - it is a safety path, not a
+        short-selling strategy.
         """
+        # Everything downstream that has a direction to it - P&L, the cash
+        # effect on the buying-power cache, what counts as "closed at a loss"
+        # for the re-entry cooldown - flips for a cover. One factor, applied
+        # consistently, rather than three separate branches that can disagree.
+        is_cover = (side == "buy")
+        direction = -1 if is_cover else 1
         # Clear any still-working entry order for this symbol FIRST. Alpaca
         # rejects an exit while an opposite-side order is open ("potential wash
         # trade detected"), which on 2026-08-24 blocked four exits - including
@@ -654,7 +681,7 @@ class Executor:
                 self._last_exit_qty[symbol] = qty
 
         try:
-            order = self.broker.submit_market_order(symbol, qty, side="sell")
+            order = self.broker.submit_market_order(symbol, qty, side=side)
         except Exception as e:
             logger.error(f"Failed to submit exit order for {symbol}: {e}")
             return None
@@ -667,7 +694,8 @@ class Executor:
         # is_partial_exit, which uses the quantities rather than the reason
         # string because the top take-profit tier sells the whole position.
         if price:
-            self._buying_power += qty * price
+            # Selling a long returns cash; BUYING to cover a short spends it.
+            self._buying_power += direction * qty * price
             self._total_exposure_usd = max(0.0, self._total_exposure_usd - qty * price)
         if not is_partial_exit(reason, qty, qty_before):
             self._open_symbols.discard(symbol)
@@ -677,7 +705,12 @@ class Executor:
             # record-keeping block is wrapped in its own try/except and must
             # never be what decides whether a cooldown gets applied.
             entry_px = self.open_entries.get(symbol)
-            closed_at_loss = bool(entry_px and price is not None and price < entry_px)
+            # A long loses when price falls below entry; a short loses when it
+            # RISES above it.
+            closed_at_loss = bool(
+                entry_px and price is not None
+                and ((price > entry_px) if is_cover else (price < entry_px))
+            )
             self._note_position_closed(symbol, closed_at_loss)
 
         try:
@@ -712,12 +745,27 @@ class Executor:
                 "order_id": order.id if hasattr(order, "id") else None,
             }
             if entry_price and price is not None:
-                trade_record["pl"] = (price - entry_price) * qty
-                trade_record["pl_pct"] = (price - entry_price) / entry_price * 100
+                # direction flips the sign for a buy-to-cover: a short that is
+                # bought back BELOW its entry made money, and recording that as
+                # a loss would corrupt every downstream P&L read (the daily
+                # report, trade_history.csv, session-metrics, the daily-loss
+                # limit's own accounting).
+                trade_record["pl"] = direction * (price - entry_price) * qty
+                trade_record["pl_pct"] = direction * (price - entry_price) / entry_price * 100
             else:
                 trade_record["pl"] = 0
                 trade_record["pl_pct"] = 0
             self.trades_log.append(trade_record)
+            # One row per trade for the exit-rule replay: the market/stock
+            # state captured at ENTRY (stashed on entry_meta by main.py)
+            # joined to the outcome computed here. Guarded separately from
+            # the rest of this block - research data must never be able to
+            # interrupt an exit that has already been submitted.
+            try:
+                from src.analytics import trade_recorder as _TR
+                _TR.record_context(_TR.build_context_row(symbol, meta, trade_record))
+            except Exception as _ce:
+                logger.debug(f"{symbol}: trade context row not written: {_ce}")
             # Queue the post-exit price check. Holds a reference to the row, so
             # filling it in later updates the report and the CSV in place.
             try:
@@ -841,6 +889,83 @@ class Executor:
             return True
         return False
 
+    def check_loss_velocity(self, now=None):
+        """
+        Soft warning as the day's loss approaches max_daily_loss_usd, well
+        before the hard stop fires. Returns a note string the first time each
+        threshold is crossed, else None. NEVER halts anything.
+
+        Why this exists (PENDING_WORK.md item 8). max_daily_loss_usd was
+        doing double duty as both "circuit breaker" and "the only number
+        that exists": the day was either fine or over, with nothing in
+        between and no signal on the way there. At $500 that gap matters
+        more, not less - 2026-08-31 closed at -$546.24, which under today's
+        setting would have flattened the book mid-session with no prior
+        warning that it was heading there.
+
+        Two readings, because they answer different questions:
+          - DEPTH: loss as a fraction of the ceiling. "60% of the way to the
+            stop" is the number a human acts on.
+          - VELOCITY: dollars lost per minute since the first check today,
+            projected forward to when the ceiling would be reached at this
+            rate. -$300 by 10:00 and -$300 by 15:30 are the same depth and
+            very different days.
+
+        Each threshold fires ONCE per day (latched in _loss_warnings_fired,
+        reset by the same day-rollover the realized-P&L accumulator uses), so
+        a ~10s poll cannot turn this into a wall of identical lines.
+        """
+        cfg = (self.config.get("trading") or {}).get("loss_velocity_warning") or {}
+        if not cfg.get("enabled"):
+            return None
+        max_loss = abs((self.config.get("trading") or {}).get("max_daily_loss_usd") or 0)
+        if not max_loss:
+            return None
+
+        now = now or datetime.now()
+        today = now.date()
+        if getattr(self, "_loss_warn_day", None) != today:
+            self._loss_warn_day = today
+            self._loss_warnings_fired = set()
+            self._loss_watch_started_at = now
+
+        loss = -self.daily_pnl          # positive when the day is DOWN
+        if loss <= 0:
+            return None
+
+        fraction = loss / max_loss
+        thresholds = sorted(cfg.get("warn_fractions") or [0.4, 0.6, 0.8])
+        crossed = [t for t in thresholds
+                   if fraction >= t and t not in self._loss_warnings_fired]
+        if not crossed:
+            return None
+        level = max(crossed)
+        self._loss_warnings_fired.update(crossed)
+
+        elapsed_min = max(
+            (now - self._loss_watch_started_at).total_seconds() / 60.0, 1e-9
+        )
+        rate = loss / elapsed_min      # $/min
+        remaining = max(max_loss - loss, 0.0)
+        if rate > 0 and remaining > 0:
+            eta_min = remaining / rate
+            eta = (f"at this rate the ${max_loss:,.0f} stop is ~{eta_min:.0f} min away "
+                   f"(~{(now + timedelta(minutes=eta_min)):%H:%M})")
+        elif remaining <= 0:
+            eta = "the hard stop is already met"
+        else:
+            eta = "no measurable rate yet"
+
+        note = (
+            f"LOSS VELOCITY WARNING: down ${loss:,.2f}, {fraction * 100:.0f}% of the "
+            f"${max_loss:,.0f} daily stop, after {elapsed_min:.0f} min "
+            f"(${rate:,.2f}/min) - {eta}. This is a WARNING ONLY; entries and exits "
+            f"continue normally until the hard limit."
+        )
+        logger.warning(note)
+        self.loss_velocity_notes.append(note)
+        return note
+
     def get_daily_pnl(self):
         """Daily P&L (realized + unrealized) as of the last snapshot refresh."""
         return self.daily_pnl
@@ -866,8 +991,32 @@ class Executor:
             positions = self.broker.get_positions()
 
             for symbol, position in positions.items():
-                qty = int(abs(float(position.qty)))
+              # PER-POSITION GUARD. Without it, one malformed row aborts the
+              # whole sweep and every OTHER position stays open overnight -
+              # and this is the 16:00 time stop, the last thing between the
+              # account and holding risk it never intended to carry. A symbol
+              # that cannot be parsed is one to log and step over, not a
+              # reason to stop flattening the rest.
+              try:
+                # The SIGN matters and used to be thrown away here. A short is
+                # closed by BUYING it back; submitting a sell doubles it. The
+                # 16:00 time stop runs through this loop, so before 2026-09-02
+                # any short held at 16:00 got bigger instead of closing - found
+                # 2026-08-28 (CRWD/MTCH/OKTA, ~$1,015). The bot never intends
+                # to be short, so reaching this branch is itself evidence of
+                # another bug - but leaving a real short open overnight is
+                # worse than closing it, so it gets closed and logged loudly.
+                raw_qty = float(position.qty)
+                qty = int(abs(raw_qty))
+                side = "buy" if raw_qty < 0 else "sell"
                 if qty > 0:
+                    if side == "buy":
+                        logger.error(
+                            f"{symbol}: flattening a SHORT position ({raw_qty:g} shares) - "
+                            f"buying to cover. The bot never opens shorts deliberately, so "
+                            f"this position is evidence of a separate bug; check how it was "
+                            f"opened (phantom-entry path, or a position adopted at startup)."
+                        )
                     # Use the broker's own fill data as the entry price if this
                     # executor didn't track the entry itself (e.g. a position
                     # left over from an earlier process) so P&L is still accurate.
@@ -879,12 +1028,22 @@ class Executor:
                     current_price = getattr(position, "current_price", None)
                     price = float(current_price) if current_price else None
 
-                    order = self.submit_exit_order(symbol, qty, "FLATTEN_ALL", price)
+                    order = self.submit_exit_order(symbol, qty, "FLATTEN_ALL", price, side=side)
                     if order is not None:
                         flattened_symbols.append(symbol)
-                        logger.info(f"Flattened {symbol}: {qty} shares at {price}")
+                        logger.info(
+                            f"Flattened {symbol}: {qty} shares at {price} "
+                            f"({'bought to cover' if side == 'buy' else 'sold'})"
+                        )
                     else:
                         logger.error(f"Failed to flatten {symbol}: {qty} shares - order was not submitted")
+              except Exception as pos_err:
+                logger.error(
+                    f"{symbol}: could not be flattened ({pos_err}) - SKIPPING it and "
+                    f"continuing with the rest of the book. This symbol may still be "
+                    f"open; check the account manually."
+                )
+                continue
 
             return flattened_symbols
         except Exception as e:

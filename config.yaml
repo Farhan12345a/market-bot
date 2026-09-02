@@ -105,6 +105,45 @@ trading:
     # window this mode decides within before it exists).
     min_move_to_spread_ratio: 2.0
 
+    # Multi-factor ranking (added 2026-09-02) - PENDING_WORK backlog item 4.
+    # %move stays the CANDIDATE FILTER (min_move_pct above); this decides
+    # which of the survivors get the budget, using the same cf_score
+    # machinery the normal entry path uses instead of raw move size.
+    #
+    # Honest about what is measurable at 09:31: opening_range_minutes is 5,
+    # so there is no opening high to break out of yet; VWAP has ~a minute of
+    # prints; sector returns need a window the session has not accumulated.
+    # Those score None, and continuation_score renormalises over missing
+    # factors rather than treating them as zero - so early on this ranks on
+    # efficiency, volume acceleration and spread, and falls back to move
+    # order when nothing is scoreable at all.
+    #
+    # Ranking, never gating: it changes WHICH candidates are bought, never
+    # how many. Requires use_continuation_score.
+    #
+    # SHIPPED OFF, on evidence from its own first test. Wired and covered,
+    # but with it ON the first live-shaped run ranked a +0.2% mover ABOVE a
+    # +3.0% one - a clean inversion of the single factor that HAS evidence
+    # behind it. The cause is structural, not a bug: continuation_score
+    # renormalises over whatever factors exist, so at 09:31 a candidate with
+    # one minute of history still returns a number, computed from almost
+    # nothing. A number is not information.
+    #
+    # This follows the same discipline cf_sector_strength shipped under -
+    # computed and journalled at zero influence until the ledger shows it
+    # keeps its sign. cf_score is ALREADY recorded per signal, so the
+    # evidence accumulates either way: correlate cf_score against the
+    # opening burst's own forward returns, and turn this on if it holds.
+    #
+    # Turning it on without that check would put an unvalidated reordering
+    # into the one mode that has never yet had a clean session.
+    multifactor_rank: false
+
+    # Safety valve for when it IS turned on: refuse to reorder unless at
+    # least this fraction of candidates produced a score. Below it, move
+    # order stands - the better-evidenced ranking.
+    min_scored_fraction: 0.5
+
     # Its OWN position budget, deliberately small. These do not get to consume
     # max_concurrent_positions and starve the normal session; they are an
     # experiment running alongside it.
@@ -291,10 +330,45 @@ trading:
   # On 2026-08-21, 59 symbols were subscribed and the watchdog spent 120s
   # discovering the silence before falling back to REST for the whole session.
   #
-  # Bars and trades count as SEPARATE subscriptions, so with
-  # use_trade_ticks_for_entry on, 30 subscriptions = 15 symbols. Symbols beyond
-  # the cap are not dropped from the watchlist - they simply get REST prices,
-  # which is what every symbol used before the stream existed.
+  # COUNTING MODEL CORRECTED 2026-09-02: this is now a count of UNIQUE
+  # SYMBOLS, not of channel-subscriptions, so trade ticks are FREE rather
+  # than halving reach.
+  #
+  # The 2026-09-01 subscribe acknowledgement is what settles it - the old
+  # model cannot explain it:
+  #
+  #   subscribed to trades: [14], bars: [14], corrections: [14],
+  #              cancelErrors: [14]
+  #
+  # Four channels x 14 symbols = 56 channel-subscriptions ACCEPTED, against a
+  # configured cap of 28. Under "bars and trades each count as one" that
+  # should have been rejected at 28. It was not. And 2026-08-21's `symbol
+  # limit exceeded (405)` came at 59 SYMBOLS. One rule fits both: ~30 unique
+  # symbols on free IEX, regardless of what you subscribe them to.
+  #
+  # The old model spent half the budget on nothing - 14 symbols streamed
+  # where ~30 were available - which is exactly why the 2026-09-01 opening
+  # burst chose from a field of 2 (coverage read 2/26 at 09:30:17, 14/26 at
+  # 09:31:28; all 14 SUBSCRIBED symbols delivered, the other 12 were never
+  # subscribed).
+  #
+  # 29, NOT 30, and deliberately: sitting exactly AT a vendor limit costs
+  # the whole session's stream if the bound turns out to be exclusive, and
+  # costs one symbol if it does not. 29 of a possible 30 is still more than
+  # double the 14 the old counting model allowed, and it keeps the opening
+  # burst - the most timing-sensitive window of the day - from spending its
+  # first seconds probing a boundary.
+  #
+  # The limit is not yet empirically confirmed. If the real cap is lower, the socket
+  # says `symbol limit exceeded` in milliseconds and PriceStream now STEPS
+  # THE COUNT DOWN and reconnects (_reduce_and_retry) instead of abandoning
+  # the session to ~15-min REST - so being wrong costs a reconnect, not the
+  # opening-burst measurement. That fallback is the reason this is safe to
+  # test on a live session at all.
+  #
+  # Symbols beyond the cap are not dropped from the watchlist - they simply
+  # get REST prices, which is what every symbol used before the stream
+  # existed.
   #
   # Priority goes to the screener's picks and the day's earnings/QQQ adds; the
   # static universe fills whatever is left.
@@ -314,7 +388,7 @@ trading:
   # back to REST exactly as they do today.
   stream_benchmarks: true
 
-  stream_max_subscriptions: 28
+  stream_max_subscriptions: 29
   websocket_feed: "iex"   # iex = free tier. sip requires a paid subscription.
 
   # Subscribe to live TRADES as well as bars, and use the latest tick as the
@@ -329,6 +403,14 @@ trading:
   # It can never stop out a good position.
   # Requires use_websocket_stream; ignored otherwise, and falls back to the bar
   # close whenever no trade has arrived in the last 30s.
+  #
+  # STAYS ON. Briefly turned off on 2026-09-02 to buy stream coverage, then
+  # turned back on the same day when the coverage problem turned out to have
+  # a better cause: Alpaca caps UNIQUE SYMBOLS, not channel-subscriptions
+  # (see stream_max_subscriptions above for the evidence). Under the correct
+  # model ticks cost nothing at all - they are a second CHANNEL on a symbol
+  # already being paid for - so there is no coverage/precision trade to make.
+  # ~30 symbols WITH tick precision, rather than 26 without.
   use_trade_ticks_for_entry: true
 
   # 60 -> 10 on 2026-08-25. Reads are now free: the WebSocket has served ~80%
@@ -761,6 +843,98 @@ trading:
   # not as a considered real-money risk limit.
   max_daily_loss_usd: 500  # Stop trading if daily loss exceeds this.
 
+  # ---------------------------------------------------------------------
+  # Correlation limiter (added 2026-09-02) - PENDING_WORK backlog item 1
+  # ---------------------------------------------------------------------
+  # max_positions_per_sector buckets by ETF MEMBERSHIP; this measures actual
+  # co-movement. Two names in different sectors can be one bet (a crypto
+  # miner and a crypto exchange), and two in the same sector can be genuinely
+  # independent - only a correlation says which.
+  #
+  # Uses the per-symbol price deques the loop already keeps for momentum, so
+  # it costs no new data and no API calls.
+  #
+  # THE THRESHOLD IS DELIBERATELY LOOSE. This can only ever REDUCE positions
+  # taken, and breadth is the measured bottleneck - `edge` has been positive
+  # on every session including losing ones, which says selection works and
+  # opportunity is scarce. At 0.85 it catches near-duplicates (the same bet
+  # wearing two tickers), not merely related names. Tighten only on evidence.
+  #
+  # Fails OPEN everywhere ambiguous: too little history, a flat series, a
+  # symbol with no data. Refusing on an unmeasurable correlation would be
+  # refusing on no evidence, which is the opposite of the point.
+  #
+  # Refusals are journalled as skip_reason "correlation_limit" and those
+  # signals still carry 15/30-min forward returns - so if this starts
+  # blocking winners, the journal shows it rather than hiding it.
+  correlation_limit:
+    enabled: true
+    threshold: 0.85              # Pearson r on per-poll returns
+    min_samples: 10              # never refuse on a correlation from noise
+    max_correlated_positions: 1  # refuse once this many open positions match
+
+  # ---------------------------------------------------------------------
+  # Dynamic ATR/MAE stops (added 2026-09-02) - CALCULATOR ONLY, NOT LIVE
+  # ---------------------------------------------------------------------
+  # PENDING_WORK backlog item 3. Both inputs became available on 2026-09-02
+  # (a true atr_pct from the screener fix, MAE percentiles from the logged
+  # mae_pct), so the rule in src/analytics/dynamic_stops.py is built and
+  # tested - but it is NOT yet wired into TradeManager, and `enabled: false`
+  # keeps it that way.
+  #
+  # THE RULE (option (b)): use the symbol's OWN MAE percentile once it has
+  # min_samples of its own history, else the pooled percentile across all
+  # symbols, else the static stop. Blended with an ATR floor so a volatile
+  # name is not given a stop inside its own noise.
+  #
+  # THEN CAPPED: the result can only ever be TIGHTER than
+  # final_exit_loss_pct, never wider. This is the safety property. The
+  # rejected option (a) - max(ATR, MAE-percentile) - takes the WIDER of two
+  # numbers, both of which can exceed 1%, so a 3%-ATR name would get a stop
+  # several times looser than today's -1.0%: bigger losses per trade, the
+  # opposite of the goal. With the cap the worst case is exactly today's
+  # behaviour.
+  #
+  # Recalculated at MILESTONES (entry, +0.5%, +1.0%), never per tick: a stop
+  # recomputed continuously chases price and exits on noise in the level
+  # rather than in the market. Monotonic - falling back below a milestone
+  # does not re-widen the stop.
+  #
+  # BEFORE ENABLING: run `python3 ops/mae-percentiles.py` on the VPS and
+  # check the per-symbol n. While the dynamic universe reshuffles the pool
+  # daily most symbols have far fewer than min_samples, so nearly every
+  # symbol would use the pooled distribution - which may be the right call,
+  # but it should be a decision made against the real numbers.
+  dynamic_stops:
+    enabled: false
+    min_samples: 15        # own-history trades needed before per-symbol is used
+    mae_percentile: 75     # place the stop where 75% of trades stayed within
+    atr_multiple: 1.0      # stop must also clear 1x the symbol's ATR%; 0 disables
+    min_stop_pct: 0.25     # never tighter than this - the spread alone would trip it
+    milestones: [0.0, 0.5, 1.0]
+
+  # ---------------------------------------------------------------------
+  # Soft loss-velocity warning (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # WARNING ONLY - never halts, never resizes, never blocks an entry. The
+  # hard stop above is unchanged.
+  #
+  # max_daily_loss_usd was doing double duty as both the circuit breaker and
+  # the only loss number that exists: the day was either fine or over, with
+  # no signal on the way there. That gap matters more at $500, not less -
+  # 2026-08-31 closed at -$546.24, which under today's setting would have
+  # flattened the book mid-session with nothing said beforehand.
+  #
+  # warn_fractions are fractions of max_daily_loss_usd: at $500 these fire
+  # at -$200, -$300 and -$400. Each fires ONCE per day. The log line carries
+  # both the depth (how far to the stop) and the velocity ($/min since the
+  # first check, projected to when the ceiling would be hit at that rate) -
+  # -$300 by 10:00 and -$300 by 15:30 are the same depth and very different
+  # days, and only the second number tells them apart.
+  loss_velocity_warning:
+    enabled: true
+    warn_fractions: [0.4, 0.6, 0.8]
+
   # --- Burst throttle ---
   # When many symbols signal in the SAME poll they are rarely independent
   # ideas - it is one market move surfacing in many tickers at once. On
@@ -931,14 +1105,42 @@ trading:
   # weak/strong first 15 minutes says anything about the rest of the
   # session is what this measures, not what it starts from. Watch the
   # REGIME log line against the rest of each day's session-metrics.
+  # PRIMARY RULE, as of 2026-09-02: SPY and QQQ against their OWN session
+  # VWAP. Price above VWAP means the session's average buyer is in profit -
+  # a cleaner read on "is the tape supporting longs" than a move measured
+  # from a single opening print, which one gap or one bad tick can dominate.
+  # VWAP is also the level institutional flow is actually benchmarked
+  # against, so the market reacts to it rather than it being imposed.
+  #
+  #   both above VWAP  -> BULLISH, full size
+  #   one above        -> NEUTRAL, half size. The indices disagreeing IS the
+  #                       neutral case, not a weak bullish one.
+  #   both below       -> BEARISH, and the default is 0.0: NO NEW LONGS.
+  #                       A long scalp with both indices under VWAP is
+  #                       fighting the tape, and there is no requirement to
+  #                       trade every day. Set 0.25 to take quarter size
+  #                       instead of standing down - but test standing down
+  #                       first, which is the stronger claim and the cheaper
+  #                       mistake if wrong.
+  #
+  # Requires QQQ streamed (added to _benchmark_symbols the same day) - a
+  # regime read off a REST-delayed QQQ would answer "was QQQ above VWAP a
+  # quarter of an hour ago".
+  #
+  # bearish_below_pct / bullish_above_pct below are the FALLBACK rule, used
+  # only when an index has no VWAP yet (it needs bars carrying volume, and a
+  # benchmark that fell back to REST may never accumulate any). Falling back
+  # to "no opinion" would mean full size on no evidence, in exactly the
+  # situation this feature exists for.
   regime_sizing:
     enabled: true
     check_time: "09:45"        # same evidence window as breadth_halt
-    bearish_below_pct: -0.3    # either reading below this -> bearish (mirrors breadth_halt's min_mean_pct)
-    bullish_above_pct: 0.0     # BOTH readings at/above this -> bullish; anything else -> neutral
     bullish_multiplier: 1.0
     neutral_multiplier: 0.5
-    bearish_multiplier: 0.15   # midpoint of the requested 0-25% bearish range
+    bearish_multiplier: 0.0    # 0 = no new longs. 0.25 = quarter size instead.
+    # Fallback-only thresholds (no VWAP available):
+    bearish_below_pct: -0.3    # either reading below this -> bearish
+    bullish_above_pct: 0.0     # BOTH readings at/above this -> bullish
 
   # Total positions OPENED over the whole day, regardless of how many are held
   # at once - a different limit from max_concurrent_positions above. On
@@ -1358,6 +1560,38 @@ trading:
   # exclude it is fitting noise on a 71-trade sample.
   min_stock_price: 10
   max_stock_price: 300
+
+  # ---------------------------------------------------------------------
+  # Untradeable symbols (added 2026-09-02) - PENDING_WORK item 0d, bullet 3
+  # ---------------------------------------------------------------------
+  # Open as a theoretical concern since 2026-08-21, EVIDENCED 2026-09-01:
+  # SOXL and TQQQ were both on the watchlist and SOXL was the FIRST
+  # opening-burst entry of the day (39 shares @ 106.50), inside a 4-trade
+  # 0W/4L opening block.
+  #
+  # Two distinct reasons, both in src/screener/exclusions.py:
+  #   1. A basket cannot burst the way a single name can. The entry thesis is
+  #      an unpriced single-name catalyst; an index's move is the average of
+  #      its holdings. It also defeats the sector cap - SOXL IS the semi
+  #      complex, held alongside INTC/NVDA/KLAC (all watched 09-01) that is
+  #      one bet counted four times.
+  #   2. Leverage breaks every percentage threshold here. Each stop and tier
+  #      is a percent; a 3x fund hits the -0.5% first exit on a -0.17% move
+  #      in the underlying. Noise, not a decision - and the same fund clears
+  #      min_move_pct trivially, so it keeps qualifying and keeps being
+  #      bought.
+  #
+  # max_stock_price: 300 blocks QQQ at ~$711 BY ACCIDENT. A leveraged fund at
+  # $106 sails straight through, which is exactly what happened.
+  #
+  # Enforced at three layers, mirroring the price band: screener (before
+  # ranking, so an excluded name cannot take a top-N place or a stream slot),
+  # watchlist (catches names arriving via the static universe / earnings /
+  # QQQ lists), and entry time (last check before real money moves).
+  exclude_leveraged_etfs: true
+  exclude_basket_etfs: true
+  # Extra names beyond the two lists above. Symbols here are always refused.
+  exclude_symbols: []
   min_avg_volume: 1000000  # Minimum average daily volume
 
 broker:

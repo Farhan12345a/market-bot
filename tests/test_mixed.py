@@ -22,7 +22,7 @@ class Broker:
     def get_latest_quote(s,sym): return {"bid":9.99,"ask":10.01,"spread":0.02}
 def mkstream(syms, trades=True):
     ST._ACTIVE_STREAM=None
-    ps=PriceStream("k","s",feed="iex",subscribe_trades=trades,max_subscriptions=28)
+    ps=PriceStream("k","s",feed="iex",subscribe_trades=trades,max_subscriptions=14)   # pinned: this file tests the 14-streamed/16-REST split itself
     ps._run_forever=lambda: None
     ps.start(syms, priority=syms[:14])
     return ps
@@ -161,7 +161,7 @@ for _ in range(40):
     time.sleep(0.1)
 check("wrong data plan -> named give-up", ps6._gave_up is True)
 ps6.stop()
-ps7=PriceStream("k","s",feed="sip_typo",subscribe_trades=False,max_subscriptions=28)
+ps7=PriceStream("k","s",feed="sip_typo",subscribe_trades=False,max_subscriptions=14)   # pinned: this file tests the 14-streamed/16-REST split itself
 check("unknown feed name falls back to iex rather than crashing",
       ps7._resolve_feed().value=="iex", ps7._resolve_feed())
 ps8=mkstream([]) ; check("empty symbol list -> no crash", ps8._symbols==[]); ps8.stop()
@@ -172,7 +172,7 @@ check("get_bar after stop -> None, no raise", ps10.get_bar("A") is None)
 check("get_last_trade_price after stop -> None", ps10.get_last_trade_price("A") is None)
 check("stats after stop -> dict, no raise", isinstance(ps10.stats(), dict))
 ps11=mkstream(SYMS)
-check("subscribed count never exceeds the budget", len(ps11._symbols)<=14)
+check("subscribed count never exceeds the budget", len(ps11._symbols)<=14, len(ps11._symbols))
 check("kept + dropped == everything requested",
       set(ps11._symbols)|set(ps11._dropped_symbols)==set(SYMS))
 ps11.stop()

@@ -82,11 +82,13 @@ check("14 watched, 14 budget -> 'every tradeable name gets live prices'",
       any("every tradeable name" in m for m in cap.msgs), cap.msgs)
 cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(CFG, [f"S{i}" for i in range(59)])
 check("59 watched -> explicit warning", any("exceeds the stream budget" in m for m in cap.msgs), cap.msgs)
-check("names how many run on REST", any("45 symbol" in m for m in cap.msgs), cap.msgs)
-check("quantifies it as a percentage", any("76% of the" in m for m in cap.msgs), cap.msgs)
+# 29-symbol budget as of 2026-09-02 (unique symbols, not channel-subs), so
+# 59 watched leaves 30 on REST rather than the 45 the old halving implied.
+check("names how many run on REST", any("30 symbol" in m for m in cap.msgs), cap.msgs)
+check("quantifies it as a percentage", any("51% of the" in m for m in cap.msgs), cap.msgs)
 noticks=copy.deepcopy(CFG); noticks["trading"]["use_trade_ticks_for_entry"]=False
 cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(noticks, [f"S{i}" for i in range(28)])
-check("ticks off -> budget doubles to 28, no warning",
+check("ticks off changes NOTHING now - the cap counts symbols, not channels",
       any("every tradeable name" in m for m in cap.msgs), cap.msgs)
 off=copy.deepcopy(CFG); off["trading"]["use_websocket_stream"]=False
 cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(off, ["A","B"])

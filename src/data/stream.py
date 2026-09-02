@@ -109,6 +109,19 @@ ALPACA_WS_LOGGER = "alpaca.data.live.websocket"
 CONNECTION_LIMIT_RETRIES = 4
 CONNECTION_LIMIT_RETRY_DELAY = 15
 
+# `symbol limit exceeded` backoff. The unique-symbol cap (see
+# PriceStream.symbol_budget) is an empirical claim, so a wrong guess must
+# cost a reconnect rather than the session's stream. Multiplicative because
+# the true limit is an unknown round number and probing it one symbol at a
+# time would spend the opening window doing it.
+SYMBOL_LIMIT_RETRIES = 3
+SYMBOL_LIMIT_BACKOFF = 0.6
+# Deliberately NOT CONNECTION_LIMIT_RETRY_DELAY (15s). That delay exists to let
+# the server release another process's socket; a symbol-count rejection has
+# nothing to release, it just resubscribes smaller. At 15s a full backoff would
+# burn 45s of the 180-second opening-burst window waiting for nothing.
+SYMBOL_LIMIT_RETRY_DELAY = 1
+
 # The single live stream in this process, if any.
 _ACTIVE_STREAM = None
 _ACTIVE_LOCK = threading.Lock()
@@ -118,8 +131,10 @@ RETRYABLE_STREAM_ERRORS = ("connection limit exceeded",)
 
 FATAL_STREAM_ERRORS = {
     "symbol limit exceeded": (
-        "too many symbols subscribed for this feed - lower "
-        "stream_max_subscriptions (bars and trades may each count as one)"
+        "too many UNIQUE SYMBOLS subscribed for this feed - lower "
+        "stream_max_subscriptions. Channels (bars/trades) are free; only the "
+        "symbol count is capped. Recoverable: _reduce_and_retry steps the "
+        "count down and reconnects before this is treated as fatal"
     ),
 
     "auth failed": "the API key/secret were rejected by the stream endpoint",
@@ -153,6 +168,13 @@ class _StreamErrorWatcher(logging.Handler):
             pass
 
     def clear_retryable(self):
+        self.retryable = None
+
+    def clear(self):
+        """Forget a recorded fatal error, so a retry that CHANGES the
+        conditions (fewer symbols - see _reduce_and_retry) is judged on its
+        own attempt rather than immediately re-reading the last one's."""
+        self.hit = None
         self.retryable = None
 
 
@@ -199,13 +221,33 @@ class PriceStream:
         """
         How many symbols this connection may carry.
 
-        Bars and trades are counted as SEPARATE subscriptions, so enabling trade
-        ticks halves the reach. That is the conservative reading of Alpaca's
-        limit; if it turns out to count unique symbols instead, raising
-        stream_max_subscriptions recovers the difference with no code change.
+        COUNTING MODEL CHANGED 2026-09-02: Alpaca caps UNIQUE SYMBOLS, not
+        channel-subscriptions, so trade ticks are free rather than halving
+        reach.
+
+        The evidence is the 2026-09-01 subscribe acknowledgement, which the
+        old model cannot explain:
+
+            subscribed to trades: [14 symbols], bars: [14],
+                       corrections: [14], cancelErrors: [14]
+
+        That is FOUR channels x 14 symbols = 56 channel-subscriptions,
+        accepted with no error, against a configured cap of 28. Under the old
+        "bars and trades each count as one" reading it should have been
+        rejected at 28. It wasn't. And 2026-08-21's `symbol limit exceeded
+        (405)` came at 59 SYMBOLS. Both readings fit one rule: ~30 unique
+        symbols on the free IEX feed, whatever you subscribe them to.
+
+        The old model therefore spent half the budget on nothing: 14 symbols
+        streamed where 28-30 were available, which is precisely the gap that
+        left the 2026-09-01 opening burst choosing from a field of 2.
+
+        Still empirically unconfirmed at 30 - if the cap is lower, the socket
+        returns `symbol limit exceeded` in milliseconds and _reduce_and_retry
+        below steps the count down and reconnects rather than abandoning the
+        session to REST.
         """
-        channels = 2 if self._subscribe_trades else 1
-        return max(1, self._max_subscriptions // channels)
+        return max(1, self._max_subscriptions)
 
     def is_running(self):
         """
@@ -243,9 +285,9 @@ class PriceStream:
             self._dropped_symbols = dropped
             logger.warning(
                 f"PriceStream: {len(requested)} symbols requested but the "
-                f"{self._feed} feed allows {self._max_subscriptions} subscriptions "
-                f"({'bars+trades' if self._subscribe_trades else 'bars'} = "
-                f"{2 if self._subscribe_trades else 1} per symbol, so {budget} symbols). "
+                f"{self._feed} feed allows {budget} UNIQUE SYMBOLS "
+                f"({'bars+trades' if self._subscribe_trades else 'bars only'} - "
+                f"channels are free, only the symbol count is capped). "
                 f"Streaming the top {len(kept)}; the other {len(dropped)} use REST."
             )
             logger.info(f"PriceStream streaming: {', '.join(kept)}")
@@ -307,6 +349,50 @@ class PriceStream:
             f"PriceStream starting for {len(self._symbols)} symbols on the {self._feed} feed"
         )
 
+    def _reduce_and_retry(self, raw):
+        """
+        Step the symbol count down and reconnect after a `symbol limit
+        exceeded` rejection. True if a retry was started, False once there is
+        nothing sensible left to try (caller then gives up to REST).
+
+        The cap is an empirical claim (see symbol_budget), so being wrong
+        about it must cost a reconnect, not a session. Each attempt keeps the
+        highest-priority symbols - the screener's picks - because those are
+        where a signal is actually likely to fire.
+
+        Steps down multiplicatively rather than by one: the limit is a round
+        number we do not know, and probing it one symbol at a time would burn
+        the opening window doing it.
+        """
+        self._symbol_limit_retries = getattr(self, "_symbol_limit_retries", 0) + 1
+        if self._symbol_limit_retries > SYMBOL_LIMIT_RETRIES:
+            return False
+
+        current = len(self._symbols)
+        reduced = max(1, int(current * SYMBOL_LIMIT_BACKOFF))
+        if reduced >= current:
+            return False
+
+        dropped = self._symbols[reduced:]
+        self._dropped_symbols = list(self._dropped_symbols) + list(dropped)
+        self._symbols = self._symbols[:reduced]
+        self._max_subscriptions = reduced
+
+        watcher = self._error_watcher
+        if watcher:
+            watcher.clear()
+
+        logger.warning(
+            f"PriceStream: {raw} at {current} symbols - retrying with "
+            f"{reduced} (attempt {self._symbol_limit_retries} of "
+            f"{SYMBOL_LIMIT_RETRIES}). Dropped to REST: "
+            f"{', '.join(dropped) if dropped else 'none'}. This is the "
+            f"unique-symbol cap being probed; the session is NOT lost."
+        )
+        self._restart_connection(delay=SYMBOL_LIMIT_RETRY_DELAY)
+        self._started_at = time.monotonic()
+        return True
+
     def _watch_for_silence(self):
         """
         Shut the stream down if it never delivers anything. See
@@ -356,6 +442,20 @@ class PriceStream:
             hit = watcher.hit if watcher else None
             if hit:
                 raw, explanation = hit
+                # A SYMBOL-COUNT rejection is recoverable and should not cost
+                # the session. Every other fatal error (auth, entitlement) is
+                # not - no number of symbols fixes a rejected key.
+                #
+                # Added 2026-09-02 alongside the unique-symbol counting model.
+                # Raising the cap to 30 is an empirical bet; without this, a
+                # wrong bet drops the whole session to ~15-min REST and takes
+                # the opening-burst measurement with it, which is exactly the
+                # outcome the last four sessions kept producing. With it, the
+                # cost of being wrong is one reconnect and a smaller watchlist.
+                if "symbol limit exceeded" in (raw or "").lower():
+                    if self._reduce_and_retry(raw):
+                        continue
+
                 logger.error(
                     f"PriceStream FATAL: the feed rejected this subscription - "
                     f"{explanation}. Alpaca said: \"{raw}\". Giving up on the "
@@ -456,14 +556,23 @@ class PriceStream:
                 logger.debug(f"Error stopping stream (usually harmless): {e}")
         self._connected = False
 
-    def _restart_connection(self):
+    def _restart_connection(self, delay=None):
         """
         Drop the current socket so the supervisor loop reconnects.
 
         Closes only the connection, NOT the PriceStream: _stop_requested is
         left clear so _run_forever falls straight into its reconnect branch.
-        Waits out CONNECTION_LIMIT_RETRY_DELAY here so the server has time to
-        release the previous holder's slot.
+
+        `delay` defaults to CONNECTION_LIMIT_RETRY_DELAY, which exists for the
+        CONNECTION-limit case: another process is holding the account's single
+        data websocket, and the server needs time to release it. A SYMBOL-count
+        rejection is a different thing entirely - nothing has to be released,
+        the same connection just resubscribes with fewer symbols - so that path
+        passes a much shorter delay.
+
+        The difference matters at exactly the wrong moment: the opening burst
+        window is 180 seconds long, and three retries at 15s each would spend
+        45 of them waiting for a release that was never pending.
         """
         stream = self._stream
         if stream is not None:
@@ -471,7 +580,9 @@ class PriceStream:
                 stream.stop()
             except Exception as e:
                 logger.debug(f"Error closing the socket before retry: {e}")
-        self._stop_requested.wait(CONNECTION_LIMIT_RETRY_DELAY)
+        wait = CONNECTION_LIMIT_RETRY_DELAY if delay is None else delay
+        if wait:
+            self._stop_requested.wait(wait)
 
     def _resolve_feed(self):
         """Turn the config feed string into alpaca-py's DataFeed enum."""
