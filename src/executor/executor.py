@@ -1,5 +1,6 @@
 import csv
 import logging
+from collections import deque
 import json
 import os
 import time
@@ -191,6 +192,12 @@ class Executor:
         # chasing a falling price one poll at a time.
         self._limit_exit_attempts = {}
         self._logged_loss_limit = None
+        self._logged_loss_tier = 1.0
+        # PRE-TRADE RATE CONTROLS. A rolling window of (monotonic_ts, notional)
+        # for every order SUBMITTED, entries and exits alike. See
+        # rate_limit_check - this is the guard against a runaway loop, which is
+        # a different failure from any single order being wrong.
+        self._order_times = deque(maxlen=2000)
         self._entry_attempts = {}
         self._entry_attempts_day = None
 
@@ -274,6 +281,18 @@ class Executor:
                         f"{symbol}: entry price corrected {recorded:.4f} -> {actual:.4f} "
                         f"({slip_pct:+.2f}% slippage vs the signal price)"
                     )
+                    # KEEP IT. This number was computed and thrown away since
+                    # the day it was written, so the one cost that scales with
+                    # every single trade has never been analysable. It matters
+                    # more here than in most strategies: targets are 0.75-1.5%,
+                    # and 2026-09-02 saw +0.45% on NOW and +0.91% on OLLI -
+                    # most of a winning trade gone before the position existed.
+                    # Accumulated per symbol because a position can be
+                    # corrected more than once as fills arrive.
+                    meta = self.entry_meta.setdefault(symbol, {})
+                    meta["signal_price"] = meta.get("signal_price", recorded)
+                    meta["entry_slippage_pct"] = round(
+                        (actual - meta["signal_price"]) / meta["signal_price"] * 100, 4)
                     self.open_entries[symbol] = actual
                     # Tell the strategy too, or every exit rule for this
                     # position keeps measuring against the signal price.
@@ -466,6 +485,91 @@ class Executor:
         """Number of open positions, derived from the reconciled symbol set."""
         return len(self._open_symbols)
 
+    def _note_order_submitted(self, qty, price):
+        """Record one submitted order for the rate window."""
+        try:
+            self._order_times.append((time.monotonic(), abs(float(qty or 0) * float(price or 0))))
+        except (TypeError, ValueError):
+            self._order_times.append((time.monotonic(), 0.0))
+
+    def rate_limit_check(self, qty=None, price=None):
+        """
+        (ok, reason) for PRE-TRADE rate controls. Never raises.
+
+        THE FAILURE THIS EXISTS FOR is different in kind from every other guard
+        in this file. max_concurrent_positions, max_total_exposure_fraction and
+        max_daily_loss_usd all bound the STATE the account ends up in; they are
+        checked against a snapshot that refreshes once per poll. None of them
+        bounds the RATE at which orders leave, and a loop that submits the same
+        order repeatedly inside one poll - a retry that never terminates, a
+        callback wired twice, a websocket reconnect that replays a buffer - can
+        do its damage entirely between two snapshots.
+
+        2026-09-02 is the mild version: 22 entries in seven minutes, and the
+        only thing that stopped it was the daily loss limit, i.e. a
+        consequence-based stop rather than a pre-trade control. WDAY alone was
+        submitted eight times in five minutes. Nothing structural said no.
+
+        Four independent limits, all optional, all fail-OPEN on a config
+        problem but fail-CLOSED on an actual breach:
+
+          max_orders_per_minute      - orders of any kind in a rolling 60s
+          max_notional_per_minute    - dollars committed in a rolling 60s
+          max_shares_per_order       - one absurd qty, e.g. from a bad price
+          max_notional_per_order     - the same in dollars
+
+        Counts ENTRIES AND EXITS together on purpose. A runaway loop does not
+        care which side it is on, and an exit storm against a broker that keeps
+        rejecting is exactly as damaging as an entry storm.
+        """
+        cfg = (self.config.get("trading") or {}).get("rate_limits") or {}
+        if not cfg.get("enabled", True):
+            return True, None
+
+        try:
+            q = abs(float(qty or 0))
+            px = abs(float(price or 0))
+            notional = q * px
+
+            max_shares = cfg.get("max_shares_per_order")
+            if max_shares and q > float(max_shares):
+                return False, (f"order of {q:,.0f} shares exceeds "
+                               f"max_shares_per_order {max_shares:,}")
+
+            max_notional = cfg.get("max_notional_per_order")
+            if max_notional and notional > float(max_notional):
+                return False, (f"order of ${notional:,.0f} exceeds "
+                               f"max_notional_per_order ${float(max_notional):,.0f}")
+
+            window = float(cfg.get("window_seconds", 60))
+            cutoff = time.monotonic() - window
+            recent = [(t, n) for t, n in self._order_times if t >= cutoff]
+
+            max_orders = cfg.get("max_orders_per_minute")
+            if max_orders and len(recent) >= int(max_orders):
+                return False, (
+                    f"{len(recent)} orders in the last {window:.0f}s is at "
+                    f"max_orders_per_minute ({max_orders}) - refusing until the "
+                    f"window clears. This is the runaway-loop guard, not a "
+                    f"judgement about this particular order."
+                )
+
+            max_min_notional = cfg.get("max_notional_per_minute")
+            if max_min_notional:
+                used = sum(n for _, n in recent)
+                if used + notional > float(max_min_notional):
+                    return False, (
+                        f"${used:,.0f} already committed in the last {window:.0f}s; "
+                        f"this ${notional:,.0f} order would pass "
+                        f"max_notional_per_minute ${float(max_min_notional):,.0f}"
+                    )
+            return True, None
+        except Exception as e:
+            # A malformed limit must not block trading outright - but it must
+            # be loud, because it means the guard is not guarding.
+            logger.error(f"rate_limit_check failed ({type(e).__name__}: {e}) - allowing the order")
+            return True, None
+
     def pre_entry_check(self, qty, price, symbol=None):
         """
         Returns (ok: bool, reason: str). Checked BEFORE ever attempting a
@@ -535,6 +639,12 @@ class Executor:
         # sells on 2026-09-01, eight submissions of one symbol on 2026-09-02).
         # A guard that only closes the specific hole last seen will be
         # rediscovered by the next one.
+        # Rate controls FIRST - the cheapest check, and the one whose whole
+        # purpose is to fire before anything else has a chance to run away.
+        ok, why = self.rate_limit_check(qty, price)
+        if not ok:
+            return False, why
+
         max_attempts = self.config["trading"].get("max_entry_attempts_per_symbol_per_day")
         if max_attempts and symbol:
             attempts = self.entry_attempts_today(symbol)
@@ -648,6 +758,7 @@ class Executor:
         self._open_symbols.add(symbol)
         self._entry_recorded_at[symbol] = time.monotonic()
         self._count_entry_attempt(symbol)
+        self._note_order_submitted(qty, price)
         # A NEW position gets a fresh marketable-limit budget. Deliberately
         # reset here and not on exit: this executor records a position as
         # closed the moment the exit ORDER is submitted, not when it fills, so
@@ -823,6 +934,21 @@ class Executor:
                 logger.debug(f"{symbol}: marketable limit price unavailable ({e}) - using market")
                 limit_px = None
 
+        # Exits are COUNTED against the rate window but never BLOCKED by it.
+        # An exit is how risk gets smaller; refusing one to satisfy a rate
+        # limit would leave a position open precisely when something is already
+        # going wrong. Counting them still matters - an exit storm consumes the
+        # same broker capacity an entry storm does, so entries feel the
+        # pressure even when exits do not.
+        self._note_order_submitted(qty, price)
+        _rate_ok, _rate_why = self.rate_limit_check(qty, price)
+        if not _rate_ok:
+            logger.warning(
+                f"{symbol}: exit exceeds a rate limit ({_rate_why}) - submitting "
+                f"ANYWAY. Exits are never rate-blocked; an unclosed position is "
+                f"the larger risk. New ENTRIES are already refused."
+            )
+
         try:
             order = None
             if limit_px:
@@ -907,14 +1033,51 @@ class Executor:
                 "stop_loss_used": is_stop_loss_exit(reason),
                 "order_id": order.id if hasattr(order, "id") else None,
             }
-            if entry_price and price is not None:
+            # EXIT SLIPPAGE: what the exit rule asked for vs what the broker
+            # actually gave. `price` above is the DECISION price - the level
+            # the stop or target fired at - and the fill can be well away from
+            # it. On 2026-09-02 a -1.0% stop realized -1.46% (NOW), -1.59%
+            # (WDAY) and -1.07% (CRM); those numbers only existed because they
+            # were computed by hand from the log afterwards. Entry slippage has
+            # been captured since 2026-08-20 and the exit half never was, so
+            # half of the single largest recurring cost was invisible.
+            #
+            # Recorded, never acted on here: it is a measurement, and the thing
+            # that acts on it is marketable_limit_exits.
+            fill_px = None
+            for attr in ("filled_avg_price", "avg_fill_price"):
+                raw = getattr(order, attr, None)
+                if raw:
+                    try:
+                        fill_px = float(raw)
+                        break
+                    except (TypeError, ValueError):
+                        continue
+            _meta = self.entry_meta.get(symbol) or {}
+            trade_record["entry_slippage_pct"] = _meta.get("entry_slippage_pct")
+            trade_record["decision_price"] = price
+            trade_record["fill_price"] = fill_px
+            if fill_px and price:
+                # Signed so it reads the same way for both sides: NEGATIVE is
+                # always worse for this position. A sell filled below the
+                # decision price and a cover filled above it are both adverse.
+                trade_record["exit_slippage_pct"] = round(
+                    direction * (fill_px - price) / price * 100, 4)
+            else:
+                trade_record["exit_slippage_pct"] = None
+
+            # The fill is the truth for P&L when we have it; the decision price
+            # is only a stand-in for it.
+            price_for_pnl = fill_px or price
+
+            if entry_price and price_for_pnl is not None:
                 # direction flips the sign for a buy-to-cover: a short that is
                 # bought back BELOW its entry made money, and recording that as
                 # a loss would corrupt every downstream P&L read (the daily
                 # report, trade_history.csv, session-metrics, the daily-loss
                 # limit's own accounting).
-                trade_record["pl"] = direction * (price - entry_price) * qty
-                trade_record["pl_pct"] = direction * (price - entry_price) / entry_price * 100
+                trade_record["pl"] = direction * (price_for_pnl - entry_price) * qty
+                trade_record["pl_pct"] = direction * (price_for_pnl - entry_price) / entry_price * 100
             else:
                 trade_record["pl"] = 0
                 trade_record["pl_pct"] = 0
@@ -1103,6 +1266,57 @@ class Executor:
             )
             return True
         return False
+
+    def loss_tier_multiplier(self):
+        """
+        Size scalar from how deep the day's loss already is, or 1.0.
+
+        THE GAP THIS FILLS. Until now the day was binary: fine, or over. The
+        velocity warnings fired at 40/60/80% of the ceiling and did nothing but
+        log, so a session that was clearly not working kept taking full-size
+        trades until the hard stop. 2026-09-02 burned $500 in eight minutes
+        with three warnings printed along the way and every entry after them
+        sized exactly as if nothing had happened.
+
+        Tiers are FRACTIONS of the computed limit, never dollars, so they keep
+        meaning the same thing as the account grows - the same reason the limit
+        itself became percent-of-equity.
+
+        Composes multiplicatively with regime_size_multiplier, and that is
+        deliberate: a choppy tape (0.5x) and a day already half-spent (0.5x)
+        are two independent reasons to be smaller, and a system that honoured
+        only the larger of them would ignore one of them entirely.
+
+        Never returns 0 - stopping entirely is the hard limit's job, and having
+        two mechanisms that can both end the day makes it ambiguous which one
+        did.
+        """
+        cfg = (self.config.get("trading") or {}).get("loss_tiers") or {}
+        if not cfg.get("enabled"):
+            return 1.0
+        try:
+            limit = abs(self.daily_loss_limit_usd() or 0)
+            if limit <= 0:
+                return 1.0
+            loss = -float(self.daily_pnl or 0)
+            if loss <= 0:
+                return 1.0
+            fraction = loss / limit
+            mult = 1.0
+            for tier in sorted(cfg.get("tiers") or [], key=lambda t: t.get("at_fraction", 0)):
+                if fraction >= float(tier.get("at_fraction", 1.0)):
+                    mult = float(tier.get("size_multiplier", 1.0))
+            if mult != self._logged_loss_tier:
+                self._logged_loss_tier = mult
+                logger.warning(
+                    f"LOSS TIER: down ${loss:,.2f}, {fraction * 100:.0f}% of the "
+                    f"${limit:,.2f} daily limit - new entries sized at {mult:g}x. "
+                    f"Exits and open positions are untouched."
+                )
+            return mult
+        except Exception as e:
+            logger.error(f"loss_tier_multiplier failed ({e}) - no size reduction applied")
+            return 1.0
 
     def check_loss_velocity(self, now=None):
         """
@@ -1326,6 +1540,12 @@ class Executor:
             # and a column added mid-schema is what made the old header rot
             # unreadable. Any new column goes here.
             "list_source",
+            # 2026-09-02: execution cost, the one number that scales with every
+            # trade and had never been persisted. entry_slippage_pct was
+            # computed and logged since 2026-08-20 and discarded; the exit half
+            # was not measured at all. Both are signed so NEGATIVE is always
+            # adverse for the position, whichever side it is.
+            "entry_slippage_pct", "decision_price", "fill_price", "exit_slippage_pct",
         ]
         try:
             path = Path(filepath)
@@ -1343,7 +1563,13 @@ class Executor:
                     "stop_loss_used", "exit_rsi", "qty", "pl", "pl_pct",
                 ],
                 # v2: before list_source
-                [c for c in fieldnames if c != "list_source"],
+                [c for c in fieldnames if c not in
+                 ("list_source", "entry_slippage_pct", "decision_price",
+                  "fill_price", "exit_slippage_pct")],
+                # v3: before the slippage columns
+                [c for c in fieldnames if c not in
+                 ("entry_slippage_pct", "decision_price", "fill_price",
+                  "exit_slippage_pct")],
             ]
             repair_header(str(path), fieldnames, legacy_schemas=legacy)
             write_header = not path.exists() or path.stat().st_size == 0

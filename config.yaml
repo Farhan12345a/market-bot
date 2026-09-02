@@ -946,6 +946,76 @@ trading:
   # Callers must treat unknown as no information rather than as a refusal.
   max_plausible_spread_pct: 2.0
 
+  # ---------------------------------------------------------------------
+  # PRE-TRADE RATE CONTROLS (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # A different failure from any other guard here. max_concurrent_positions,
+  # max_total_exposure_fraction and max_daily_loss_usd all bound the STATE the
+  # account ends up in, checked against a snapshot that refreshes once a poll.
+  # None of them bounds the RATE at which orders leave, and a runaway loop - a
+  # retry that never terminates, a callback wired twice, a websocket reconnect
+  # replaying a buffer - does its damage entirely between two snapshots.
+  #
+  # 2026-09-02 was the mild version: 22 entries in seven minutes, stopped only
+  # by the daily loss limit, which is a consequence-based stop rather than a
+  # pre-trade control. WDAY alone was submitted eight times in five minutes.
+  #
+  # Counts ENTRIES AND EXITS together - a runaway loop does not care which side
+  # it is on. Exits are counted but never BLOCKED: an unclosed position is the
+  # larger risk, so the pressure falls on new entries instead.
+  #
+  # Sized against the real shape of a session, not arbitrarily: the busiest
+  # legitimate stretch on record is the opening burst taking up to 7 positions
+  # plus exits, so 12/min leaves headroom while 22-in-7-minutes does not fit.
+  rate_limits:
+    enabled: true
+    window_seconds: 60
+    max_orders_per_minute: 12
+    max_notional_per_minute: 60000    # ~6 full slot-share positions
+    max_shares_per_order: 5000
+    max_notional_per_order: 15000     # above max_position_per_stock_usd, so it
+                                      # is a sanity backstop, not the sizing rule
+
+  # ---------------------------------------------------------------------
+  # Two-tier daily loss response (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # Until now the day was binary: fine, or over. loss_velocity_warning fired at
+  # 40/60/80% of the ceiling and did nothing but log, so a session that was
+  # clearly not working kept taking FULL SIZE trades until the hard stop.
+  # 2026-09-02 burned its limit in eight minutes with three warnings printed
+  # along the way and every entry after them sized as if nothing had happened.
+  #
+  # FRACTIONS of the computed limit, never dollars, so the tiers keep meaning
+  # the same thing as the account grows - the same reason the limit itself is
+  # percent-of-equity.
+  #
+  # Composes MULTIPLICATIVELY with regime_sizing: a choppy tape (0.5x) and a
+  # half-spent day (0.5x) are two independent reasons to be smaller, and
+  # honouring only the larger would ignore one of them. Never returns 0 -
+  # stopping entirely is the hard limit's job, and two mechanisms that can both
+  # end the day makes it ambiguous which one did.
+  loss_tiers:
+    enabled: true
+    tiers:
+      - {at_fraction: 0.5, size_multiplier: 0.5}   # half the limit -> half size
+      - {at_fraction: 0.75, size_multiplier: 0.25}
+
+  # ---------------------------------------------------------------------
+  # Never enter on stale data (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # When the stream dies the bot falls back to REST, which the free tier delays
+  # by ~15 minutes, and CARRIES ON TRADING. That was deliberate while the
+  # stream was unreliable, but 2026-08-20 measured what it costs: losing
+  # entries landed at the 87th percentile of the surrounding half-hour - the
+  # bot was systematically buying the top of a move it could not see had
+  # already happened.
+  #
+  # EXITS ARE UNAFFECTED, deliberately. A stale price is a bad reason to open a
+  # position and a terrible reason to hold one; refusing to exit on degraded
+  # data would strand exactly the positions that most need closing.
+  require_fresh_data_for_entry:
+    enabled: true
+
   # Route exits as MARKETABLE LIMIT orders instead of pure market orders.
   #
   # A market sell takes whatever the book offers, which in a thin fast tape is

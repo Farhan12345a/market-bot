@@ -7,6 +7,114 @@ not done.
 
 ---
 
+# RISK MANAGEMENT — Tier 2 and 3
+
+Tier 1 (rate limits, two-tier loss response, slippage persistence, no-entry-on-
+stale-data) SHIPPED 2026-09-02. What follows is what is left from that review,
+ordered. **Tier 2 is "before real money"; Tier 3 is process, not code.**
+
+## R1. Fee and commission modelling in replay/grid — TIER 2
+
+Nothing in this repo models execution cost. Zero references to commission,
+SEC fee or TAF anywhere.
+
+Alpaca is commission-free but not cost-free. On SELLS only:
+  - SEC Section 31 fee: ~$0.0000278 per dollar of principal
+  - FINRA TAF: $0.000166 per share, capped at $8.30 per trade
+
+Per trade this is cents. That is not the reason to build it. The reason is
+that **ops/replay.py and ops/grid.py model zero cost**, so every config
+comparison they produce is optimistic in the same direction for every cell -
+and the cells being compared differ mostly in HOW MANY TRADES they take. A
+config that trades twice as often looks equally good and is not. Until this
+exists, no grid result should be trusted to choose between configs of
+different trade frequency.
+
+Shape: a `costs` block in config (per-share, per-dollar, caps), applied in the
+replay/grid P&L computation and reported as a separate line so its size is
+visible rather than buried.
+
+## R2. Intraday liquidity cap — TIER 2
+
+The screener filters on `universe_min_dollar_volume: 3000000` and
+`min_avg_volume: 1000000` - both DAILY averages. Nothing checks position size
+against liquidity at the moment of entry.
+
+The failure this misses: a name with $3M of daily dollar volume can trade
+almost none of it in the minute you are buying. A $9,000 slot share into a
+symbol printing $40,000/minute is 22% of that minute's volume, and the fill
+reflects it - which is a slippage cost this codebase now measures but does not
+prevent.
+
+The data is already in hand: `volume_history` is a 20-sample deque per symbol,
+maintained every poll. Shape: cap position notional at some fraction (1-2%) of
+recent 1-minute dollar volume, floored so a thin print does not refuse an
+otherwise good entry outright.
+
+## R3. Halt detection — TIER 2
+
+No `trading_status` polling anywhere. A stock can halt while held, and a -0.5%
+stop is not a promise about execution: if it reopens at -3% the stop fills
+there. Nothing can prevent that, but two things limit the damage and neither
+exists:
+  - refuse ENTRIES on a halted or auction-state symbol
+  - treat "a held position halted" as its own alert, because the human
+    response (wait, or close on reopen) is not something the bot should guess
+
+Alpaca's asset model carries a tradable/status flag; LULD band data is not on
+this plan. Note this interacts with R2 - halts cluster in exactly the thin
+names the liquidity cap would already be sizing down.
+
+## R4. Position/exposure reconciliation — TIER 2
+
+**Not on the original list; added because the evidence for it is already in.**
+The bot's idea of what it holds and the broker's have diverged twice: phantom
+positions (2026-09-01, 2026-09-02) and partial fills (AI 400 -> 152, OLLI
+109 -> 14). Both were caught by guards written after the fact, each covering
+its own specific case.
+
+A periodic hard reconcile - broker is truth, bot adjusts, ALERT on any
+mismatch - catches the whole class rather than the instances. It is cheap:
+`get_positions()` is already fetched every poll for the exposure snapshot.
+
+## R5. §475(f) mark-to-market election — TIER 3, NOT CODE
+
+The strategy buys, stops out at -0.5%, and can re-enter the same name minutes
+later. The wash-sale rule is 30 days, so a `reentry_cooldown_minutes: 5` does
+nothing about it - an active day trader generates wash sales constantly.
+
+For a trader flat at year end they largely wash out. The actual answer is the
+IRS §475(f) mark-to-market election, which has a filing deadline (generally by
+the original due date of the PRIOR year's return) and is a conversation with a
+trader-tax CPA, not something to build. `trade_history.csv` and
+`trade_context.csv` are already complete enough to hand over.
+
+**Spend zero engineering time here.** Recorded so it is not forgotten, not so
+it gets built.
+
+## R6. Position sizing model — DECISION NEEDED, not work
+
+Requested: "max position $5,000". The hard cap is currently
+`max_position_per_stock_usd: 10000`, but it is NOT the binding constraint -
+the even-slot-share is ($100k x 0.9 / 10 slots = $9,000).
+
+Setting a $5,000 hard cap halves every position and leaves 10 slots using only
+50% of equity, at which point `max_total_exposure_fraction` stops describing
+anything real. If $5,000 positions are wanted, the lever is
+`max_concurrent_positions` (10 -> 18) or the exposure fraction. Same position
+size, model stays coherent.
+
+## R7. The sample-size gate on scaling
+
+`WHEN I START WINNING` (bottom of this file) gates scaling on "a stable edge".
+Worth naming the measurement precisely: **the sample that matters is trades
+since the last config change, not total trades.** ~400 trades exist; the
+number on any single stable config is approximately zero, because every recent
+session changed several variables at once. That number resets to zero again
+with the 2026-09-02 batch.
+
+---
+
 # RANKED — what is actually left
 
 Highest priority first. The ranking is by *expected effect on the next
@@ -15,7 +123,7 @@ session*, not by how interesting the work is.
 | # | Item | Why it ranks here | Blocked on |
 |---|---|---|---|
 | 1 | **Notification keys on the Droplet** | Every alert is built and wired, and none can deliver until Pushover/Resend keys exist. A silent 09:38 loss-limit day happens again otherwise. | Signup + two env vars. No code. |
-| 2 | **Test and deploy the 2026-09-02 batch** | ~20 changes across 10 files are written and unpushed. They fix the three root causes of the 09-02 session. Untested code helps nobody. | A test run. |
+| 2 | **Fee modelling in replay/grid (R1)** | Every config comparison those tools produce is currently optimistic in the same direction, and biased toward configs that trade more. | Nothing. |
 | 3 | **Chop detection / retire `breadth_halt`** | 2026-08-28's shape (19 of 30 peaked under +0.5%, −$484) is unhandled. Folding it in as a 4th regime label inherits cadence, hysteresis and bearish-exit machinery already built. | Decision on retiring `breadth_halt`. |
 | 4 | **Dead-process watchdog** | The bot not running at 09:25 is still completely silent. A dead process cannot alert about itself. | A cron on the Droplet. |
 | 5 | **Milestone stop recalculation** | `DynamicStops.should_recalculate` exists and nothing calls it — stops are set at entry and never move as a position improves. | Touches `TradeManager`. |

@@ -69,6 +69,13 @@ CONTEXT_FIELDS = [
     # -- TRADE outcome
     "mfe_pct", "mae_pct", "exit_time", "exit_price", "exit_reason",
     "realized_pnl", "realized_pnl_pct",
+    # -- EXECUTION COST (2026-09-02)
+    # Signed so NEGATIVE is always adverse for the position. These belong in
+    # the CONTEXT file as well as trade_history because this is the file the
+    # replay and grid tools read: a config comparison that ignores execution
+    # cost is optimistic in the same direction for every cell, which makes the
+    # comparison look sharper than it is.
+    "entry_slippage_pct", "exit_slippage_pct", "fill_price",
 ]
 
 PATH_FIELDS = ["trade_id", "symbol", "date", "timestamp", "price", "gain_pct"]
@@ -116,6 +123,13 @@ def record_context(row, path=CONTEXT_FILE):
     _append(path, CONTEXT_FIELDS, [row])
 
 
+def _blank(v):
+    """Missing stays MISSING. A slippage that could not be measured is not a
+    slippage of zero, and the difference matters the moment these columns
+    become filter conditions or get averaged."""
+    return "" if v is None else v
+
+
 def build_context_row(symbol, entry_meta, trade_record):
     """
     Assemble the one-row-per-trade record from what the executor already
@@ -160,6 +174,9 @@ def build_context_row(symbol, entry_meta, trade_record):
         "mae_pct": trade_record.get("mae_pct") if trade_record.get("mae_pct") is not None else "",
         "exit_time": trade_record.get("exit_time") or "",
         "exit_price": trade_record.get("exit_price") if trade_record.get("exit_price") is not None else "",
+        "entry_slippage_pct": _blank(trade_record.get("entry_slippage_pct")),
+        "exit_slippage_pct": _blank(trade_record.get("exit_slippage_pct")),
+        "fill_price": _blank(trade_record.get("fill_price")),
         "exit_reason": trade_record.get("exit_reason") or "",
         "realized_pnl": trade_record.get("pl") if trade_record.get("pl") is not None else "",
         "realized_pnl_pct": trade_record.get("pl_pct") if trade_record.get("pl_pct") is not None else "",

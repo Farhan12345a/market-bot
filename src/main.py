@@ -1666,6 +1666,14 @@ def _position_size(config, executor, price, symbol=None):
     # than needing to be threaded into each one individually.
     regime_mult = getattr(executor, "regime_size_multiplier", 1.0)
 
+    # How deep the day's loss already is. Multiplies with the regime scalar
+    # rather than replacing it: a choppy tape and a half-spent day are two
+    # independent reasons to be smaller. See Executor.loss_tier_multiplier.
+    try:
+        regime_mult *= executor.loss_tier_multiplier()
+    except Exception as e:
+        logger.debug(f"loss tier scaling skipped ({e})")
+
     # VOLATILITY-ADJUSTED SIZING.
     #
     # Applied as a multiplier rather than through the risk-budget ceiling
@@ -2444,6 +2452,7 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
                 skip_cooldown=ob.get("skip_reentry_cooldown", True),
                 exit_config=state.get("exit_config"),
                 context=burst_ctx,
+                market_data=market_data,
             )
             if entered:
                 taken.append(symbol)
@@ -2502,7 +2511,8 @@ def _entry_context(cand, spy_pct, qqq_pct, spy_vs_vwap, qqq_vs_vwap,
 
 def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi,
                    size_multiplier=1.0, burst_note=None, signal_pct=None,
-                   skip_cooldown=False, exit_config=None, context=None):
+                   skip_cooldown=False, exit_config=None, context=None,
+                   market_data=None):
     """
     Shared entry path for all three entry signals (three-bar momentum, rapid
     increase immediate, pullback resumption). Returns True if a position was
@@ -2585,6 +2595,41 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     # Executor.phantom_cooldown_remaining. skip_cooldown is about not letting
     # an opening trade block the normal session from re-entering a name; it was
     # never meant to permit re-submitting an order the broker just declined.
+    # STALE / DEAD FEED -> NO NEW ENTRIES.
+    #
+    # The bot's default when the stream dies is to fall back to REST and keep
+    # trading, which on the free tier means ~15-minute delayed prices. That was
+    # a deliberate choice - a degraded session beat no session while the stream
+    # was unreliable - but it is the wrong default for entries specifically,
+    # and 2026-08-20 measured the cost: losing entries landed at the 87th
+    # percentile of the surrounding half-hour, i.e. the bot was systematically
+    # buying the top of a move it could not see had already happened.
+    #
+    # EXITS ARE DELIBERATELY UNAFFECTED. A stale price is a bad reason to open
+    # a position and a terrible reason to hold one - refusing to exit on
+    # degraded data would strand exactly the positions that most need closing.
+    # market_data is optional so every existing caller keeps working; without
+    # it there is no stream to judge and the guard abstains rather than
+    # guessing. Absence of a stream is not evidence of stale data.
+    _fresh = (config["trading"].get("require_fresh_data_for_entry") or {})
+    if _fresh.get("enabled") and market_data is not None:
+        _stream = getattr(market_data, "stream", None)
+        _healthy = False
+        try:
+            _healthy = _stream is not None and _stream.is_healthy()
+        except Exception:
+            _healthy = False
+        if _stream is not None and not _healthy:
+            if not _fresh.get("_warned"):
+                _fresh["_warned"] = True
+                logger.warning(
+                    f"{symbol}: entry refused - the price stream is not serving, so "
+                    f"this decision would be made on REST prices the free tier delays "
+                    f"by ~15 minutes. Entries are blocked until it recovers; exits and "
+                    f"open positions continue as normal."
+                )
+            return False
+
     # getattr rather than a direct call: this runs on every entry, and an
     # executor without the method (an older one, a stub) must degrade to "no
     # phantom cooldown" instead of raising into the entry path and killing the
@@ -3355,7 +3400,8 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
 
                     if use_pullback_entry and symbol in pending_pullbacks:
                         entered = _advance_pullback_state(
-                            config, strategy, executor, symbol, price, pending_pullbacks, symbol_rsi,
+                            config, strategy, executor, symbol, price, pending_pullbacks,
+                            symbol_rsi, market_data=market_data,
                         )
                         if entered:
                             entries_triggered += 1
@@ -3369,7 +3415,8 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
 
                         if symbol in pending_reversals:
                             entered = _advance_reversal_state(
-                                config, strategy, executor, symbol, bar, pending_reversals, symbol_rsi,
+                                config, strategy, executor, symbol, bar, pending_reversals,
+                                symbol_rsi, market_data=market_data,
                             )
                             if entered:
                                 entries_triggered += 1
@@ -3620,6 +3667,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                             _pct_vs(price, _vwap(vwap_acc, symbol)),
                             burst_size,
                         ),
+                        market_data=market_data,
                     )
                     if taken:
                         entries_triggered += 1
@@ -3836,7 +3884,8 @@ def _check_reversal_bar_pattern(bars, count, direction):
             return False
         return all(curr.get("close", 0) < prev.get("close", 0) for prev, curr in zip(recent, recent[1:]))
 
-def _advance_pullback_state(config, strategy, executor, symbol, price, pending_pullbacks, symbol_rsi):
+def _advance_pullback_state(config, strategy, executor, symbol, price, pending_pullbacks,
+                            symbol_rsi, market_data=None):
     """
     Advance one symbol's pullback-entry state machine by one price sample.
     Only called (from run_trading_day) once a rapid-increase thrust has
@@ -3868,7 +3917,8 @@ def _advance_pullback_state(config, strategy, executor, symbol, price, pending_p
                     f"peak {setup['peak']:.2f}, pulled back to {setup['pullback_low']:.2f}, "
                     f"resumed to {price:.2f}"
                 )
-                return _attempt_entry(config, strategy, executor, symbol, price, "PULLBACK_RESUMPTION", symbol_rsi)
+                return _attempt_entry(config, strategy, executor, symbol, price, "PULLBACK_RESUMPTION",
+                              symbol_rsi, market_data=market_data)
 
     if price > setup["peak"]:
         setup["peak"] = price
@@ -3895,7 +3945,8 @@ def _advance_pullback_state(config, strategy, executor, symbol, price, pending_p
             setup["pullback_low"] = price
     return False
 
-def _advance_reversal_state(config, strategy, executor, symbol, bar, pending_reversals, symbol_rsi):
+def _advance_reversal_state(config, strategy, executor, symbol, bar, pending_reversals,
+                            symbol_rsi, market_data=None):
     """
     Advance one symbol's opening-reversal (U-shape) state machine by one bar.
     Only called once a "drastic drop" (opening_reversal_drop_bars consecutive
@@ -3938,7 +3989,8 @@ def _advance_reversal_state(config, strategy, executor, symbol, bar, pending_rev
             f"{symbol}: OPENING REVERSAL signal - {confirm_bars} consecutive green bars off a "
             f"low of {setup['low']:.2f} (dropped from open {setup['base_price']:.2f}), now {price:.2f}"
         )
-        return _attempt_entry(config, strategy, executor, symbol, price, "OPENING_REVERSAL", symbol_rsi)
+        return _attempt_entry(config, strategy, executor, symbol, price, "OPENING_REVERSAL",
+                              symbol_rsi, market_data=market_data)
 
     return False
 
