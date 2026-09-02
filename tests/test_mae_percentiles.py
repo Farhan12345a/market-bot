@@ -94,6 +94,40 @@ r = run(fixture, "--symbol", "CRM", "--since", "2026-08-26")
 check("filtering past every CRM row leaves nothing to report",
       "Nothing to report" in r.stdout or "n=0" in r.stdout, r.stdout)
 
+print("\n=== 4b. EVERY HISTORICAL SCHEMA WIDTH IS PARSED, NOT DROPPED ===")
+# Rows are matched by WIDTH, so a schema missing from TRADE_FIELDS_HISTORY is
+# silently DISCARDED rather than mis-parsed. Only the 21-wide legacy was
+# declared until 2026-09-02, which threw away every width-17 and width-18 row
+# - 124 of 378 on the live history, a third of the record, and BOTH of those
+# schemas carry mae_pct. Verified here against rows in the real column order
+# recovered from git (executor.py fieldnames at 5691a2d and 62605f4).
+W18 = ["2026-08-23", "HOOD", "2026-08-23T09:35:00", "50.0", "THREE_BAR_MOMENTUM",
+       "THROTTLED: burst=25", "unknown", "", "0.9921", "-0.62",
+       "2026-08-23T09:50:00", "50.9", "TIME_STOP_4PM", "False", "", "84",
+       "75.60", "1.80"]
+W17 = ["2026-08-21", "CRM", "2026-08-21T09:35:00", "50.0", "THREE_BAR_MOMENTUM",
+       "THROTTLED: burst=25", "", "0.8", "-0.44", "2026-08-21T09:50:00",
+       "50.9", "TIME_STOP_4PM", "False", "", "84", "75.60", "1.80"]
+mixed = "/tmp/claude_test_mae_mixed.csv"
+with open(mixed, "w", newline="") as fh:
+    w = csv.writer(fh)
+    w.writerow(FIELDS)                       # 22-wide header
+    w.writerow(row("2026-08-30", "NEW", -0.9))   # current schema
+    w.writerow(W18)
+    w.writerow(W17)
+r = run(mixed, "--symbol", "HOOD")
+check("a width-18 row is parsed, not skipped", "n=1" in r.stdout, r.stdout)
+check("...and its mae_pct lands in the right column",
+      "-0.620%" in r.stdout, r.stdout)
+r = run(mixed, "--symbol", "CRM")
+check("a width-17 row is parsed too", "n=1" in r.stdout, r.stdout)
+check("...with its mae_pct correctly placed", "-0.440%" in r.stdout, r.stdout)
+r = run(mixed)
+check("all three schema generations count toward the pooled distribution",
+      "3 of 3 trades carry mae_pct" in r.stdout, r.stdout)
+check("nothing is reported as unrecognized any more",
+      "unrecognized column count" not in r.stderr, r.stderr)
+
 print("\n=== 5. EMPTY / MISSING FILE -> CLEAN, NOT A TRACEBACK ===")
 r = run("/tmp/claude_test_mae_history_does_not_exist.csv")
 check("non-zero exit on a missing file", r.returncode != 0)

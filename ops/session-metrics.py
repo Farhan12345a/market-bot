@@ -56,7 +56,35 @@ JOURNAL_FIELDS = [
 # is the same class of fault the header repair exists to fix, arriving through
 # the reader instead of the writer.
 TRADE_FIELDS_HISTORY = [
+    # Every schema this CSV has ever been written under, recovered from git
+    # (executor.py's fieldnames list at 544ce31 / c3df889 / 5691a2d /
+    # 62605f4 / 1487f3b / 66c5d87). Rows are matched by WIDTH, so a schema
+    # missing from this list is not mis-parsed - it is silently DROPPED.
+    #
+    # That was happening: only the 21-wide legacy was declared, so every
+    # width-17 and width-18 row was discarded. On the live history that is
+    # 124 of 378 rows - a third of the record - and both of those schemas
+    # DO carry mfe_pct and mae_pct, which is exactly the column the exit
+    # tuning depends on.
+    #
+    # 21: current minus list_source
     [c for c in TRADE_FIELDS if c != "list_source"],
+    # 18: before signal_pct and the post-exit columns
+    ["date", "symbol", "entry_time", "entry_price", "entry_method", "burst_logic",
+     "price_source", "entry_rsi", "mfe_pct", "mae_pct", "exit_time", "exit_price",
+     "exit_reason", "stop_loss_used", "exit_rsi", "qty", "pl", "pl_pct"],
+    # 17: before price_source
+    ["date", "symbol", "entry_time", "entry_price", "entry_method", "burst_logic",
+     "entry_rsi", "mfe_pct", "mae_pct", "exit_time", "exit_price", "exit_reason",
+     "stop_loss_used", "exit_rsi", "qty", "pl", "pl_pct"],
+    # 15: before excursions were recorded at all - no mfe/mae to recover
+    ["date", "symbol", "entry_time", "entry_price", "entry_method", "burst_logic",
+     "entry_rsi", "exit_time", "exit_price", "exit_reason", "stop_loss_used",
+     "exit_rsi", "qty", "pl", "pl_pct"],
+    # 14: before burst_logic
+    ["date", "symbol", "entry_time", "entry_price", "entry_method", "entry_rsi",
+     "exit_time", "exit_price", "exit_reason", "stop_loss_used", "exit_rsi",
+     "qty", "pl", "pl_pct"],
 ]
 JOURNAL_FIELDS_HISTORY = [
     [c for c in JOURNAL_FIELDS

@@ -174,6 +174,51 @@ if ob.get("enabled"):
         show("exits: breakeven", tiers(ex, "breakeven_tiers", "trigger_pct") + "%")
 else:
     print("  opening burst                  DISABLED")
+
+# RISK CONTROLS. These were invisible here until 2026-09-02, which is the
+# same gap flagged on 2026-08-26: the pre-flight readout looked identical
+# whether a session's changes had shipped or not, so the one screen meant to
+# confirm what is about to go live confirmed nothing about it. Anything that
+# can refuse or resize a trade belongs on this list.
+print("  risk controls")
+rs = t.get("regime_sizing") or {}
+if rs.get("enabled"):
+    bear = rs.get("bearish_multiplier", 0)
+    show("regime sizing (SPY+QQQ vs VWAP)",
+         f"bull {rs.get('bullish_multiplier')}x / neutral {rs.get('neutral_multiplier')}x / "
+         f"bear {bear}x" + ("  <- NO NEW LONGS when bearish" if bear == 0 else ""))
+    show("  regime check_time", rs.get("check_time"))
+    show("  breadth_halt", "measurement only (regime sizing has the decision)")
+else:
+    show("regime sizing", "OFF")
+    show("breadth_halt", "ENABLED - hard stop" if (t.get("breadth_halt") or {}).get("enabled") else "OFF")
+
+cl = t.get("correlation_limit") or {}
+show("correlation limiter",
+     f"r>={cl.get('threshold')} over {cl.get('min_samples')} samples, "
+     f"max {cl.get('max_correlated_positions')} correlated" if cl.get("enabled") else "OFF")
+
+lv = t.get("loss_velocity_warning") or {}
+show("loss-velocity warning",
+     f"warn at {', '.join(str(int(f*100))+'%' for f in lv.get('warn_fractions', []))} "
+     f"of ${t.get('max_daily_loss_usd')} (warning only)" if lv.get("enabled") else "OFF")
+
+ds = t.get("dynamic_stops") or {}
+show("dynamic ATR/MAE stops",
+     f"ON - p{ds.get('mae_percentile')}, min_samples {ds.get('min_samples')}, "
+     f"capped at {t.get('final_exit_loss_pct')}%" if ds.get("enabled")
+     else "OFF (calculator built, not wired)")
+
+show("exclusions",
+     ("leveraged ETFs, " if t.get("exclude_leveraged_etfs") else "")
+     + ("index baskets, " if t.get("exclude_basket_etfs") else "")
+     + f"{len(t.get('exclude_symbols') or [])} explicit")
+
+show("burst multifactor rank",
+     "ON" if ob.get("multifactor_rank") else "OFF (ranks by move size)")
+show("burst spread gate",
+     f"move must clear {ob.get('min_move_to_spread_ratio')}x its own spread"
+     if ob.get("min_move_to_spread_ratio") else "OFF")
 PY
 
 if systemctl is-active --quiet market-bot && \
