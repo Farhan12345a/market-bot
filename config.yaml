@@ -352,6 +352,27 @@ trading:
   # 09:31:28; all 14 SUBSCRIBED symbols delivered, the other 12 were never
   # subscribed).
   #
+  # SET TO 14 FOR 2026-09-02, deliberately conservative.
+  #
+  # The COUNTING MODEL above is well-evidenced and is not in doubt. What is
+  # untested is the BOUNDARY: no live session has ever subscribed more than
+  # 14 symbols successfully, so 29 was an inference, not an observation. The
+  # _reduce_and_retry backoff that would rescue a wrong guess has passing
+  # offline tests and has never run against Alpaca.
+  #
+  # 14 is the exact count that ran on 2026-09-01 and worked, so it carries
+  # zero new risk. The cost is real - the opening burst keeps choosing from a
+  # narrow field, which is the constraint the wider cap was meant to lift -
+  # but that is a known cost on a session that is already testing ten other
+  # changes, against an unknown one.
+  #
+  # TO TEST HIGHER: raise this on a day you are watching the log at 09:26,
+  # one step at a time (20, then 25, then 29). The failure is loud and
+  # immediate - "symbol limit exceeded" within milliseconds of subscribing -
+  # so a bad guess is visible before the bell, not discovered from an empty
+  # session afterwards.
+  #
+  # The original reasoning for 29, kept for when that test happens:
   # 29, NOT 30, and deliberately: sitting exactly AT a vendor limit costs
   # the whole session's stream if the bound turns out to be exclusive, and
   # costs one symbol if it does not. 29 of a possible 30 is still more than
@@ -388,7 +409,23 @@ trading:
   # back to REST exactly as they do today.
   stream_benchmarks: true
 
-  stream_max_subscriptions: 29
+  # Reserve two subscription slots for SPY and QQQ specifically.
+  #
+  # Benchmarks are appended LAST, so with a 15-symbol watchlist against a
+  # 14-symbol budget they were never actually streamed - SPY has been on
+  # ~15-minute-delayed REST every session so far. That was tolerable when SPY
+  # only fed a journal column. It is not tolerable now: regime_sizing reads
+  # SPY and QQQ against their own VWAP and can size the entire day to ZERO on
+  # what it sees, and a regime decided from quarter-hour-old index prices is
+  # worse than having no regime rule at all.
+  #
+  # The cost is the last two watchlist names dropping to REST. That is the
+  # right trade - the 13th and 14th ranked symbols are the least likely to
+  # produce a signal, and neither can decide the whole session the way the
+  # regime read can. Sector ETFs stay last; they only inform a journal column.
+  stream_reserve_index_slots: true
+
+  stream_max_subscriptions: 14
   websocket_feed: "iex"   # iex = free tier. sip requires a paid subscription.
 
   # Subscribe to live TRADES as well as bars, and use the latest tick as the
@@ -713,6 +750,17 @@ trading:
   trailing_stop_pct: 0.75      # Trailing stop: exit ALL remaining shares if price falls this % below the
                                 # HIGHEST price seen since entry (not below entry price - protects gains already made)
   time_stop_hour: 16           # Close all positions at this hour (ET) if nothing else has exited yet
+  # ...but fire this many minutes BEFORE it. 5 -> 15:55.
+  #
+  # This used to fire at 16:00:00 exactly, which is the close: a market order
+  # submitted then cannot fill during regular hours, so it queued as
+  # status=new for the NEXT session. On 2026-09-02 CRM, CTSH and DKS were
+  # still open at the next morning's startup with their unfilled 16:00 sells
+  # pending - occupying three of ten position slots on a day that wanted
+  # them, and adopted at startup as if they were live positions.
+  #
+  # Set to 0 to restore the old fire-exactly-at-the-hour behaviour.
+  time_stop_lead_minutes: 5
 
   # Momentum fade: bails on a trade that's stalled (flat/negative trend) even
   # without a loss, rather than waiting for it to reverse into one.

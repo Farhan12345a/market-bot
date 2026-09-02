@@ -41,7 +41,10 @@ check("price band is sane", 0 < T["min_stock_price"] < T["max_stock_price"])
 check("daily loss limit positive", T["max_daily_loss_usd"] > 0)
 check("time stop is at/after 16", T["time_stop_hour"]>=16)
 check("cooldown shorter than the entry window", T["reentry_cooldown_minutes"] < 22)
-budget=T["stream_max_subscriptions"]//(2 if T["use_trade_ticks_for_entry"] else 1)
+# Unique SYMBOLS, not channel-subscriptions - corrected 2026-09-02. This was
+# the THIRD copy of the stale halving (stream.py and main.py were the others),
+# which is why the pre-flight was reporting a budget of 7 for a cap of 14.
+budget=T["stream_max_subscriptions"]
 check(f"stream budget {budget} >= watchlist target {T['num_stocks_to_trade']}-2",
       budget >= T["num_stocks_to_trade"]-2, (budget,T["num_stocks_to_trade"]))
 check("stream cap under the free-tier limit", T["stream_max_subscriptions"]<=30)

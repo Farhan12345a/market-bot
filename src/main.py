@@ -339,6 +339,50 @@ def _benchmark_symbols(config, symbols):
     return [s for s in dict.fromkeys(out) if s not in set(symbols)]
 
 
+def _stream_priority_with_indices(config, ranked_symbols, benchmarks,
+                                  indices=("SPY", "QQQ")):
+    """
+    Guarantee SPY and QQQ a subscription slot, ahead of the TAIL of the
+    watchlist but behind its best names.
+
+    Benchmarks were appended last and therefore never actually streamed: on
+    2026-09-01 the watchlist filled every slot and SPY fell to REST, which is
+    ~15 minutes delayed on this tier. That was tolerable while SPY only fed
+    excess_vs_spy_pct. It is not tolerable now that regime_sizing reads SPY
+    and QQQ against their own VWAP and can size the whole day to ZERO on what
+    it sees - a regime decided from quarter-hour-old index prices is worse
+    than no regime rule at all.
+
+    Two slots, not all benchmarks: the sector ETFs stay last, because they
+    only inform a journal column. The reserve is also capped at a fraction of
+    the budget so a small watchlist is never mostly benchmarks.
+
+    Returns a priority list; the stream keeps the first symbol_budget() of it.
+    """
+    t = config.get("trading", {})
+    if not t.get("stream_reserve_index_slots", True):
+        return list(ranked_symbols)
+
+    wanted = [s for s in indices if s in set(benchmarks or ())]
+    if not wanted:
+        return list(ranked_symbols)
+
+    budget = max(1, int(t.get("stream_max_subscriptions", 30)))
+    # Never let the reserve take more than a third of the budget.
+    if len(wanted) > max(1, budget // 3):
+        return list(ranked_symbols)
+
+    head = [s for s in ranked_symbols if s not in set(wanted)]
+    keep = max(0, budget - len(wanted))
+    out = head[:keep] + wanted + head[keep:]
+    logger.info(
+        f"Stream priority: reserving {len(wanted)} slot(s) for {', '.join(wanted)} "
+        f"so the regime rule reads live index prices - the last "
+        f"{max(0, len(head) - keep)} watchlist name(s) fall back to REST"
+    )
+    return list(dict.fromkeys(out))
+
+
 def _refresh_candidate_pool(config, screener):
     """
     Repoint the screener at a dynamically built candidate pool.
@@ -2018,6 +2062,14 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     entry_start = parse_hhmm_today(config["trading"]["entry_window_start"], et)
     entry_end = parse_hhmm_today(config["trading"]["entry_window_end"], et)
     time_stop_hour = config["trading"]["time_stop_hour"]
+    # Fire this many minutes BEFORE time_stop_hour, so a market order still
+    # has real liquidity to fill in. Expressed as a lead rather than as a
+    # minute-past, because "16:00 minus 5" is the intent and (16, 55) would
+    # read as 16:55 - later than the bug it was meant to fix.
+    _lead = int(config["trading"].get("time_stop_lead_minutes", 5) or 0)
+    _stop_at = (datetime.now(et).replace(hour=time_stop_hour, minute=0,
+                                         second=0, microsecond=0)
+                - timedelta(minutes=_lead))
     check_interval = config["trading"]["entry_check_interval_seconds"]
     rest_interval = config["trading"].get("entry_check_interval_seconds_rest", 60)
     lookback = timedelta(minutes=config["trading"]["rapid_increase_lookback_minutes"])
@@ -2895,7 +2947,17 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 finish_day("all_closed")
                 return entries_triggered
 
-        if now.hour >= time_stop_hour:
+        # Fire BEFORE the bell, not at it. This was `now.hour >= time_stop_hour`
+        # with time_stop_hour 16, so the flatten ran at 16:00:00 or later - the
+        # close itself. Market orders submitted then cannot fill in regular
+        # hours, so they sat as status=new and queued for the NEXT session:
+        # on 2026-09-02 CRM/CTSH/DKS were still open at the next morning's
+        # startup with their unfilled 16:00 sells still pending, occupying
+        # three of ten slots on a day that wanted them.
+        #
+        # time_stop_lead_minutes (default 5) moves it to 15:55, which leaves
+        # five minutes of real liquidity for a market order to execute in.
+        if now >= _stop_at:
             logger.info("Market closing, flattening all positions...")
             flattened = executor.flatten_all_positions()
             for symbol in flattened:
@@ -3454,7 +3516,8 @@ def main():
                     benchmarks = _benchmark_symbols(config, symbols)
                     price_stream.start(
                         list(dict.fromkeys(list(symbols) + benchmarks)),
-                        priority=stream_priority["symbols"],
+                        priority=_stream_priority_with_indices(
+                            config, stream_priority["symbols"], benchmarks),
                     )
 
                 _set_run_context(config, email_notifier, symbols, price_stream)

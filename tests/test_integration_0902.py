@@ -291,8 +291,8 @@ check("trade ticks no longer halve the budget",
       ps.symbol_budget() == CFG["trading"]["stream_max_subscriptions"])
 check("main.py's warning uses the SAME rule (it used to divide by 2)",
       "budget = max(1, cap)" in msrc)
-check("the cap sits one under the free-tier limit, not exactly at it",
-      CFG["trading"]["stream_max_subscriptions"] == 29)
+check("the cap is the known-good 14 until the boundary is tested live",
+      CFG["trading"]["stream_max_subscriptions"] == 14)
 check("a symbol-limit rejection is recoverable, not fatal",
       "_reduce_and_retry" in open(repo_file("src", "data", "stream.py")).read())
 check("...and its retry delay is NOT the 15s connection-limit one",

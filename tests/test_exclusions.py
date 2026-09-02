@@ -148,8 +148,8 @@ print("\n=== 11. STREAM COVERAGE: UNIQUE-SYMBOL CAP, TICKS FREE ===")
 # 29, not 30: one under the free-tier limit on purpose. Sitting exactly AT a
 # vendor bound costs the whole session if the bound is exclusive; 29 of 30 is
 # still more than double the 14 the old counting model allowed.
-check("the cap is 29 unique symbols, one under the limit",
-      CFG["trading"]["stream_max_subscriptions"] == 29,
+check("the cap is 14 - conservative until the boundary is tested live",
+      CFG["trading"]["stream_max_subscriptions"] == 14,
       CFG["trading"]["stream_max_subscriptions"])
 check("ticks stay ON - free under the corrected model, not a coverage trade",
       CFG["trading"]["use_trade_ticks_for_entry"] is True)

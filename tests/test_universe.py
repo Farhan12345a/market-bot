@@ -269,9 +269,19 @@ check("only sectors this watchlist needs", set(bm) - {"SPY", "QQQ"} == set(SEC.s
 check("no duplicates", len(bm) == len(set(bm)), bm)
 check("a benchmark that is ALSO a traded symbol is not double-subscribed",
       "SPY" not in M._benchmark_symbols(CFG, watch + ["SPY"]), M._benchmark_symbols(CFG, watch + ["SPY"]))
-check("watchlist + benchmarks fits the subscription budget",
-      len(watch) + len(bm) <= CFG["trading"]["stream_max_subscriptions"],
-      len(watch) + len(bm))
+# No longer required to FIT: SPY and QQQ get reserved slots ahead of the
+# watchlist tail (stream_reserve_index_slots), and sector ETFs fall back to
+# REST by design. What matters is that the two INDICES are guaranteed.
+check("watchlist + benchmarks is allowed to exceed the budget - the tail uses REST",
+      True, len(watch) + len(bm))
+# What actually has to hold: both INDICES survive the cut, because
+# regime_sizing reads them against their own VWAP and can zero the day.
+_pri = M._stream_priority_with_indices(CFG, watch, bm)
+_budget = CFG["trading"]["stream_max_subscriptions"]
+check("SPY and QQQ are guaranteed a slot inside the budget",
+      {"SPY", "QQQ"} <= set(_pri[:_budget]), _pri[:_budget])
+check("...taken from the watchlist TAIL, not its best names",
+      _pri[0] == watch[0], _pri[:3])
 off = copy.deepcopy(CFG); off["trading"]["stream_benchmarks"] = False
 check("disabling the flag restores the old behaviour", M._benchmark_symbols(off, watch) == [])
 check("an all-unmapped watchlist still streams both indices",

@@ -248,7 +248,7 @@ if prev.returncode == 0:
         # accepted against a configured cap of 28, and 2026-08-21's 405 came
         # at 59 SYMBOLS. Both fit a ~30 unique-symbol limit. The old model
         # spent half the budget on nothing.
-        "stream_max_subscriptions": 29,
+        "stream_max_subscriptions": 14,
     }
     for k, want in changed.items():
         check(f"{k} deliberately changed to {want}", t.get(k) == want,
@@ -291,9 +291,20 @@ check("the time stop is still what flattens them",
 # time stop is reachable on the next iteration.
 _idx_check = msrc.index("still_held = executor.broker.get_positions()")
 _idx_close = msrc.index('finish_day("all_closed")')
-_idx_stop = msrc.index("if now.hour >= time_stop_hour:")
+# The check moved from `now.hour >= time_stop_hour` to a precomputed
+# _stop_at on 2026-09-02: firing AT 16:00 submitted market orders into the
+# close, where they could not fill and queued for the next session instead
+# (CRM/CTSH/DKS were still open the next morning). It now fires
+# time_stop_lead_minutes before the hour.
+_idx_stop = msrc.index("if now >= _stop_at:")
 check("the broker check precedes the all_closed return", _idx_check < _idx_close)
 check("the time stop is still downstream and reachable", _idx_stop > _idx_close)
+check("the flatten fires BEFORE the bell, so market orders can actually fill",
+      CFG["trading"].get("time_stop_lead_minutes", 0) > 0,
+      CFG["trading"].get("time_stop_lead_minutes"))
+check("...with enough lead for a fill, but not so much it cuts the session short",
+      1 <= CFG["trading"]["time_stop_lead_minutes"] <= 15,
+      CFG["trading"]["time_stop_lead_minutes"])
 
 print("\n=== 8. THE FLATTEN UTILITY ===")
 check("ops/flatten-now.py exists", os.path.exists(repo_file("ops", "flatten-now.py")))

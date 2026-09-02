@@ -84,10 +84,10 @@ cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(CFG, [f"S{i}" for i in
 check("59 watched -> explicit warning", any("exceeds the stream budget" in m for m in cap.msgs), cap.msgs)
 # 29-symbol budget as of 2026-09-02 (unique symbols, not channel-subs), so
 # 59 watched leaves 30 on REST rather than the 45 the old halving implied.
-check("names how many run on REST", any("30 symbol" in m for m in cap.msgs), cap.msgs)
-check("quantifies it as a percentage", any("51% of the" in m for m in cap.msgs), cap.msgs)
+check("names how many run on REST", any("45 symbol" in m for m in cap.msgs), cap.msgs)
+check("quantifies it as a percentage", any("76% of the" in m for m in cap.msgs), cap.msgs)
 noticks=copy.deepcopy(CFG); noticks["trading"]["use_trade_ticks_for_entry"]=False
-cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(noticks, [f"S{i}" for i in range(28)])
+cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(noticks, [f"S{i}" for i in range(14)])
 check("ticks off changes NOTHING now - the cap counts symbols, not channels",
       any("every tradeable name" in m for m in cap.msgs), cap.msgs)
 off=copy.deepcopy(CFG); off["trading"]["use_websocket_stream"]=False
@@ -101,7 +101,8 @@ print("\n=== F. CONFIG ===")
 t=CFG["trading"]
 check("merge_default_universe is off", t["merge_default_universe"] is False)
 check("num_stocks_to_trade set", isinstance(t["num_stocks_to_trade"], int) and t["num_stocks_to_trade"]>0, t["num_stocks_to_trade"])
-budget = t["stream_max_subscriptions"] // (2 if t["use_trade_ticks_for_entry"] else 1)
+# unique SYMBOLS, not channel-subscriptions - corrected 2026-09-02
+budget = t["stream_max_subscriptions"]
 check(f"top-N ({t['num_stocks_to_trade']}) close to the stream budget ({budget})",
       abs(t["num_stocks_to_trade"] - budget) <= 2, (t["num_stocks_to_trade"], budget))
 print(f"\n{P} passed, {F} failed")
