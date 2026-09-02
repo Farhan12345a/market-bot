@@ -148,6 +148,22 @@ def _breadth_halt(config, market_data, symbols, state, now, et):
     return False
 
 
+def spy_history_has(hist):
+    """True when a benchmark deque holds at least one usable sample."""
+    try:
+        return bool(hist) and _last_price(hist) is not None
+    except Exception:
+        return False
+
+
+def _last_price(hist):
+    """Newest price out of a (timestamp, price) deque, or None."""
+    try:
+        return hist[-1][1] if hist else None
+    except (IndexError, TypeError):
+        return None
+
+
 def _pct_vs(price, level):
     """`price` as a % above/below `level`, or None if either is missing.
     None rather than 0.0 - "no VWAP yet" is not "exactly at VWAP"."""
@@ -1491,8 +1507,10 @@ def _burst_rank_multifactor(config, measured, market_data, spy_pct, price_histor
 
 def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_values,
                        state, now, et, signal_journal=None, spy_pct=None,
+                       spy_history=None,
                        price_history=None, volume_history=None, vwap_acc=None,
-                       sector_returns=None):
+                       sector_returns=None, qqq_history=None, breadth_state=None,
+                       regime_state=None):
     """
     The opening-move experiment: measure each streamed symbol from the 09:30
     baseline and buy the ones that are up, deciding by 09:32.
@@ -1751,6 +1769,30 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
 
             note = (f"OPENING_BURST: +{move:.3f}% from the {ob.get('baseline_time','09:30')} "
                     f"baseline {base:.4f}, decided {now:%H:%M:%S}")
+            # Market/stock state at the entry instant, same row shape the
+            # normal path records. Without this the burst's trades - which
+            # take up to 7 of the 10 position slots - land in
+            # trade_context.csv with an empty MARKET and STOCK block, and the
+            # replay's whole point (filter on "SPY above VWAP AND rvol > 3x")
+            # cannot be applied to the majority of the day's trades.
+            #
+            # Several fields are legitimately blank this early (there is no
+            # opening range yet, VWAP has a minute of prints). Blank is the
+            # honest record of that; a zero would be a false reading.
+            burst_ctx = _entry_context(
+                {"signal_pct": round(move, 3),
+                 "spread_pct": _spread_pct(market_data, symbol, price),
+                 "cont": {}},
+                spy_pct,
+                _window_pct_change(qqq_history) if qqq_history else None,
+                _vs_vwap(vwap_acc, [(0, _last_price(spy_history))], "SPY")
+                if spy_history_has(spy_history) else None,
+                _vs_vwap(vwap_acc, [(0, _last_price(qqq_history))], "QQQ")
+                if spy_history_has(qqq_history) else None,
+                breadth_state, regime_state,
+                _pct_vs(price, _vwap(vwap_acc or {}, symbol)),
+                ob.get("size_multiplier", 0.5),
+            )
             entered = _attempt_entry(
                 config, strategy, executor, symbol, price, OPENING_METHOD,
                 rsi_values.get(symbol),
@@ -1758,6 +1800,7 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
                 burst_note=note, signal_pct=round(move, 3),
                 skip_cooldown=ob.get("skip_reentry_cooldown", True),
                 exit_config=state.get("exit_config"),
+                context=burst_ctx,
             )
             if entered:
                 taken.append(symbol)
@@ -2275,6 +2318,10 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 vwap_acc=vwap_acc,
                 sector_returns={etf: _window_pct_change(hist)
                                 for etf, hist in sector_history.items()},
+                spy_history=spy_history,
+                qqq_history=qqq_history,
+                breadth_state=breadth_state,
+                regime_state=regime_state,
             )
             if opened:
                 entries_triggered += opened
@@ -2316,6 +2363,39 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                             breadth_state["open_px"][_sym] = _px
                 except Exception:
                     continue
+
+        # BENCHMARK SAMPLING - from the market OPEN, not from entry_window_start.
+        #
+        # This used to sit inside the entry-window branch, which meant SPY and
+        # QQQ were not sampled until 09:33. Two things broke as a result: the
+        # opening burst (09:30-09:33) had no market context to record against
+        # its trades, and the 09:45 regime check had only twelve minutes of
+        # VWAP instead of fifteen. Sampling from the bell costs two REST reads
+        # per poll and fixes both.
+        if now >= market_open_dt:
+            for _bench, _hist in (("SPY", spy_history), ("QQQ", qqq_history)):
+                try:
+                    _bar = market_data.get_latest_bar(_bench, "1Min")
+                    if not _bar:
+                        continue
+                    _ts = _bar.get("timestamp", now)
+                    _close = _bar.get("close", 0)
+                    _hist.append((_ts, _close))
+                    _cut = _ts - lookback
+                    while _hist and _hist[0][0] < _cut:
+                        _hist.popleft()
+                    # First print of the day only - _regime_multiplier reads
+                    # this as the index's "since the open" reference, the same
+                    # role breadth_state["open_px"] plays per watchlist symbol.
+                    if _close and _bench not in breadth_state["open_px"]:
+                        breadth_state["open_px"][_bench] = _close
+                    # Session VWAP for the index itself - the primary regime
+                    # input. Same accumulator the watchlist uses, so a
+                    # benchmark stuck on REST simply never accumulates and the
+                    # regime read falls back rather than reading a wrong one.
+                    _update_vwap(vwap_acc, _bench, _bar)
+                except Exception as e:
+                    logger.debug(f"{_bench} benchmark unavailable this poll: {e}")
 
         # breadth_halt's MEASUREMENT (mean move since the open, into
         # breadth_state) runs regardless - regime_sizing below reuses it. Only
@@ -2378,43 +2458,6 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             # during a burst every name's raw move looks alike, but excess
             # return over the index collapses toward zero for the ones that are
             # only beta.
-            try:
-                spy_bar = market_data.get_latest_bar("SPY", "1Min")
-                if spy_bar:
-                    spy_ts = spy_bar.get("timestamp", now)
-                    spy_close = spy_bar.get("close", 0)
-                    spy_history.append((spy_ts, spy_close))
-                    spy_cutoff = spy_ts - lookback
-                    while spy_history and spy_history[0][0] < spy_cutoff:
-                        spy_history.popleft()
-                    # First SPY print of the day only - _regime_multiplier
-                    # reads this as SPY's "since the open" reference, the same
-                    # role breadth_state["open_px"] already plays per symbol.
-                    if spy_close and "SPY" not in breadth_state["open_px"]:
-                        breadth_state["open_px"]["SPY"] = spy_close
-                    # Session VWAP for the index itself - the primary regime
-                    # input. Same accumulator the watchlist uses, so a
-                    # benchmark on REST simply never accumulates and the
-                    # regime read falls back rather than reading a wrong one.
-                    _update_vwap(vwap_acc, "SPY", spy_bar)
-            except Exception as e:
-                logger.debug(f"SPY benchmark unavailable this poll: {e}")
-
-            # QQQ, sampled exactly like SPY. regime_sizing's rule is a
-            # two-index agreement test, so a missing QQQ is not a missing
-            # nicety - it is half the signal.
-            try:
-                qqq_bar = market_data.get_latest_bar("QQQ", "1Min")
-                if qqq_bar:
-                    qqq_ts = qqq_bar.get("timestamp", now)
-                    qqq_history.append((qqq_ts, qqq_bar.get("close", 0)))
-                    qqq_cutoff = qqq_ts - lookback
-                    while qqq_history and qqq_history[0][0] < qqq_cutoff:
-                        qqq_history.popleft()
-                    _update_vwap(vwap_acc, "QQQ", qqq_bar)
-            except Exception as e:
-                logger.debug(f"QQQ benchmark unavailable this poll: {e}")
-
             # Sector ETFs, sampled exactly like SPY and for the same reason one
             # step further in. Excess return over SPY separates "this stock is
             # strong" from "the market went up"; excess over the SECTOR

@@ -163,8 +163,17 @@ print("\n=== 5d. QQQ IS ACTUALLY STREAMED ===")
 _msrc = open(repo_file("src", "main.py")).read()
 check("QQQ is a benchmark symbol, so its VWAP is not built on stale REST bars",
       'out = ["SPY", "QQQ"]' in _msrc)
-check("QQQ's own VWAP is accumulated each poll", '_update_vwap(vwap_acc, "QQQ", qqq_bar)' in _msrc)
-check("SPY's is too", '_update_vwap(vwap_acc, "SPY", spy_bar)' in _msrc)
+check("both indices' VWAP is accumulated each poll",
+      '_update_vwap(vwap_acc, _bench, _bar)' in _msrc)
+check("...for SPY and QQQ specifically",
+      'for _bench, _hist in (("SPY", spy_history), ("QQQ", qqq_history)):' in _msrc)
+# Moved out of the entry-window branch on 2026-09-02. Sampling only from
+# 09:33 left the opening burst (09:30-09:33) with no market context to
+# record, and gave the 09:45 regime check twelve minutes of VWAP instead of
+# fifteen.
+check("benchmarks are sampled from the MARKET OPEN, not from entry_window_start",
+      _msrc.index("BENCHMARK SAMPLING - from the market OPEN")
+      < _msrc.index("halted = breadth_would_halt"))
 check("a 0x regime is reported as a stand-down, not a sizing rounding error",
       "regime_sizing standing down" in _msrc)
 
