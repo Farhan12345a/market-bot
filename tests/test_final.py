@@ -52,7 +52,7 @@ check("notifications section present", "email" in CFG.get("notifications", {}))
 
 print("\n=== B. TODAY'S INTENDED SETTINGS ===")
 expect = {"min_stock_price":10, "momentum_fade_slope_threshold":-0.05, "entry_window_start":"09:33",
-          "max_daily_entries":50, "max_daily_loss_usd":500, "max_concurrent_positions":10,
+          "max_daily_entries":50, "max_daily_loss_usd":1000, "max_concurrent_positions":10,
           "resistance_min_decline_pct":0.5, "reentry_cooldown_minutes":5,
           "use_burst_throttle":True, "use_websocket_stream":True,
           "use_trade_ticks_for_entry":True,

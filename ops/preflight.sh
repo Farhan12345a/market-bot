@@ -108,6 +108,16 @@ fi
 
 printf '\n\033[1m%s\033[0m\n' "-------------------------------------------------"
 printf '%d OK, %d WARN, %d FAIL\n' "$PASS" "$WARN" "$FAIL"
+
+# Push the result to phone and email. Sent on PASS too - a silent morning is
+# indistinguishable from a bot that never woke up, and telling those apart is
+# the whole point of a pre-market check. Never allowed to change this script's
+# exit status: a notification problem is not a readiness problem.
+if [ "$1" != "--quiet" ] && [ -x "$PY" ]; then
+  set -a; [ -f /etc/market-bot.env ] && . /etc/market-bot.env; set +a
+  "$PY" ops/send-preflight-alert.py "$PASS" "$FAIL" "$WARN" \
+    "Run from $(hostname) at $(TZ=America/New_York date '+%H:%M:%S %Z')." || true
+fi
 if [ "$FAIL" -gt 0 ]; then printf '\033[91mNOT READY - fix the FAIL items above.\033[0m\n'; exit 1; fi
 [ "$WARN" -gt 0 ] && printf '\033[93mReady, with warnings worth reading.\033[0m\n' || printf '\033[92mReady.\033[0m\n'
 exit 0

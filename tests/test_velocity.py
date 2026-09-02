@@ -123,7 +123,16 @@ check("shipped enabled", lv.get("enabled") is True)
 check("fractions are ascending and all below 1.0 (a warning must precede the stop)",
       lv.get("warn_fractions") == sorted(lv.get("warn_fractions") or [])
       and all(0 < f < 1 for f in (lv.get("warn_fractions") or [])), lv.get("warn_fractions"))
-check("the hard stop it measures against still exists", LIVE.get("max_daily_loss_usd") == 500)
+# 500 -> 1000 on 2026-09-02: the $500 setting fired at 09:38:19 on a
+# mark-to-market number (-$517.07) that included ~$190 of unrealized loss the
+# flatten never actually realized. The limit is also percent-of-equity now, so
+# what the warnings measure against is daily_loss_limit_usd(), not this key.
+check("the hard stop it measures against still exists",
+      LIVE.get("max_daily_loss_usd") == 1000, LIVE.get("max_daily_loss_usd"))
+check("...and the warnings read the SAME computed number the hard stop uses, "
+      "so they stay true fractions of the limit that will actually fire",
+      "max_loss = abs(self.daily_loss_limit_usd() or 0)"
+      in open(repo_file("src", "executor", "executor.py")).read())
 
 print(f"\n{P} passed, {F} failed")
 import sys

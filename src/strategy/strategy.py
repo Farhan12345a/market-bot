@@ -81,6 +81,11 @@ class TradeManager:
         self.state = TradeState.LONG
         self.entry_time = _now_et()
         self.highest_price = entry_price
+        # When the position last made a NEW HIGH. Entry counts as the first
+        # one, so a trade that never goes green is "stalled" from the moment
+        # stall_after_minutes elapses - which is correct: it has had its time
+        # and done nothing with it.
+        self.last_high_at = self.entry_time
         self.first_exit_done = False
         # Indices of take-profit tiers already filled for this position. A set
         # rather than a single flag, because each tier fires at most once but
@@ -301,12 +306,69 @@ class TradeManager:
             return self.qty_remaining
         return 0
 
+    def effective_trail_pct(self):
+        """
+        The trailing distance this position should be using RIGHT NOW.
+
+        The configured trailing_stop_pct is a single fixed number for the whole
+        life of a position, which treats three very different situations
+        identically: a trade still proving itself, a trade that has run and is
+        being given room, and a trade that ran, stalled, and is quietly giving
+        it all back. The third is the expensive one - 2026-08-28 had 19 of 30
+        positions peak under +0.5% and lose $484 together, which is the shape
+        of "went up a little, went nowhere, came back".
+
+        Two independent tighteners, and the TIGHTER of the two wins:
+
+          1. TIER RATCHET. Each take-profit tier that fills pulls the trail in
+             by trail_tighten_per_tier_pct. Shares still held after a
+             scale-out are, by definition, the part of the position being
+             asked to run further - so the bar for giving back what it has
+             already made should rise each time, not stay flat.
+
+          2. STALL. A position that has been open longer than
+             stall_after_minutes without making a new high is not consolidating,
+             it is done. The trail tightens to stall_trail_pct so it exits on
+             the next meaningful give-back rather than riding the full 0.75%
+             down from a peak it set ten minutes ago.
+
+        Never wider than the configured value, and never below min_trail_pct -
+        a trail inside the spread exits on nothing happening at all.
+        """
+        t = self.config["trading"]
+        base = float(t.get("trailing_stop_pct", 0.75))
+        cfg = t.get("trail_tightening") or {}
+        if not cfg.get("enabled"):
+            return base
+
+        trail = base
+        try:
+            per_tier = float(cfg.get("tighten_per_tier_pct", 0.15))
+            trail -= per_tier * len(self.take_profit_tiers_done)
+
+            stall_after = cfg.get("stall_after_minutes")
+            if stall_after and self.last_high_at is not None:
+                idle = (_now_et() - self.last_high_at).total_seconds() / 60.0
+                if idle >= float(stall_after):
+                    trail = min(trail, float(cfg.get("stall_trail_pct", 0.3)))
+
+            trail = max(float(cfg.get("min_trail_pct", 0.15)), min(base, trail))
+        except (TypeError, ValueError) as e:
+            logger.debug(f"{self.symbol}: trail tightening skipped ({e})")
+            return base
+        return trail
+
     def update_trailing_stop(self, current_price):
         """Update highest price and check trailing stop"""
         if current_price > self.highest_price:
             self.highest_price = current_price
+            # Timestamped so a position that stops making new highs can be
+            # told apart from one that is still working. Only a NEW HIGH resets
+            # this - drifting sideways below the peak is exactly the state the
+            # stall rule is built to catch.
+            self.last_high_at = _now_et()
 
-        trail_pct = self.config["trading"]["trailing_stop_pct"] / 100
+        trail_pct = self.effective_trail_pct() / 100
         trail_level = self.highest_price * (1 - trail_pct)
 
         if current_price <= trail_level:
@@ -470,12 +532,64 @@ class TradeManager:
         mae = (self.lowest_since_entry - self.entry_price) / self.entry_price * 100
         return round(mfe, 4), round(mae, 4)
 
+    def tighten_for_regime(self, final_pct, trail_pct, breakeven_trigger):
+        """
+        Pull this position's loss-side rules in, in place, because the MARKET
+        turned - not because this position did anything.
+
+        The regime read governs new entries only, so on 2026-09-02 nine longs
+        opened into a tape already flagged "QQQ is not trending up" and each
+        then travelled independently to its own -1.0% stop. They did not fail
+        for nine reasons; they failed for one, and the one was knowable while
+        they were still open.
+
+        MONOTONIC, and that is the safety property. Every value can only move
+        TIGHTER - a regime that flips back does not re-widen a stop, because
+        re-widening would move a live stop AWAY from a position that is already
+        losing, which is the single worst thing this could do. Returns True
+        when something actually changed, so the caller can log a real change
+        rather than a no-op every poll.
+        """
+        import copy as _copy
+        changed = []
+        cfg = _copy.deepcopy(self.config)
+        t = cfg["trading"]
+
+        cur_final = t.get("final_exit_loss_pct", -1.0)
+        if final_pct is not None and final_pct > cur_final:
+            t["final_exit_loss_pct"] = final_pct
+            changed.append(f"final {cur_final}% -> {final_pct}%")
+
+        cur_trail = t.get("trailing_stop_pct")
+        if trail_pct is not None and cur_trail is not None and trail_pct < cur_trail:
+            t["trailing_stop_pct"] = trail_pct
+            changed.append(f"trail {cur_trail}% -> {trail_pct}%")
+
+        if breakeven_trigger is not None:
+            tiers = t.get("breakeven_tiers") or []
+            lowest = min((x.get("trigger_pct", 99) for x in tiers), default=None)
+            if lowest is None or breakeven_trigger < lowest:
+                t.setdefault("breakeven_tiers", []).append(
+                    {"trigger_pct": breakeven_trigger, "floor_pct": 0.0})
+                t["use_breakeven_floor"] = True
+                changed.append(f"breakeven arms at +{breakeven_trigger}%")
+
+        if not changed:
+            return None
+        self.config = cfg
+        return "; ".join(changed)
+
     def process_exit(self, qty_to_exit, exit_reason):
         """Record a CONFIRMED exit - call only after the broker has actually
         filled the sell order. This is where first_exit_done actually gets
         set (see check_first_exit's docstring for why)."""
         self.qty_remaining -= qty_to_exit
-        if exit_reason == "FIRST_EXIT_-0.5%":
+        # Prefix, not equality: the threshold in the reason string is built
+        # from THIS trade's config, so a burst position says
+        # "FIRST_EXIT_-0.3%". Matching the literal -0.5% would leave
+        # first_exit_done unset on every burst trade, letting the first exit
+        # fire again on the next poll.
+        if str(exit_reason).startswith("FIRST_EXIT_"):
             self.first_exit_done = True
         if str(exit_reason).startswith("TAKE_PROFIT"):
             # Retire the tier that fired AND everything below it - see
@@ -688,9 +802,36 @@ class Strategy:
         # (which tier fired); everything else has a fixed reason.
         tp_qty, tp_reason = trade.check_take_profit(current_price)
 
+        # The two loss-exit reasons name their own THRESHOLD, and until
+        # 2026-09-02 they named it as a hardcoded literal - "FINAL_EXIT_-1.0%"
+        # regardless of what the position's exit rules actually were. The
+        # opening burst runs a CUSTOM exit profile (first -0.3%, final -0.35%,
+        # trail 0.4%), so every burst trade ever taken was stamped with the
+        # session's numbers instead of its own. AI on 2026-09-02 was recorded
+        # as FINAL_EXIT_-1.0% having exited at -0.42%, which is the -0.35% rule
+        # plus slippage.
+        #
+        # That string is not cosmetic: it is written to trade_history.csv and
+        # read back by ops/replay.py, ops/grid.py and ops/be-outcomes.py. A
+        # mislabelled threshold silently corrupts every exit-rule study those
+        # tools produce. Built from the trade's OWN config so it always
+        # describes the rule that actually fired.
+        # Formatted to match the labels already in trade_history.csv: -1.0%
+        # and -0.5%, not -1% and -0.5%. A :g format drops the trailing zero and
+        # would silently split every historical FINAL_EXIT_-1.0% row from every
+        # new one, breaking the exit-reason grouping in replay/grid/session-
+        # metrics for no benefit. At least one decimal, at most two.
+        def _lbl(v):
+            out = f"{float(v):.2f}".rstrip("0")
+            return out + "0" if out.endswith(".") else out
+
+        _t = trade.config["trading"]
+        _final_label = f"FINAL_EXIT_{_lbl(_t.get('final_exit_loss_pct', -1.0))}%"
+        _first_label = f"FIRST_EXIT_{_lbl(_t.get('first_exit_loss_pct', -0.5))}%"
+
         checks = [
-            ("FINAL_EXIT_-1.0%", trade.check_final_exit),
-            ("FIRST_EXIT_-0.5%", trade.check_first_exit),
+            (_final_label, trade.check_final_exit),
+            (_first_label, trade.check_first_exit),
             (tp_reason or "TAKE_PROFIT", (lambda _p: tp_qty)),
             ("BREAKEVEN_STOP", trade.check_breakeven_stop),
             ("MOMENTUM_FADE", trade.check_momentum_fade),
@@ -704,6 +845,22 @@ class Strategy:
                 return {"qty": qty, "reason": reason, "price": current_price}
 
         return None
+
+    def tighten_all_for_regime(self, final_pct=None, trail_pct=None,
+                               breakeven_trigger=None):
+        """
+        Apply tighten_for_regime to every open position. Returns
+        {symbol: what changed} for the ones that actually changed.
+        """
+        out = {}
+        for symbol, trade in list(self.trades.items()):
+            try:
+                note = trade.tighten_for_regime(final_pct, trail_pct, breakeven_trigger)
+                if note:
+                    out[symbol] = note
+            except Exception as e:
+                logger.error(f"{symbol}: regime stop tightening failed: {e}")
+        return out
 
     def confirm_exit(self, symbol, qty, reason, price):
         """

@@ -17,6 +17,8 @@ import yaml
 import logging
 import time
 import csv
+import copy
+import math
 from pathlib import Path
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -58,48 +60,50 @@ def parse_hhmm_today(hhmm_str, et_tz):
     hour, minute = map(int, hhmm_str.split(":"))
     return datetime.now(et_tz).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-def _breadth_halt(config, market_data, symbols, state, now, et):
-    """Stop opening new positions when the names we trade are broadly falling.
-
-    The bandaid for a bearish tape, and deliberately named as one. The strategy
-    is long-only and needs continuation: a stock that moves up and keeps moving.
-    On 2026-08-28 SPY was flat (-0.018% across the windows signals were measured
-    on) while the average signal returned -1.045% at 15 minutes, 19 of 30
-    positions never got above +0.5%, and the day lost $250 while still beating
-    the do-nothing benchmark by 1.03pp. Selection was working; there was nothing
-    to select from.
-
-    So this does not try to predict the day. It reads what the watchlist has
-    ALREADY done by check_time and, if the mean move is below min_mean_pct,
-    stops opening anything new. The assumption baked in - that a bearish first
-    ten minutes implies a bearish rest of the day - is an ASSUMPTION, not a
-    measured fact, and it is the thing this session tests. It will sometimes
-    halt a day that recovers.
-
-    Exits are untouched: a halt stops new entries only, so open positions keep
-    their stops and tiers.
-
-    Returns True once the halt is in force. Evaluated once, at the first poll
-    at or after check_time, and latched for the rest of the day - re-checking
-    would let a dead-cat bounce reopen trading on the same evidence.
+def _measure_breadth(config, market_data, symbols, state, now, et):
     """
-    ob = config.get("trading", {}).get("breadth_halt") or {}
-    if not ob.get("enabled"):
-        return False
-    if state.get("halted"):
-        return True
-    if state.get("checked"):
-        return False
+    Measure what the WATCHLIST is doing, every poll. Decides nothing.
 
-    try:
-        check_at = parse_hhmm_today(ob.get("check_time", "09:40"), et)
-    except Exception:
-        return False
-    if now < check_at:
-        return False
+    Replaces `_breadth_halt` (2026-08-30 - 2026-09-02). That function did two
+    jobs: it measured the watchlist's mean move since the open, and it latched
+    a hard NO-NEW-ENTRIES halt if the mean was below -0.3% at 09:40. The HALT
+    is gone; the MEASUREMENT is why this still exists.
 
-    state["checked"] = True
+    Why the halt was retired rather than tuned. It had already been dead code
+    for days - the halt flag was AND-ed with `not regime_active`, and with
+    regime_sizing enabled, so it could never fire. Worse, keeping it meant two
+    guards answering the same question ("is today tradeable?") from different
+    evidence, where whichever ran first won by ordering accident rather than by
+    rule. regime_sizing supersedes it properly: it scales size continuously
+    instead of stopping the day, and at bearish_multiplier 0.0 it can still
+    refuse everything when that is the right answer.
+
+    What it measures, and why each number is here:
+
+      mean_move   - the average move since the open. The original signal.
+      dispersion  - population standard deviation of those moves. This is the
+                    CHOP reading, and it is the number breadth_halt never
+                    computed. A mean near zero can mean "nothing is happening"
+                    or "everything is happening in both directions at once",
+                    and those want opposite responses. Dispersion tells them
+                    apart.
+      crossings   - how many symbols have flipped from above their opening
+                    price to below it (or back) more than twice. Chop's most
+                    direct signature: a name that has crossed its own open
+                    four times is not trending in either direction.
+      falling     - kept for the log line and for the regime fallback.
+
+    Deliberately reads the WATCHLIST, not SPY. On 2026-08-28 SPY was flat
+    (-0.018%) while the average signal returned -1.045% at 15 minutes - a
+    market-level detector would have called that day fine. The signal was in
+    these names, not in the index.
+
+    Cheap enough to run every poll: get_latest_bar reads the stream's in-memory
+    cache for streamed symbols.
+    """
     moves = []
+    sides = state.setdefault("side", {})
+    crossings = state.setdefault("crossings", {})
     for symbol in symbols:
         try:
             bar = market_data.get_latest_bar(symbol, "1Min")
@@ -107,45 +111,82 @@ def _breadth_halt(config, market_data, symbols, state, now, et):
                 continue
             price = market_data.get_entry_price(symbol, bar)
             open_px = state.get("open_px", {}).get(symbol)
-            if price and open_px:
-                moves.append((price - open_px) / open_px * 100)
+            if not (price and open_px):
+                continue
+            moves.append((price - open_px) / open_px * 100)
+
+            # A crossing is a change of SIDE relative to the opening price.
+            # Counted per symbol and only on an actual flip, so a name sitting
+            # a hair above its open does not accumulate crossings from noise in
+            # the last decimal place.
+            side = 1 if price > open_px else (-1 if price < open_px else 0)
+            if side and sides.get(symbol) and side != sides[symbol]:
+                crossings[symbol] = crossings.get(symbol, 0) + 1
+            if side:
+                sides[symbol] = side
         except Exception:
             continue
 
-    min_n = ob.get("min_symbols", 5)
+    min_n = ((config.get("trading") or {}).get("breadth") or {}).get("min_symbols", 5)
+    state["breadth_n"] = len(moves)
     if len(moves) < min_n:
-        logger.warning(
-            f"BREADTH HALT: only {len(moves)} of {len(symbols)} symbols had both an "
-            f"open price and a current price at {now:%H:%M} ET (need {min_n}) - "
-            f"NOT halting on evidence this thin; trading continues normally"
-        )
-        return False
+        state["mean_move"] = None
+        state["dispersion"] = None
+        return
 
     mean_move = sum(moves) / len(moves)
-    falling = sum(1 for m in moves if m < 0)
-    threshold = ob.get("min_mean_pct", -0.3)
+    var = sum((m - mean_move) ** 2 for m in moves) / len(moves)
     state["mean_move"] = mean_move
-    state["breadth_n"] = len(moves)
-    state["falling"] = falling
+    state["dispersion"] = math.sqrt(var)
+    state["falling"] = sum(1 for m in moves if m < 0)
+    state["choppy_symbols"] = sum(1 for c in crossings.values() if c >= 2)
 
-    if mean_move < threshold:
-        state["halted"] = True
-        logger.warning(
-            f"===== BREADTH HALT at {now:%H:%M} ET: watchlist mean move since the "
-            f"open is {mean_move:+.3f}%, below the {threshold:+.2f}% floor "
-            f"({falling}/{len(moves)} symbols falling). NO NEW ENTRIES for the rest "
-            f"of the day. Open positions keep their exits. This is the bearish-tape "
-            f"bandaid, and the assumption it rests on - that a weak first ten "
-            f"minutes implies a weak session - is what today measures. ====="
+    if not state.get("logged_once"):
+        state["logged_once"] = True
+        logger.info(
+            f"BREADTH at {now:%H:%M} ET: watchlist mean {mean_move:+.3f}%, "
+            f"dispersion {state['dispersion']:.3f}%, {state['falling']}/{len(moves)} "
+            f"falling. Measurement only - regime_sizing decides what to do with it."
         )
-        return True
 
-    logger.info(
-        f"BREADTH CHECK at {now:%H:%M} ET: watchlist mean {mean_move:+.3f}% "
-        f"({falling}/{len(moves)} falling), above the {threshold:+.2f}% floor - "
-        f"trading continues"
-    )
-    return False
+
+def _chop_reading(config, breadth_state):
+    """
+    (is_choppy, detail) from the watchlist's own behaviour, or (False, None).
+
+    CHOP IS NOT WEAKNESS. A falling tape has a negative mean; a choppy one has
+    a mean near zero with everything scattered around it. 2026-08-28 is the
+    case this is built from: 30 positions, 5 winners, 19 peaked under +0.5% and
+    lost $484 together while the 5 that cleared +1% made $424. Payoff actually
+    IMPROVED to 2.90x so breakeven was only 26% - the hit rate collapsed
+    instead. That is not a selection failure, it is a tape where nothing
+    follows through, and the correct response is fewer trades taken for
+    smaller targets, not better ones.
+
+    Two conditions, both required, because either alone is ordinary:
+      - |mean| below max_abs_mean_pct: the tape is going nowhere NET
+      - dispersion at or above min_dispersion_pct: but the names ARE moving
+
+    The crossing count is used as a supporting reading rather than a gate; it
+    needs time to accumulate and would make this blind early in the session.
+    """
+    cfg = ((config.get("trading") or {}).get("regime_sizing") or {}).get("chop") or {}
+    if not cfg.get("enabled", True):
+        return False, None
+    mean = breadth_state.get("mean_move")
+    disp = breadth_state.get("dispersion")
+    if mean is None or disp is None:
+        return False, None
+    max_abs_mean = float(cfg.get("max_abs_mean_pct", 0.25))
+    min_disp = float(cfg.get("min_dispersion_pct", 0.6))
+    if abs(mean) <= max_abs_mean and disp >= min_disp:
+        crossers = breadth_state.get("choppy_symbols", 0)
+        return True, (
+            f"watchlist mean {mean:+.3f}% (flat) but dispersion {disp:.3f}% "
+            f"(>= {min_disp}%), {crossers} symbol(s) have crossed their own open "
+            f"twice or more"
+        )
+    return False, None
 
 
 def spy_history_has(hist):
@@ -191,6 +232,36 @@ def _vs_vwap(vwap_acc, history, symbol):
     return (last - vwap) / vwap * 100
 
 
+def _regime_interval(rc, now, et):
+    """Seconds between regime evaluations at this time of day, or None before
+    the open (nothing to read yet)."""
+    cad = rc.get("cadence") or {}
+    try:
+        open_at = parse_hhmm_today("09:30", et)
+        burst_end = parse_hhmm_today(rc.get("check_time", "09:40"), et)
+        settle = parse_hhmm_today(cad.get("settle_time", "10:00"), et)
+    except Exception:
+        return cad.get("default_seconds", 60)
+    if now < open_at:
+        return None
+    if now < burst_end:
+        return cad.get("opening_seconds", 0)      # 0 = every poll
+    if now < settle:
+        return cad.get("morning_seconds", 60)
+    return cad.get("afternoon_seconds", 300)
+
+
+def _regime_due(rc, state, now, et):
+    """True when the regime should be re-evaluated on this poll."""
+    interval = _regime_interval(rc, now, et)
+    if interval is None:
+        return False
+    last = state.get("last_eval")
+    if last is None or not interval:
+        return True
+    return (now - last).total_seconds() >= interval
+
+
 def _regime_multiplier(config, state, breadth_state, spy_history, now, et,
                        vwap_acc=None, qqq_history=None):
     """
@@ -229,15 +300,24 @@ def _regime_multiplier(config, state, breadth_state, spy_history, now, et,
     rc = config.get("trading", {}).get("regime_sizing") or {}
     if not rc.get("enabled"):
         return 1.0, None
-    if "multiplier" in state:
-        return state["multiplier"], state.get("label")
 
-    try:
-        check_at = parse_hhmm_today(rc.get("check_time", "09:45"), et)
-    except Exception:
-        return 1.0, None
-    if now < check_at:
-        return 1.0, None
+    # ---- CADENCE ------------------------------------------------------
+    #
+    # Originally this read ONCE, at check_time, and latched for the day. That
+    # is too little and too late in equal measure: on 2026-09-02 the session
+    # was over at 09:38 and the 09:45 read never happened, and on any other
+    # day a 09:45 reading governs 15:45 as well.
+    #
+    # Re-read continuously instead, at a cadence matched to how fast the tape
+    # actually changes:
+    #     09:30-09:33   every poll   - opening conditions turn over fast
+    #     09:33-10:00   every 60s    - the window this strategy trades
+    #     10:00+        every 300s   - drift, not events
+    #
+    # Cadence alone would let the regime flip on noise, so it is paired with
+    # the hysteresis below. See _regime_interval.
+    if not _regime_due(rc, state, now, et):
+        return state.get("multiplier", 1.0), state.get("label")
 
     bullish_mult = rc.get("bullish_multiplier", 1.0)
     neutral_mult = rc.get("neutral_multiplier", 0.5)
@@ -300,15 +380,213 @@ def _regime_multiplier(config, state, breadth_state, spy_history, now, et,
         sm = f"{spy_move:+.3f}%" if spy_move is not None else "n/a"
         detail = f"NO VWAP - fell back to breadth {bm}, SPY {sm} since the open"
 
-    state["multiplier"] = mult
-    state["label"] = label
-    stand_down = " NO NEW LONGS." if mult == 0 else ""
+    # ---- CHOP, the fourth label ----------------------------------------
+    #
+    # Evaluated AFTER the index rule and allowed to override anything except
+    # bearish. Order matters and is deliberate: a falling tape is worse than a
+    # chopping one, so bearish keeps precedence, but a flat index reading must
+    # not be allowed to call 2026-08-28 a normal day. SPY was flat that
+    # session while the watchlist averaged -1.045% at 15 minutes, so the index
+    # rule alone would have said neutral or bullish and sized accordingly.
+    #
+    # This is also why breadth_halt was retired rather than kept alongside:
+    # chop lives here, inside the one guard that owns "how much risk is on",
+    # instead of in a second guard that could disagree with it.
+    if label != "bearish":
+        choppy, chop_detail = _chop_reading(config, breadth_state)
+        if choppy:
+            mult = rc.get("choppy_multiplier", 0.5)
+            label = "choppy"
+            detail = chop_detail
+
+    state["last_eval"] = now
+
+    # ---- HYSTERESIS ---------------------------------------------------
+    #
+    # A reading is not a decision. SPY sitting a hundredth of a percent from
+    # its VWAP will cross it repeatedly, and a regime that follows each
+    # crossing whipsaws between full size and no-new-longs on noise - which is
+    # worse than either setting held steadily, because entries get taken at
+    # exactly the moments the reading happens to be favourable.
+    #
+    # So a NEW label must be observed on `confirmations` consecutive
+    # evaluations before it replaces the current one. The very first reading
+    # of the day is adopted immediately: there is nothing to whipsaw against
+    # yet, and standing at 1.0x "pending confirmation" through the opening
+    # minutes would be full size on no evidence.
+    current = state.get("label")
+    if current is None:
+        state["multiplier"], state["label"] = mult, label
+        state["pending"] = None
+        logger.warning(
+            f"===== REGIME at {now:%H:%M:%S} ET: {label.upper()} ({detail}) - "
+            f"new entries sized at {mult:g}x."
+            f"{' NO NEW LONGS.' if mult == 0 else ''} "
+            f"Open positions and their exits are untouched. ====="
+        )
+        return mult, label
+
+    if label == current:
+        # The reading agrees with the standing regime; any part-built case
+        # for changing it is abandoned rather than left to accumulate across
+        # unrelated stretches of the session.
+        state["pending"] = None
+        return state["multiplier"], current
+
+    need = int(rc.get("confirmations", 2) or 1)
+    pending = state.get("pending") or {}
+    count = (pending.get("count", 0) + 1) if pending.get("label") == label else 1
+    state["pending"] = {"label": label, "count": count}
+
+    if count < need:
+        logger.info(
+            f"REGIME: reading says {label.upper()} ({detail}) but the standing "
+            f"regime is {current.upper()} - {count}/{need} confirmations. "
+            f"Holding {state['multiplier']:g}x."
+        )
+        return state["multiplier"], current
+
+    state["multiplier"], state["label"] = mult, label
+    state["pending"] = None
     logger.warning(
-        f"===== REGIME at {now:%H:%M} ET: {label.upper()} ({detail}) - new "
-        f"entries sized at {mult:g}x for the rest of the day.{stand_down} "
+        f"===== REGIME CHANGE at {now:%H:%M:%S} ET: {current.upper()} -> "
+        f"{label.upper()} ({detail}), confirmed on {need} consecutive readings - "
+        f"new entries sized at {mult:g}x."
+        f"{' NO NEW LONGS.' if mult == 0 else ''} "
         f"Open positions and their exits are untouched. ====="
     )
     return mult, label
+
+
+_DYNAMIC_STOPS = {"engine": None}
+# The live regime state, so _attempt_entry can read the current label without
+# it being threaded through every caller. Set once per session by
+# run_trading_day; the dict it points at is mutated in place by
+# _regime_multiplier, so this never goes stale.
+_REGIME_STATE = {}
+
+
+def _build_dynamic_stops(config, screener=None, history_path="logs/trade_history.csv"):
+    """
+    Build the session's DynamicStops engine, or None when it is switched off.
+
+    Two inputs, both optional, and the engine degrades to the static stop when
+    neither is present:
+
+      ATR  - the screener already computes a real atr_pct per symbol and keeps
+             it in _atr_pct. This is the input that needs NO trade history at
+             all, which is what makes the feature usable today: it is a
+             measurement of how much a name moves, not of how past trades in
+             it turned out. A $10 name that travels 3% a day and a $250 name
+             that travels 0.8% should not share a stop, and until now they did.
+
+      MAE  - per-symbol drawdown history, used only where a symbol has at
+             least min_samples of its own. No symbol does yet, so in practice
+             the pooled distribution or nothing is used. It costs nothing to
+             wire now and starts contributing as history accumulates.
+
+    The result can only ever be TIGHTER than final_exit_loss_pct - see
+    DynamicStops.stop_for. Worst case is exactly today's behaviour.
+    """
+    try:
+        from src.analytics.dynamic_stops import DynamicStops
+    except Exception as e:
+        logger.warning(f"dynamic stops unavailable: {e}")
+        return None
+    if not ((config.get("trading") or {}).get("dynamic_stops") or {}).get("enabled"):
+        return None
+
+    atr = {}
+    try:
+        atr = dict(getattr(screener, "_atr_pct", {}) or {})
+    except Exception as e:
+        logger.debug(f"dynamic stops: no ATR map available ({e})")
+
+    history = {}
+    try:
+        import csv as _csv
+        with open(history_path, newline="") as fh:
+            for row in _csv.DictReader(fh):
+                sym, mae = row.get("symbol"), row.get("mae_pct")
+                if not sym or mae in (None, ""):
+                    continue
+                try:
+                    history.setdefault(sym, []).append(float(mae))
+                except ValueError:
+                    continue
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.debug(f"dynamic stops: could not read {history_path} ({e})")
+
+    engine = DynamicStops(config, history=history, atr_by_symbol=atr)
+    logger.info(
+        f"DYNAMIC STOPS enabled - ATR for {len(atr)} symbol(s), MAE history for "
+        f"{len(history)} symbol(s). Stops are capped at the static "
+        f"{config['trading'].get('final_exit_loss_pct')}% and floored at "
+        f"{-abs(engine.floor_pct)}%, so they can only ever be TIGHTER."
+    )
+    return engine
+
+
+def _chop_exit_config(config, regime_state, base_override=None):
+    """
+    Lower the take-profit ladder while the regime reads CHOPPY.
+
+    The most useful single response to chop, and the least obvious. On a
+    choppy tape +0.5% IS the whole move - 2026-08-28 had 19 of 30 positions
+    peak under +0.5% - while the ladder sits at 1.0/1.25/1.5%. So positions
+    that were genuinely up got carried back through breakeven waiting for a
+    level the day was never going to produce. Taking something off at +0.4%
+    converts those from small losses into small wins, which is the entire
+    difference between a 26% hit rate and a profitable one at a 2.90x payoff.
+
+    Applied at ENTRY, so a position keeps whatever ladder it opened with for
+    its whole life - the same rule the burst profile follows, and for the same
+    reason: exit rules changing under an open position make its outcome
+    unattributable to either setting.
+    """
+    if (regime_state or {}).get("label") != "choppy":
+        return base_override
+    cfg = ((config.get("trading") or {}).get("regime_sizing") or {}).get("chop") or {}
+    tiers = cfg.get("take_profit_tiers")
+    if not tiers:
+        return base_override
+    try:
+        base = copy.deepcopy(base_override) if base_override else copy.deepcopy(config)
+        base["trading"]["take_profit_tiers"] = copy.deepcopy(tiers)
+        return base
+    except Exception as e:
+        logger.debug(f"chop exit profile skipped: {e}")
+        return base_override
+
+
+def _dynamic_exit_config(config, symbol, base_override=None):
+    """
+    Layer a symbol's dynamic stop onto whatever exit config it would otherwise
+    use, or return `base_override` unchanged.
+
+    Applied at ENTRY only. The milestone recalculation DynamicStops supports is
+    deliberately not wired yet - moving a live position's stop mid-trade is a
+    larger change to TradeManager and wants its own testing pass.
+    """
+    engine = _DYNAMIC_STOPS.get("engine")
+    if engine is None:
+        return base_override
+    try:
+        stop, why = engine.stop_for(symbol, 0.0)
+        base = copy.deepcopy(base_override) if base_override else copy.deepcopy(config)
+        current = base["trading"].get("final_exit_loss_pct")
+        if current is not None and stop >= current:
+            # No tightening available for this name - leave it exactly as it
+            # would have been rather than logging a change that is not one.
+            return base_override
+        base["trading"]["final_exit_loss_pct"] = stop
+        logger.info(f"{symbol}: DYNAMIC STOP {current}% -> {stop}% ({why})")
+        return base
+    except Exception as e:
+        logger.debug(f"{symbol}: dynamic stop skipped ({e})")
+        return base_override
 
 
 def _benchmark_symbols(config, symbols):
@@ -510,6 +788,10 @@ def select_symbols(config, screener, market_data):
                 f"Screener finished in {time.monotonic() - screener_started:.1f}s "
                 f"(timeout is {timeout_seconds}s)"
             )
+            # Built HERE because this is the first moment the screener's
+            # per-symbol ATR map exists. A screener timeout leaves the engine
+            # unbuilt, which means the static stop - the correct fallback.
+            _DYNAMIC_STOPS["engine"] = _build_dynamic_stops(config, screener)
         except FutureTimeoutError:
             screener_timed_out = True
             logger.warning(
@@ -994,6 +1276,7 @@ def _set_run_context(config, email_notifier, symbols, price_stream):
     has had a chance to fail - a session that started on the stream and fell
     back to REST at 09:32 must not report itself as a streamed session.
     """
+    _ALERT_CONFIG["config"] = config
     t = config["trading"]
     try:
         streamed = len(price_stream._symbols) if price_stream is not None else 0
@@ -1017,6 +1300,11 @@ def _set_run_context(config, email_notifier, symbols, price_stream):
         logger.debug(f"Could not build run context: {e}")
 
 
+# _refresh_run_context is called from places that do not carry `config`, and
+# threading it through every caller for one alert is not worth the churn.
+_ALERT_CONFIG = {}
+
+
 def _refresh_run_context(email_notifier, price_stream):
     """Downgrade the run context to REST if the stream gave up mid-session."""
     try:
@@ -1030,6 +1318,24 @@ def _refresh_run_context(email_notifier, price_stream):
                 ctx["symbols_rest"] = ctx.get("symbols_watched", 0)
                 ctx["trade_ticks"] = False
                 logger.info("Run context downgraded: the stream gave up, this session is REST")
+                try:
+                    from src.notifications import alerts as _AL
+                    _AL.degraded(
+                        _ALERT_CONFIG.get("config"), email_notifier,
+                        what="price stream failed - running on delayed REST",
+                        detail=(
+                            "The WebSocket gave up and this session is now reading "
+                            "REST prices, which the free tier delays by ~15 minutes.\n\n"
+                            "Entries and exits are being decided on stale prices. "
+                            "Entry quality measurably degrades in this state "
+                            "(2026-08-20: losing entries landed at the 87th percentile "
+                            "of the surrounding half-hour).\n\n"
+                            "The bot continues to trade. Stop it if you would rather "
+                            "it did not."
+                        ),
+                    )
+                except Exception as e:
+                    logger.debug(f"degraded alert failed: {e}")
     except Exception as e:
         logger.debug(f"Could not refresh run context: {e}")
 
@@ -1055,6 +1361,34 @@ def _poll_interval(config, market_data, base_interval, rest_interval, state):
         healthy = False
 
     interval = base_interval if healthy else rest_interval
+
+    # The opening minutes get a faster loop, but ONLY while the stream is
+    # serving (reads come from memory, so the extra polls cost nothing) and
+    # ONLY while something is actually open. Exits are evaluated on a poll, not
+    # continuously, so the poll interval is a hard floor on how far price can
+    # travel past a stop before the bot sees it - and 09:30-09:45 is where it
+    # travels fastest. On 2026-09-02 a -1.0% stop realized -1.46%, -1.59% and
+    # -1.07% on the three largest losses; a 10-second gap in the fastest tape
+    # of the day is most of that.
+    # Applies while positions are open (protecting stops) OR while the opening
+    # burst is still measuring - that window has no positions by definition and
+    # is the one place where a poll interval directly costs entries: the burst
+    # decides by 09:33, so a 10-second loop gives it ~18 chances to see a move
+    # and a 3-second loop gives it ~60.
+    fast = (config.get("trading") or {}).get("opening_fast_poll") or {}
+    if healthy and fast.get("enabled", True) and (
+            state.get("positions_open") or state.get("burst_open")):
+        try:
+            import pytz
+            _et = pytz.timezone("America/New_York")
+            _now = datetime.now(_et)
+            _open = _now.replace(hour=9, minute=30, second=0, microsecond=0)
+            _until = _open + timedelta(minutes=fast.get("minutes_after_open", 15))
+            if _open <= _now < _until:
+                interval = min(interval, fast.get("seconds", 3))
+        except Exception:
+            pass
+
     if state.get("last") != interval:
         if healthy:
             logger.info(
@@ -1221,7 +1555,28 @@ def _maybe_send_scheduled_reports(config, email_notifier, strategy, executor, ma
     report_state["seeded"] = True
 
 
-def _position_size(config, executor, price):
+def _effective_stop_pct(config, symbol, trading):
+    """
+    The stop this symbol will actually be given, as a negative percent.
+
+    The dynamic-stops engine when it is on and has something to say about this
+    name, otherwise the static final_exit_loss_pct. Kept separate from
+    _dynamic_exit_config so sizing and the exit rule read the SAME number - if
+    they disagree, dollar risk per trade silently stops being constant, which
+    is the whole property this is here to preserve.
+    """
+    static = trading.get("final_exit_loss_pct", -1.0)
+    engine = _DYNAMIC_STOPS.get("engine")
+    if engine is None or not symbol:
+        return static
+    try:
+        stop, _ = engine.stop_for(symbol, 0.0)
+        return stop if stop else static
+    except Exception:
+        return static
+
+
+def _position_size(config, executor, price, symbol=None):
     """
     Shares to buy for one entry. Returns 0 when no position should be taken.
 
@@ -1279,8 +1634,25 @@ def _position_size(config, executor, price):
     if exposure_fraction and max_positions:
         budgets.append(equity * exposure_fraction / max_positions)
 
+    # VOLATILITY-ADJUSTED SIZING.
+    #
+    # This ceiling is "the largest position whose stop costs at most
+    # max_risk_per_trade_fraction of equity", so it is only correct if it uses
+    # the stop this position will ACTUALLY get. Since dynamic stops went in,
+    # that is a per-symbol number: a 0.4%-ATR name gets a -0.40% stop and a
+    # 3%-ATR name gets the -1.0% cap. Reading the static
+    # final_exit_loss_pct here would size both identically while stopping them
+    # at different distances - which means DIFFERENT DOLLAR RISK PER TRADE, the
+    # exact inconsistency dynamic stops introduced.
+    #
+    # Dividing by the symbol's own stop fixes it in the right direction: a
+    # quiet name with a tight stop can carry a LARGER position for the same
+    # dollars at risk, and a volatile name with a wide stop carries a smaller
+    # one. Every trade then risks the same amount, which is what makes trades
+    # comparable to each other at all - and makes P&L attributable to selection
+    # rather than to which volatile name happened to be on the list that day.
     risk_fraction = trading.get("max_risk_per_trade_fraction")
-    stop_pct = abs(trading.get("final_exit_loss_pct", 0)) / 100
+    stop_pct = abs(_effective_stop_pct(config, symbol, trading)) / 100
     if risk_fraction and stop_pct > 0:
         budgets.append(equity * risk_fraction / stop_pct)
 
@@ -1294,7 +1666,60 @@ def _position_size(config, executor, price):
     # than needing to be threaded into each one individually.
     regime_mult = getattr(executor, "regime_size_multiplier", 1.0)
 
-    return int(min(budgets) / price * regime_mult)
+    # VOLATILITY-ADJUSTED SIZING.
+    #
+    # Applied as a multiplier rather than through the risk-budget ceiling
+    # above, because that ceiling is structurally unable to do this job. It
+    # sizes to "the position whose stop costs at most
+    # max_risk_per_trade_fraction of equity", and since dynamic stops are
+    # CAPPED at final_exit_loss_pct they can only ever be TIGHTER - so the risk
+    # budget can only ever come out LARGER, and the even-slot-share ceiling
+    # ($9,000 against a $50,000+ risk budget at current settings) wins every
+    # time. Routing volatility through it would have changed nothing at all.
+    #
+    # So scale the slot share directly, and only DOWNWARD. A 3%-ATR name and a
+    # 0.9%-ATR name were getting identical dollar exposure while moving three
+    # times as far, which is three times the dollar swing on the same bet.
+    # Halving the volatile one equalises that. Scaling quiet names UP is
+    # deliberately not done: the slot share exists so a full book lands exactly
+    # at max_total_exposure_fraction, and exceeding it for one name would break
+    # that guarantee for every other position.
+    return int(min(budgets) / price * regime_mult * _volatility_multiplier(config, symbol))
+
+def _volatility_multiplier(config, symbol):
+    """
+    Size scalar in (floor, 1.0] from the symbol's own ATR, or 1.0 when unknown.
+
+    reference_atr_pct is the ATR that gets FULL size. Anything more volatile is
+    scaled down in proportion, floored so a single wild name is reduced rather
+    than refused. Anything quieter also gets full size and no more - see the
+    note in _position_size on why this never scales up.
+    """
+    cfg = (config.get("trading") or {}).get("volatility_sizing") or {}
+    if not cfg.get("enabled") or not symbol:
+        return 1.0
+    engine = _DYNAMIC_STOPS.get("engine")
+    if engine is None:
+        return 1.0
+    try:
+        atr = float((engine.atr_by_symbol or {}).get(symbol) or 0)
+        ref = float(cfg.get("reference_atr_pct", 1.5))
+        if atr <= 0 or ref <= 0:
+            return 1.0
+        mult = min(1.0, ref / atr)
+        floor = float(cfg.get("min_multiplier", 0.35))
+        mult = max(floor, mult)
+        if mult < 1.0:
+            logger.info(
+                f"{symbol}: volatility sizing {mult:.2f}x - ATR {atr:.2f}% against "
+                f"a {ref:g}% reference (it travels further, so the same dollar "
+                f"exposure is a larger dollar swing)"
+            )
+        return mult
+    except Exception as e:
+        logger.debug(f"volatility sizing skipped for {symbol}: {e}")
+        return 1.0
+
 
 def _summarise_burst_notes(config, notes):
     """
@@ -1352,6 +1777,59 @@ def _spread_pct(market_data, symbol, price):
         return round(quote["spread"] / price * 100, 4)
     except Exception:
         return None
+
+
+# symbol -> recent PLAUSIBLE spread readings, for _usable_spread_pct.
+_SPREAD_SAMPLES = {}
+
+
+def _usable_spread_pct(config, market_data, symbol, price, now=None):
+    """
+    A spread reading fit to make a decision on, or None meaning "unknown".
+
+    _spread_pct above returns whatever one REST call to IEX says. That is fine
+    for a journal column and wrong for a gate, and 2026-09-02 is the proof:
+    the opening burst refused EVERY candidate it measured, all of them on the
+    spread gate, using numbers that cannot be real. WDAY at ~$230 quoted an
+    "11.2% spread" - a $26-wide market. AI read 0.290%, then 15.703%, then
+    16.058%, then 0.29% again, all within ninety seconds. The gate was working
+    perfectly on garbage.
+
+    The cause is what IEX is. It carries ~2% of US volume, so at 09:31 its own
+    book for a name is often one stale side and one fresh side - a pre-market
+    bid against a live ask. The DIFFERENCE between those is not a spread
+    anybody could trade against; it is an artifact of a thin venue.
+
+    Two defences:
+
+      1. A plausibility ceiling. Above max_plausible_spread_pct the reading is
+         discarded as a bad quote and this returns None. None means UNKNOWN,
+         and callers must treat unknown as "no information" - NOT as a
+         refusal. Refusing on an unreadable quote is what cost the burst five
+         of its seven entries.
+      2. A median of recent plausible readings. One bad tick cannot move a
+         median, and the samples are per-symbol and per-session.
+
+    Returns None when there is no usable reading. Never raises.
+    """
+    raw = _spread_pct(market_data, symbol, price)
+    cfg = config.get("trading") or {}
+    ceiling = cfg.get("max_plausible_spread_pct", 2.0)
+
+    if raw is not None and (ceiling and raw > ceiling):
+        logger.debug(
+            f"{symbol}: spread reading {raw:.3f}% discarded as implausible "
+            f"(above max_plausible_spread_pct {ceiling}%) - treating as unknown"
+        )
+        raw = None
+
+    samples = _SPREAD_SAMPLES.setdefault(symbol, deque(maxlen=5))
+    if raw is not None:
+        samples.append(raw)
+    if not samples:
+        return None
+    ordered = sorted(samples)
+    return ordered[len(ordered) // 2]
 
 
 def _burst_policy(config, burst_width, spy_pct=None):
@@ -1620,11 +2098,84 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
                 f"{len(state.get('taken', []))} entered, "
                 f"{len(state.get('baseline', {}))} symbols measured ====="
             )
+
+            # ---- EARLY REGIME READ, at the burst close ---------------------
+            #
+            # regime_sizing latches at check_time. That is the right place for
+            # the AUTHORITATIVE read - a few more minutes of tape is a better
+            # read - but it leaves the busiest stretch of the session
+            # ungoverned. On 2026-09-02 the account hit the daily loss limit at
+            # 09:38:19, before the 09:45 check had run at all: nine longs were
+            # opened between 09:31 and 09:38 into a tape that had already been
+            # flagged "QQQ is not trending up" at 09:10, and the feature built
+            # to prevent exactly that never got a turn.
+            #
+            # So take a PROVISIONAL read here, at the moment the burst closes
+            # and the normal entry window opens. Deliberately narrower than the
+            # real check: it only ever acts on the unambiguous case (BOTH
+            # indices below their own VWAP), it never scales UP, and the
+            # check_time read replaces it wholesale when it arrives. A weaker
+            # signal from less data is allowed to say "not now"; it is not
+            # allowed to say "full size".
+            try:
+                rc = (config.get("trading") or {}).get("regime_sizing") or {}
+                if (rc.get("enabled") and rc.get("burst_close_gate", True)
+                        and regime_state is not None and "multiplier" not in regime_state):
+                    _spy_v = _vs_vwap(vwap_acc, spy_history, "SPY")
+                    _qqq_v = _vs_vwap(vwap_acc, qqq_history, "QQQ")
+                    if _spy_v is not None and _qqq_v is not None:
+                        if _spy_v <= 0 and _qqq_v <= 0:
+                            _m = rc.get("bearish_multiplier", 0.0)
+                            executor.regime_size_multiplier = _m
+                            regime_state["provisional"] = _m
+                            logger.warning(
+                                f"EARLY REGIME (burst close, provisional): BEARISH - "
+                                f"SPY {_spy_v:+.3f}% and QQQ {_qqq_v:+.3f}% are BOTH below "
+                                f"their own VWAP. New-entry size multiplier set to {_m}x "
+                                f"until the {rc.get('check_time', '09:40')} check confirms or "
+                                f"replaces it."
+                            )
+                        else:
+                            logger.info(
+                                f"EARLY REGIME (burst close, provisional): not bearish - "
+                                f"SPY {_spy_v:+.3f}%, QQQ {_qqq_v:+.3f}% vs VWAP. No early "
+                                f"restriction; the {rc.get('check_time', '09:40')} check decides."
+                            )
+                    else:
+                        logger.info(
+                            "EARLY REGIME (burst close): skipped - SPY/QQQ VWAP not "
+                            "available yet. The check_time read still applies."
+                        )
+            except Exception as e:
+                logger.debug(f"early regime read skipped: {e}")
             if moves:
                 logger.info(
                     "OPENING MOVES (best first): "
                     + ", ".join(f"{sym} {mv:+.3f}%" for mv, sym in moves[:20])
                 )
+                # Hand the normal entry window what the burst learned. Without
+                # this the two modes look at the same symbols with no shared
+                # memory: on 2026-09-02 the burst measured RBLX +1.575%,
+                # WDAY +1.344% and CRM +1.105%, refused all three, and the
+                # normal window then bought WDAY and CRM 60-90 seconds later
+                # off a 3-minute RAPID_INCREASE - chasing the tail of the very
+                # move the burst had already measured and declined, but with
+                # the session's loose -1.0% stop instead of the burst's -0.35%.
+                # CRM and WDAY were 2 of the day's 3 largest losses.
+                state["closed_moves"] = {sym: mv for mv, sym in moves}
+                state["refused"] = sorted(
+                    sym for mv, sym in moves
+                    if mv >= thresh and sym not in (state.get("taken") or [])
+                )
+                if state["refused"]:
+                    logger.info(
+                        f"BURST REFUSED (cleared {thresh}% but not taken): "
+                        + ", ".join(state["refused"])
+                        + " - suppressed in the normal window until "
+                        + str((config["trading"].get("opening_burst") or {}).get(
+                            "refused_suppressed_until", "09:45"))
+                    )
+
                 qualified = sum(1 for mv, _ in moves if mv >= thresh)
                 logger.info(
                     f"OPENING THRESHOLD REVIEW: {qualified} of {len(moves)} cleared "
@@ -1710,8 +2261,38 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
             if not price:
                 continue
             if symbol not in baseline:
-                baseline[symbol] = price
-                continue
+                # Seed from the BAR'S OWN OPEN when the bar carries one.
+                #
+                # Taking the baseline from the first price this loop happens to
+                # observe costs a whole poll before anything can be measured -
+                # the first poll sets the baseline and `continue`s, so the
+                # earliest possible measurement is one interval later. Worse,
+                # it makes the baseline an accident of when the stream came up:
+                # on 2026-09-02 the socket was killed at 09:30:01 and the first
+                # observation was 09:31:07, so "the move from the open" was
+                # really "the move since 09:31:07" and the first minute of the
+                # session was invisible.
+                #
+                # The streamed 1-minute bar already carries the OPEN of its
+                # minute. At the first poll after the bell that is the 09:30
+                # bar, whose open is the opening print itself - the correct
+                # baseline, available immediately, with no extra API call. A
+                # symbol can therefore be measured on the FIRST poll it appears
+                # in rather than the second.
+                seed = None
+                try:
+                    if isinstance(bar, dict):
+                        seed = bar.get("open")
+                    else:
+                        seed = getattr(bar, "open", None)
+                    seed = float(seed) if seed else None
+                except (TypeError, ValueError):
+                    seed = None
+                baseline[symbol] = seed or price
+                if not seed:
+                    # No open on the bar - fall back to the old behaviour and
+                    # spend the poll establishing the baseline.
+                    continue
             state.setdefault("last_price", {})[symbol] = price
             base = baseline[symbol]
             measured.append((
@@ -1788,11 +2369,23 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
             # doubling the broker quote calls inside the 09:30-09:33 window,
             # which is the most latency-sensitive three minutes of the day and
             # the one where the burst is racing a decide_by deadline.
-            spread_pct = _spread_pct(market_data, symbol, price)
+            spread_pct = _usable_spread_pct(config, market_data, symbol, price, now)
 
             ratio = ob.get("min_move_to_spread_ratio", 0)
             if ratio:
-                if spread_pct and move < spread_pct * ratio:
+                # spread_pct is None when no PLAUSIBLE quote exists. Unknown is
+                # not the same as wide, and conflating them is what emptied
+                # this mode on 2026-09-02 - 12 symbols measured, 7 clearing the
+                # move threshold, and every refusal in the whole window was
+                # this gate firing on an unreadable IEX quote. An unknown
+                # spread now lets the move decide, which is the evidence this
+                # mode has always been built on.
+                if spread_pct is None:
+                    logger.debug(
+                        f"{symbol}: spread unknown - the gate abstains, "
+                        f"the +{move:.3f}% move decides"
+                    )
+                elif move < spread_pct * ratio:
                     logger.info(
                         f"{symbol}: opening move +{move:.3f}% refused - spread "
                         f"gate ({spread_pct:.3f}% spread x {ratio:g} = "
@@ -1928,7 +2521,7 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     was accepted by Alpaca's margin account as opening a real, completely
     untracked short position. 16 of them happened this way in one session.
     """
-    qty = int(_position_size(config, executor, price) * size_multiplier)
+    qty = int(_position_size(config, executor, price, symbol=symbol) * size_multiplier)
     if qty <= 0:
         # Distinguish "the regime says stand down" from "the arithmetic came
         # out at zero shares". Both refuse the entry, but only one of them is
@@ -1988,6 +2581,26 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     # skip_cooldown is for the opening-burst mode. An opening trade must not
     # block the normal session from re-entering the same symbol later - that
     # would let the experiment change the control it is being measured against.
+    # The phantom cooldown is checked FIRST and is never skippable - see
+    # Executor.phantom_cooldown_remaining. skip_cooldown is about not letting
+    # an opening trade block the normal session from re-entering a name; it was
+    # never meant to permit re-submitting an order the broker just declined.
+    # getattr rather than a direct call: this runs on every entry, and an
+    # executor without the method (an older one, a stub) must degrade to "no
+    # phantom cooldown" instead of raising into the entry path and killing the
+    # trade. This file's history is full of one-thing-fails-everything-stops.
+    try:
+        phantom_left = getattr(executor, "phantom_cooldown_remaining", lambda _s: 0.0)(symbol)
+    except Exception as e:
+        logger.debug(f"{symbol}: phantom cooldown check skipped ({e})")
+        phantom_left = 0.0
+    if phantom_left > 0:
+        logger.info(
+            f"{symbol}: entry skipped - phantom cooldown, {phantom_left / 60:.1f} min left "
+            f"since its last entry order failed to fill"
+        )
+        return False
+
     cooldown_left = 0 if skip_cooldown else executor.reentry_cooldown_remaining(symbol)
     if cooldown_left > 0:
         logger.info(
@@ -2005,7 +2618,15 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     if order is None:
         return False  # broker rejected/failed - already logged by submit_entry_order, nothing committed
 
-    strategy.confirm_entry(symbol, price, qty, config_override=exit_config)
+    # Layered: the burst profile (if any) is the base, chop lowers its
+    # take-profit ladder, dynamic stops tighten its stop. Each returns its
+    # input unchanged when it has nothing to say, so a plain session entry on a
+    # normal day comes through as None and behaves exactly as before.
+    _exit_cfg = _chop_exit_config(config, _REGIME_STATE.get("state"), exit_config)
+    strategy.confirm_entry(
+        symbol, price, qty,
+        config_override=_dynamic_exit_config(config, symbol, _exit_cfg),
+    )
     executor.entry_meta.setdefault(symbol, {})["list_source"] = symbol_source.get(symbol, "screener")
     # Market/stock state at the entry instant, for trade_context.csv. Stored
     # on entry_meta because that is what survives to the exit, where the row
@@ -2166,6 +2787,33 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         logger.info(f"Signal journal: {signal_journal.stats()}")
         logger.info(f"Daily session complete: entries_triggered={entries_triggered}, reason={reason}")
 
+        # The alert layer's whole point: EmailNotifier.send_alert has existed,
+        # wired to both channels and tested, with zero call sites - so no alert
+        # has ever been delivered. On 2026-09-02 the session ended at 09:38 on
+        # the loss limit and nothing said so until the journal was read hours
+        # later. Fail-safe by construction (see alerts._send): a channel that
+        # is down can never affect the shutdown path it is reporting on.
+        try:
+            from src.notifications import alerts as _AL
+            _still_open = sorted(strategy.get_open_trades().keys())
+            _AL.session_ended(
+                config, email_notifier,
+                reason=reason,
+                realized=getattr(executor, "_realized_pnl_today", 0.0),
+                unrealized=(getattr(executor, "daily_pnl", 0.0)
+                            - getattr(executor, "_realized_pnl_today", 0.0)),
+                entries=entries_triggered,
+                trades=len(getattr(executor, "trade_log", []) or []),
+                open_positions=len(_still_open),
+                equity=getattr(executor, "equity", None),
+                ended_at=f"{datetime.now(et):%Y-%m-%d %H:%M:%S} ET",
+            )
+            if _still_open:
+                _AL.positions_left_open(
+                    config, email_notifier, symbols=_still_open, when=reason)
+        except Exception as e:
+            logger.error(f"session-end alert failed: {type(e).__name__}: {e}")
+
     if signal_journal is None:
         signal_journal = SignalJournal(config)
     stream_warned = False
@@ -2182,6 +2830,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     opening_state = {"baseline": {}, "taken": [], "done": False}
     breadth_state = {"open_px": {}}
     regime_state = {}
+    # Published so _attempt_entry can read the current label. Same dict object,
+    # mutated in place by _regime_multiplier, so it cannot go stale.
+    _REGIME_STATE["state"] = regime_state
     # RESET THE CARRY-OVER, explicitly. This process reuses one Executor for
     # every session it ever runs, and regime_size_multiplier lives on it. A
     # session that ended bearish leaves 0.0 there, and the opening burst runs
@@ -2271,6 +2922,19 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
 
         if executor.check_daily_loss_limit():
             logger.warning("Daily loss limit hit, flattening all positions")
+            try:
+                from src.notifications import alerts as _AL
+                _open_at = getattr(executor, "_loss_watch_started_at", None)
+                _AL.loss_limit_hit(
+                    config, email_notifier,
+                    daily_pnl=getattr(executor, "daily_pnl", None),
+                    limit=-abs(config["trading"].get("max_daily_loss_usd") or 0),
+                    entries=entries_triggered,
+                    elapsed_minutes=((datetime.now() - _open_at).total_seconds() / 60
+                                     if _open_at else None),
+                )
+            except Exception as e:
+                logger.error(f"loss-limit alert failed: {type(e).__name__}: {e}")
             flattened = executor.flatten_all_positions()
             for symbol in flattened:
                 strategy.trades.pop(symbol, None)
@@ -2463,21 +3127,67 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 except Exception as e:
                     logger.debug(f"{_bench} benchmark unavailable this poll: {e}")
 
-        # breadth_halt's MEASUREMENT (mean move since the open, into
-        # breadth_state) runs regardless - regime_sizing below reuses it. Only
-        # the HALT decision is skipped when regime_sizing has taken over: a
-        # hard stop and a size-scaling replacement should never both be live,
-        # per the REPLACE (not layer) note on _regime_multiplier.
+        # The breadth MEASUREMENT (mean move since the open, into
+        # breadth_state) runs regardless - regime_sizing reuses it, both as the
+        # fallback when an index has no VWAP and as the CHOP reading. The halt
+        # itself was retired 2026-09-02: it had been dead code since regime
+        # sizing shipped, and two guards answering "is today tradeable?" from
+        # different evidence meant whichever ran first won by ordering accident
+        # rather than by rule. See _measure_breadth.
         regime_cfg = config.get("trading", {}).get("regime_sizing") or {}
         regime_active = regime_cfg.get("enabled", False)
-        breadth_would_halt = _breadth_halt(config, market_data, symbols, breadth_state, now, et)
-        halted = breadth_would_halt and not regime_active
+        _measure_breadth(config, market_data, symbols, breadth_state, now, et)
         if regime_active:
-            _mult, _ = _regime_multiplier(
+            _mult, _label = _regime_multiplier(
                 config, regime_state, breadth_state, spy_history, now, et,
                 vwap_acc=vwap_acc, qqq_history=qqq_history,
             )
-            executor.regime_size_multiplier = _mult
+            # Before check_time _regime_multiplier returns a bare 1.0 meaning
+            # "no opinion yet". Assigning that would STOMP the provisional
+            # bearish read the burst close may have set, restoring full size on
+            # the next poll and undoing the early gate entirely. So the
+            # provisional stands until the real check actually produces a
+            # label, at which point it is replaced wholesale.
+            # REGIME-DRIVEN STOP TIGHTENING. The regime read governs new
+            # entries; open positions were left to find their own way to a
+            # -1.0% stop one at a time. On 2026-09-02 nine longs did exactly
+            # that, independently, for one shared reason. Fired ONCE per
+            # transition into a bearish label - latched on the label itself,
+            # so a regime that oscillates cannot re-tighten every poll.
+            if _label == "bearish" and regime_state.get("tightened_at") != _label:
+                regime_state["tightened_at"] = _label
+                _rt = (regime_cfg.get("bearish_exits") or {})
+                if _rt.get("enabled", True) and strategy.get_open_trades():
+                    _changes = strategy.tighten_all_for_regime(
+                        final_pct=_rt.get("final_exit_loss_pct", -0.5),
+                        trail_pct=_rt.get("trailing_stop_pct", 0.4),
+                        breakeven_trigger=_rt.get("breakeven_trigger_pct", 0.1),
+                    )
+                    if _changes:
+                        logger.warning(
+                            f"===== REGIME BEARISH: tightening {len(_changes)} open "
+                            f"position(s) rather than letting each find its own stop "
+                            f"=====")
+                        for _s, _note in _changes.items():
+                            logger.warning(f"  {_s}: {_note}")
+            elif _label and _label != "bearish":
+                # Clear the latch so a LATER return to bearish can tighten
+                # again. Nothing is loosened by this - tighten_for_regime is
+                # monotonic and never re-widens a live stop.
+                regime_state["tightened_at"] = None
+
+            _prov = regime_state.get("provisional")
+            if _label is None and _prov is not None:
+                executor.regime_size_multiplier = _prov
+            else:
+                executor.regime_size_multiplier = _mult
+                if _label is not None and _prov is not None:
+                    regime_state.pop("provisional", None)
+                    logger.info(
+                        f"REGIME: the {regime_cfg.get('check_time', '09:40')} read "
+                        f"({_label}, {_mult}x) replaces the provisional burst-close "
+                        f"read ({_prov}x)."
+                    )
 
         # Sector scoreboard, logged with the breadth check and again at the halt
         # decision. sector_strength already feeds the signal journal per signal
@@ -2509,9 +3219,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             except Exception as e:
                 logger.debug(f"sector scoreboard skipped: {e}")
 
-        if halted:
-            pass
-        elif max_daily_entries and entries_triggered >= max_daily_entries:
+        if max_daily_entries and entries_triggered >= max_daily_entries:
             if not daily_entry_cap_logged:
                 logger.info(
                     f"Reached max_daily_entries ({entries_triggered}/{max_daily_entries}) - "
@@ -2587,6 +3295,17 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     # ENTRY price only. The exit loop above keeps using the
                     # bar close it already reads - see get_entry_price.
                     price = market_data.get_entry_price(symbol, bar)
+                    # A bar can exist while its entry price does not - a bar
+                    # with no trades, a stream frame missing the field. Letting
+                    # None into price_history poisons every consumer that
+                    # reads it back as a number: check_rapid_increase_entry
+                    # compares `price_then <= 0` and raises, which the
+                    # surrounding except turns into "Error checking entry for
+                    # X" once per symbol per poll for the rest of the session -
+                    # and that symbol is then never evaluated again. Skip the
+                    # poll instead; the next one will have a price.
+                    if price is None:
+                        continue
                     ts = bar.get("timestamp", now)
                     history = price_history[symbol]
                     history.append((ts, price))
@@ -2720,6 +3439,57 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                                 f"{symbol}: signal skipped - +{pct_change:.2f}% is above "
                                 f"rapid_increase_max_pct {max_signal}% (the move is already made)"
                             )
+                            rejected_for_extension[symbol] = round(pct_change, 3)
+                            continue
+
+                        # ---- EXTENSION FROM THE OPEN -------------------
+                        #
+                        # rapid_increase_max_pct above measures the 3-MINUTE
+                        # delta. That is not the same quantity as how far the
+                        # name has already travelled today, and the gap is
+                        # where 2026-09-02's losses lived: WDAY's 3-minute
+                        # change was +0.95% (under the 1.25% ceiling, so it
+                        # passed) while its move since the open was +1.344%.
+                        # It was bought at 09:34:56 near the top of a run that
+                        # started at the bell, and closed -1.59%.
+                        #
+                        # Two independent refusals here, both reading the
+                        # burst's own measurements:
+                        #   1. already extended more than
+                        #      max_extension_from_open_pct off the open, or
+                        #   2. the burst MEASURED this symbol, saw it clear
+                        #      its threshold, and did not take it.
+                        # Both lapse at refused_suppressed_until, after which
+                        # a fresh move is a genuinely new signal rather than
+                        # the tail of the opening one.
+                        _ext_note = None
+                        try:
+                            _ob = (config["trading"].get("opening_burst") or {})
+                            _until = parse_hhmm_today(
+                                _ob.get("refused_suppressed_until", "09:45"), et)
+                            if now < _until:
+                                _base = (opening_state.get("baseline") or {}).get(symbol)
+                                _cap = config["trading"].get("max_extension_from_open_pct")
+                                if _cap and _base:
+                                    _ext = (price - _base) / _base * 100
+                                    if _ext > _cap:
+                                        _ext_note = (
+                                            f"already +{_ext:.3f}% from the open, above "
+                                            f"max_extension_from_open_pct {_cap}% - this is "
+                                            f"the tail of the opening move, not a new one"
+                                        )
+                                if _ext_note is None and symbol in (opening_state.get("refused") or []):
+                                    _mv = (opening_state.get("closed_moves") or {}).get(symbol)
+                                    _ext_note = (
+                                        f"the opening burst measured it at "
+                                        f"{_mv:+.3f}% and did not take it; suppressed until "
+                                        f"{_ob.get('refused_suppressed_until', '09:45')}"
+                                    )
+                        except Exception as e:
+                            logger.debug(f"extension gate skipped for {symbol}: {e}")
+
+                        if _ext_note:
+                            logger.info(f"{symbol}: signal skipped - {_ext_note}")
                             rejected_for_extension[symbol] = round(pct_change, 3)
                             continue
 
@@ -2965,6 +3735,11 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             finish_day("time_stop")
             return entries_triggered
 
+        # The fast opening poll only applies while something is actually at
+        # risk - an empty book has nothing to protect and does not need a
+        # 3-second loop.
+        poll_state["positions_open"] = bool(strategy.get_open_trades())
+        poll_state["burst_open"] = bool(ob) and not opening_state.get("done")
         time.sleep(_poll_interval(
             config, market_data, check_interval, rest_interval, poll_state
         ))
@@ -3775,6 +4550,15 @@ def main():
         email_notifier.send_daily_summary()
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
+        # Alert FIRST. The cleanup below can itself fail (that is why it has a
+        # bare except), and a crash nobody is told about is the worst of all
+        # the failure modes here - the process is gone, the report never
+        # sends, and positions may still be open at the broker.
+        try:
+            from src.notifications import alerts as _AL
+            _AL.crashed(config, email_notifier, error=e)
+        except Exception:
+            pass
         try:
             executor.flatten_all_positions()
             executor.save_trades_log()

@@ -93,15 +93,23 @@ check("neutral regime halves it", M._position_size(BASE, ex, 100.0) == full // 2
 ex.regime_size_multiplier = 1.0
 check("bullish regime restores it exactly", M._position_size(BASE, ex, 100.0) == full)
 
-print("\n=== 2. REGIME x BREADTH HALT: exactly one of them may gate entries ===")
+print("\n=== 2. BREADTH HALT RETIRED: one guard owns 'how much risk is on' ===")
+# 2026-09-02: breadth_halt's HALT is gone; its MEASUREMENT stays and feeds
+# regime_sizing (as the no-VWAP fallback and as the chop reading). Two guards
+# answering the same question from different evidence meant whichever ran
+# first won by ordering accident rather than by rule.
 msrc = open(repo_file("src", "main.py")).read()
-check("breadth_halt's measurement always runs (regime reuses it)",
-      "breadth_would_halt = _breadth_halt(" in msrc)
-check("its HALT is suppressed while regime sizing is active",
-      "halted = breadth_would_halt and not regime_active" in msrc)
-check("both are enabled live, and that is safe because of the line above",
-      CFG["trading"]["breadth_halt"]["enabled"] is True
-      and CFG["trading"]["regime_sizing"]["enabled"] is True)
+check("the measurement still runs every poll",
+      "_measure_breadth(config, market_data, symbols, breadth_state, now, et)" in msrc)
+check("the halt function is gone entirely",
+      "def _breadth_halt(" not in msrc)
+check("...and nothing gates entries on a 'halted' flag any more",
+      "halted = breadth_would_halt" not in msrc
+      and "\n        if halted:" not in msrc)
+check("the retired config key is gone; only the measurement block remains",
+      "breadth_halt" not in CFG["trading"] and CFG["trading"]["breadth"]["enabled"] is True)
+check("regime sizing is the single owner and is enabled",
+      CFG["trading"]["regime_sizing"]["enabled"] is True)
 
 print("\n=== 3. PHANTOM GUARD x SIGN-AWARE EXIT: a phantom SHORT is still a phantom ===")
 b = Broker({})                      # broker holds nothing at all
@@ -222,8 +230,18 @@ check("disabled -> static stop, whatever the history says",
       DynamicStops({"trading": {"final_exit_loss_pct": -1.0,
                                 "dynamic_stops": {"enabled": False}}},
                    history=calm).stop_for("CALM")[0] == -1.0)
-check("it is NOT wired into the live exit path yet (config ships disabled)",
-      (CFG["trading"].get("dynamic_stops") or {}).get("enabled") is False)
+# CHANGED 2026-09-02 (second pass): wired and enabled. ATR was the unblocking
+# input all along - it is a volatility measurement, not an outcome measurement,
+# so it needs no trade history. The cap at final_exit_loss_pct is what makes
+# turning it on bounded: the worst case is exactly the previous behaviour.
+check("it IS now wired into the live entry path",
+      "_dynamic_exit_config(config, symbol, _exit_cfg)" in msrc
+      and "_DYNAMIC_STOPS[\"engine\"] = _build_dynamic_stops" in msrc)
+check("...and shipped enabled",
+      (CFG["trading"].get("dynamic_stops") or {}).get("enabled") is True)
+check("...but still capped so it can only ever TIGHTEN",
+      DynamicStops(CFG, history={}, atr_by_symbol={"WILD": 9.0}).stop_for("WILD")[0]
+      == CFG["trading"]["final_exit_loss_pct"])
 
 print("\n=== 10. DYNAMIC STOPS: milestones are monotonic, so a stop never re-widens ===")
 ds4 = DynamicStops(ds_cfg, history=calm)
@@ -403,11 +421,20 @@ m2, lab2 = M._regime_multiplier(RC, {}, {"open_px": {}}, [(0, 100.0)], dt("09:45
                                 vwap_acc={"SPY": [0.0, 0.0]}, qqq_history=[(0, 100.0)])
 check("a zero-volume VWAP accumulator does not divide by zero",
       m2 == 1.0 and lab2 is None, (m2, lab2))
-before_check = M._regime_multiplier(RC, {}, {"open_px": {}}, [(0, 99.0)], dt("09:30"), ET,
-                                    vwap_acc={"SPY": [100.0, 1.0], "QQQ": [100.0, 1.0]},
-                                    qqq_history=[(0, 99.0)])
-check("before check_time the regime never binds, however bad the tape looks",
-      before_check == (1.0, None), before_check)
+# CHANGED 2026-09-02 (second pass): the regime is read CONTINUOUSLY from the
+# open rather than once at check_time. Waiting cost the whole 09:30-09:45
+# stretch, and on 2026-09-02 the session was over at 09:38:19 before the read
+# ever happened. Before the OPEN there is still nothing to read.
+pre_open = M._regime_multiplier(RC, {}, {"open_px": {}}, [(0, 99.0)], dt("09:15"), ET,
+                                vwap_acc={"SPY": [100.0, 1.0], "QQQ": [100.0, 1.0]},
+                                qqq_history=[(0, 99.0)])
+check("before the OPEN the regime never binds - nothing has traded",
+      pre_open == (1.0, None), pre_open)
+at_open = M._regime_multiplier(RC, {}, {"open_px": {}}, [(0, 99.0)], dt("09:31"), ET,
+                               vwap_acc={"SPY": [100.0, 1.0], "QQQ": [100.0, 1.0]},
+                               qqq_history=[(0, 99.0)])
+check("...but a bad tape at 09:31 DOES bind now, instead of being ignored "
+      "until 09:45", at_open[1] == "bearish", at_open)
 
 print("\n=== 21. REPLAY: the simulator agrees with hand-computed outcomes ===")
 import importlib.util as _il

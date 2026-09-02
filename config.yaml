@@ -94,6 +94,15 @@ trading:
     # value from that rather than from guesswork.
     min_move_pct: 0.3
 
+    # Symbols the burst MEASURED, saw clear min_move_pct, and did not take are
+    # suppressed in the normal entry window until this time. The two modes
+    # otherwise share no memory: on 2026-09-02 the burst measured RBLX
+    # +1.575%, WDAY +1.344% and CRM +1.105%, refused all three, and the normal
+    # window bought WDAY and CRM 60-90 seconds later off a 3-minute
+    # RAPID_INCREASE - the same move the burst had already declined, taken
+    # with the session's -1.0% stop instead of the burst's -0.35%.
+    refused_suppressed_until: "09:45"
+
     # Multi-factor gate, added 2026-09-02: on top of min_move_pct, refuse a
     # candidate whose move is not at least this many times its OWN bid-ask
     # spread. HOOD's median spread measured 0.593% on 2026-08-26 - wider than
@@ -531,6 +540,17 @@ trading:
   # from REST bars; a live stream carries every trade, so a 60s check meant a
   # stop could be up to 59s late. The REST fallback keeps the old rate - see
   # entry_check_interval_seconds_rest above.
+  # Faster loop through the opening minutes, while the stream is healthy and
+  # something is actually open. Exits are evaluated on a POLL, not
+  # continuously, so this interval is a hard floor on how far price can travel
+  # past a stop before the bot sees it - and 09:30-09:45 is where it travels
+  # fastest. On 2026-09-02 a -1.0% stop realized -1.46% (NOW), -1.59% (WDAY)
+  # and -1.07% (CRM). Free while streaming: reads come from memory, not the API.
+  opening_fast_poll:
+    enabled: true
+    seconds: 3
+    minutes_after_open: 15
+
   entry_check_interval_seconds: 10
   # 0.5%/5min -> 0.3%/3min for 2026-08-21, moved TOGETHER and only because the
   # WebSocket is on. Holding 0.5% while shortening the window would demand a
@@ -838,6 +858,114 @@ trading:
   # true, this only ever gates a symbol that just LOST, and 5 minutes is
   # enough for the immediate post-stop churn to settle.
   reentry_cooldown_minutes: 5
+  # Cooldown after a PHANTOM entry (order submitted, broker filled nothing).
+  # Separate from the ordinary post-exit cooldown because a phantom is neither
+  # a win nor a loss and so slips straight through
+  # reentry_cooldown_after_loss_only - which is how WDAY was submitted 8 times
+  # and RBLX 4 in five minutes on 2026-09-02. Unset falls back to
+  # reentry_cooldown_minutes.
+  phantom_reentry_cooldown_minutes: 5
+
+  # Hard backstop on re-entry loops, independent of every cooldown above.
+  # Counts entry SUBMISSIONS, not fills, so a symbol that never fills still
+  # burns its attempts.
+  max_entry_attempts_per_symbol_per_day: 3
+
+  # How far a name may already have travelled from the OPEN and still be
+  # bought by the normal window. Distinct from rapid_increase_max_pct, which
+  # measures the 3-MINUTE delta - the two came apart badly on 2026-09-02:
+  # WDAY's 3-minute change was +0.95% (under the 1.25% ceiling, so it passed)
+  # while its move since the open was +1.344%. Bought at 09:34:56 near the top
+  # of a run that began at the bell, closed -1.59%. CRM the same shape at
+  # +1.105%. Those two were 2 of the 3 largest losses of the day.
+  #
+  # Only applies while opening_burst.refused_suppressed_until has not passed -
+  # after that, a move is a new move rather than the tail of the opening one.
+  # Needs the burst's baseline to measure against, so it is inert when the
+  # burst is off or the symbol was never measured.
+  max_extension_from_open_pct: 1.0
+
+  # ---------------------------------------------------------------------
+  # Volatility-adjusted sizing (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # A 3%-ATR name and a 0.9%-ATR name were getting identical dollar exposure
+  # while one travels three times as far - three times the dollar swing on the
+  # same nominal bet. This scales the volatile one down in proportion.
+  #
+  # Only ever scales DOWN. The even-slot-share ceiling in _position_size exists
+  # so a full book lands exactly at max_total_exposure_fraction; letting one
+  # name exceed its share would break that guarantee for every other position.
+  # A quiet name therefore gets full size and no more.
+  #
+  # Deliberately NOT routed through max_risk_per_trade_fraction: dynamic stops
+  # are capped at final_exit_loss_pct so they can only get tighter, so that
+  # risk budget can only come out larger, and the slot share ($9,000 against a
+  # $50,000+ risk budget) wins every time. It would have changed nothing.
+  # ---------------------------------------------------------------------
+  # Trailing-stop tightening (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # trailing_stop_pct is one fixed number for a position's whole life, which
+  # treats three different situations identically: a trade still proving
+  # itself, a trade that has run and deserves room, and a trade that ran,
+  # stalled, and is quietly giving it all back. The third is the expensive one
+  # - 2026-08-28 had 19 of 30 positions peak under +0.5% and lose $484
+  # together, which is exactly the shape of "went up a little, went nowhere,
+  # came back".
+  #
+  # Two independent tighteners; the TIGHTER of the two wins. Never wider than
+  # trailing_stop_pct, never below min_trail_pct.
+  trail_tightening:
+    enabled: true
+    # Each take-profit tier that fills pulls the trail in by this much. Shares
+    # still held after a scale-out are the part being asked to run further, so
+    # the bar for giving back what they already made should rise each time.
+    #   0 tiers -> 0.75%   1 tier -> 0.60%   2 tiers -> 0.45%
+    tighten_per_tier_pct: 0.15
+    # A position open this long without making a NEW HIGH is not consolidating,
+    # it is done. Only a new high resets the clock; drifting sideways below the
+    # peak is precisely the state this catches.
+    stall_after_minutes: 8
+    stall_trail_pct: 0.3
+    min_trail_pct: 0.15      # a trail inside the spread exits on nothing at all
+
+  volatility_sizing:
+    enabled: true
+    reference_atr_pct: 1.5   # ATR that gets full size; above it, scaled down
+    min_multiplier: 0.35     # floor - a wild name is reduced, never refused
+
+  # Any bid-ask spread wider than this is treated as a BAD QUOTE, not a wide
+  # market - the reading is discarded and the spread reported as unknown.
+  #
+  # IEX carries ~2% of US volume, so at 09:31 its book for a name is often one
+  # stale side against one live side, and the difference between those is not
+  # a spread anyone could trade. On 2026-09-02 that produced WDAY at ~$230
+  # quoting an "11.2% spread" (a $26-wide market) and AI reading 0.290%,
+  # 15.703%, 16.058%, then 0.290% again inside ninety seconds. The opening
+  # burst refused EVERY candidate it measured on those numbers.
+  #
+  # Callers must treat unknown as no information rather than as a refusal.
+  max_plausible_spread_pct: 2.0
+
+  # Route exits as MARKETABLE LIMIT orders instead of pure market orders.
+  #
+  # A market sell takes whatever the book offers, which in a thin fast tape is
+  # an unbounded price: on 2026-09-02 a -1.0% stop realized -1.46% (NOW),
+  # -1.59% (WDAY) and -1.07% (CRM) - 46-59% past the level it was supposed to
+  # enforce. A limit placed slippage_pct THROUGH the reference price still
+  # crosses the spread, so it fills immediately in any normal book, but will
+  # not fill arbitrarily far away.
+  #
+  # The risk is the mirror image and is handled explicitly: an order that does
+  # not fill leaves the position OPEN. So the band is generous relative to the
+  # stop it is protecting, an unfilled limit is cancelled and re-submitted on
+  # the next poll, and after max_attempts the exit escalates to a plain market
+  # order - a bounded exit beats an unbounded one, but ANY exit beats a
+  # position the stop has already condemned.
+  marketable_limit_exits:
+    enabled: true
+    slippage_pct: 0.3
+    max_attempts: 2
+
   reentry_cooldown_after_loss_only: true  # false = cool down after ANY exit. Left true because
                                            # re-entering a name that just PAID was profitable that
                                            # day (UBER +$190 over 2, CHWY +$159 over 4, CMG +$109
@@ -889,7 +1017,50 @@ trading:
   # re-derive it from actual account size and real risk tolerance rather than
   # carrying this value over - it was picked to keep a test session running,
   # not as a considered real-money risk limit.
-  max_daily_loss_usd: 500  # Stop trading if daily loss exceeds this.
+  # Raised 500 -> 1000 on 2026-09-02. The $500 setting fired at 09:38:19 on its
+  # first real trading day, eight minutes in, on a mark-to-market number
+  # (-$517.07) that included ~$190 of unrealized loss; flattening the five open
+  # positions actually realized only -$76.40, so the day closed at -$403.66
+  # realized. A ceiling that trips on marks that are worse than the achievable
+  # exits ends sessions the account never actually lost. $1000 keeps the
+  # circuit breaker while leaving room for a normal opening drawdown.
+  max_daily_loss_usd: 1000  # Stop trading if daily loss exceeds this.
+
+  # ---------------------------------------------------------------------
+  # Dynamic daily loss limit (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # A dollar limit means different things at different account sizes: $500 is
+  # 1% of $50k and 0.25% of $200k. Percent-of-equity keeps the RISK constant
+  # instead of the dollars, which is what a risk limit is supposed to do.
+  #
+  #     0.75% of $50k  -> $375   (floored to floor_usd)
+  #     0.75% of $75k  -> $562
+  #     0.75% of $100k -> $750
+  #     0.75% of $200k -> $1,500 (capped to ceiling_usd)
+  #
+  # THE CEILING IS THE WHOLE SAFETY ARGUMENT. A limit that rises automatically
+  # with the balance lets a good run quietly authorise larger losses - the
+  # account grows, the permitted daily loss grows with it, and nobody ever
+  # decided that. So the computed limit is CAPPED at ceiling_usd, and raising
+  # that number is a deliberate act taken once the strategy has demonstrated a
+  # stable edge - not a side effect of a profitable week.
+  #
+  # The floor is the mirror image: a drawdown must not shrink the limit so far
+  # that one ordinary opening trade ends the session.
+  #
+  # mode: "fixed" (use max_daily_loss_usd) or "percent_of_equity".
+  # Fails CLOSED - any problem, including equity not yet known, falls back to
+  # max_daily_loss_usd rather than to no limit.
+  daily_loss_limit:
+    mode: percent_of_equity
+    # 1.0% while PAPER TESTING, so the limit lands at $1,000 on the current
+    # ~$100k paper balance and the session is not cut short while features are
+    # still being evaluated. Drop to 0.75 before real money - that is the
+    # number actually intended for live risk, and 1.0% is a testing
+    # convenience, not a considered risk tolerance.
+    pct_of_equity: 1.0
+    floor_usd: 500
+    ceiling_usd: 1000     # raise DELIBERATELY, never automatically
 
   # ---------------------------------------------------------------------
   # Correlation limiter (added 2026-09-02) - PENDING_WORK backlog item 1
@@ -954,7 +1125,19 @@ trading:
   # symbol would use the pooled distribution - which may be the right call,
   # but it should be a decision made against the real numbers.
   dynamic_stops:
-    enabled: false
+    # ON as of 2026-09-02. The gating input was never MAE history - it is ATR,
+    # which the screener already computes per symbol and which needs no trade
+    # record at all. A $10 name that travels 3% a day and a $250 name that
+    # travels 0.8% were sharing a flat -1.0% stop; one was being stopped out by
+    # its own noise and the other was risking more than it needed to.
+    #
+    # SAFETY: the computed stop is CAPPED at final_exit_loss_pct and floored at
+    # min_stop_pct, so it can only ever be TIGHTER than today's behaviour,
+    # never looser. With ATR above 1.0% the cap binds and the stop is exactly
+    # what it is now. Applied at ENTRY only - the milestone recalculation the
+    # module supports is not wired yet, because moving a live position's stop
+    # mid-trade is a larger change to TradeManager.
+    enabled: true
     min_samples: 15        # own-history trades needed before per-symbol is used
     mae_percentile: 75     # place the stop where 75% of trades stayed within
     atr_multiple: 1.0      # stop must also clear 1x the symbol's ATR%; 0 disables
@@ -973,8 +1156,8 @@ trading:
   # 2026-08-31 closed at -$546.24, which under today's setting would have
   # flattened the book mid-session with nothing said beforehand.
   #
-  # warn_fractions are fractions of max_daily_loss_usd: at $500 these fire
-  # at -$200, -$300 and -$400. Each fires ONCE per day. The log line carries
+  # warn_fractions are fractions of max_daily_loss_usd: at $1000 these fire
+  # at -$400, -$600 and -$800. Each fires ONCE per day. The log line carries
   # both the depth (how far to the stop) and the velocity ($/min since the
   # first check, projected to when the ceiling would be hit at that rate) -
   # -$300 by 10:00 and -$300 by 15:30 are the same depth and very different
@@ -1089,7 +1272,14 @@ trading:
   # entries that previous sessions took. Expect fewer positions on days when
   # one complex dominates, and check the "P&L by sector complex" table to see
   # whether the refused slots would have helped or hurt.
-  max_positions_per_sector: 3
+  # 3 -> 2 on 2026-09-02. NOW, CRM and WDAY all map to XLK and were all bought
+  # inside 96 seconds; they were the day's three largest losses, -$267.94 of a
+  # -$403.66 day. The check is `held >= max` with the candidate excluded, so a
+  # cap of 3 admits exactly three - it permitted precisely the concentration
+  # that did the damage. The correlation limiter does run on this path but its
+  # 0.85 threshold only catches near-duplicates, not sector co-movement, so
+  # this cap is the guard that has to do that job.
+  max_positions_per_sector: 2
 
   # Stop opening new positions when the names we trade are broadly falling.
   #
@@ -1113,9 +1303,13 @@ trading:
   #
   # Latched once evaluated - a bounce does not un-halt the day, because that
   # would reopen trading on the same evidence that closed it.
-  breadth_halt:
+  # RETIRED 2026-09-02 as a halt; kept as a MEASUREMENT. See _measure_breadth
+  # in src/main.py. The mean/dispersion/crossing numbers feed regime_sizing -
+  # as the fallback when an index has no VWAP, and as the chop reading above.
+  # min_symbols is the only setting still consulted.
+  breadth:
     enabled: true
-    check_time: "09:45"      # 15 minutes of tape, paired with the 10:00 window end
+    check_time: "09:45"         # 15 minutes of tape, paired with the 10:00 window end
     min_mean_pct: -0.3       # halt if the watchlist mean is below this
     min_symbols: 5           # never conclude anything from fewer than this many
 
@@ -1182,10 +1376,99 @@ trading:
   # situation this feature exists for.
   regime_sizing:
     enabled: true
-    check_time: "09:45"        # same evidence window as breadth_halt
+    # 09:45 -> 09:40 on 2026-09-02. The daily loss limit fired at 09:38:19 that
+    # morning, so this read never ran on the one day it was most needed - nine
+    # longs were opened between 09:31 and 09:38 into a tape already flagged
+    # "QQQ is not trending up" at 09:10. 09:40 is the earliest that still
+    # leaves ~10 minutes of tape for a VWAP that means anything; the
+    # burst_close_gate below covers the window before it.
+    check_time: "09:40"
+    # Provisional BEARISH-ONLY read taken when the opening burst closes
+    # (~09:33), which is the moment the normal entry window opens. Acts only on
+    # the unambiguous case (BOTH indices under their own VWAP), never scales
+    # up, and is replaced wholesale once the check_time read produces a label.
+    burst_close_gate: true
+
+    # How often the regime is RE-EVALUATED. It used to read once at check_time
+    # and latch for the day, which is both too late (2026-09-02 was over at
+    # 09:38, before the read happened) and too coarse (a 09:45 reading also
+    # governing 15:45). Matched to how fast the tape actually turns over:
+    cadence:
+      opening_seconds: 0        # 09:30 -> check_time: every poll
+      morning_seconds: 60       # check_time -> settle_time: every minute
+      settle_time: "10:00"
+      afternoon_seconds: 300    # after 10:00: every five minutes
+
+    # Consecutive readings of a NEW label required before the regime actually
+    # changes. Without this, SPY sitting a hundredth of a percent from its VWAP
+    # crosses it repeatedly and the regime whipsaws between full size and
+    # no-new-longs on noise - which is worse than either setting held steadily,
+    # because entries then land exactly when the reading happens to be
+    # favourable. The first reading of the day is adopted immediately; there is
+    # nothing to whipsaw against yet.
+    confirmations: 2
+
+    # What happens to ALREADY-OPEN positions when the regime turns bearish.
+    # Without this the regime read governs new entries only, and open
+    # positions are left to travel independently to their own -1.0% stops -
+    # which is what nine longs did on 2026-09-02, for one shared reason that
+    # was knowable while they were still open.
+    #
+    # MONOTONIC: every value here can only make a live position's rules
+    # TIGHTER. A regime that flips back never re-widens a stop, because moving
+    # a stop away from a position that is already losing is the worst thing
+    # this could do.
+    bearish_exits:
+      enabled: true
+      final_exit_loss_pct: -0.5    # from -1.0%
+      trailing_stop_pct: 0.4       # from 0.75%
+      breakeven_trigger_pct: 0.1   # anything that got 0.1% green exits flat
     bullish_multiplier: 1.0
     neutral_multiplier: 0.5
     bearish_multiplier: 0.0    # 0 = no new longs. 0.25 = quarter size instead.
+    choppy_multiplier: 0.5     # see the chop block below
+
+    # ---------------------------------------------------------------------
+    # CHOP - the fourth regime label (added 2026-09-02)
+    # ---------------------------------------------------------------------
+    # Chop is not weakness. A falling tape has a negative mean; a choppy one
+    # has a mean near ZERO with everything scattered around it, and the two
+    # want opposite responses.
+    #
+    # 2026-08-28 is the case this is built from: 30 positions, 5 winners, 19
+    # peaked under +0.5% and lost $484 together while the 5 that cleared +1%
+    # made $424. The payoff actually IMPROVED to 2.90x, so breakeven was only
+    # 26% - the hit rate collapsed instead. That is not a selection failure,
+    # it is a tape where nothing follows through.
+    #
+    # Read from the WATCHLIST, never from SPY. SPY was flat that day
+    # (-0.018%) while the average signal returned -1.045% at 15 minutes, so a
+    # market-level detector would have called it a normal session.
+    #
+    # This replaces breadth_halt, which was retired the same day: it had been
+    # dead code since regime sizing shipped, and two guards answering "is
+    # today tradeable?" from different evidence meant whichever ran first won
+    # by ordering accident. Chop now lives inside the one guard that owns how
+    # much risk is on.
+    #
+    # Both conditions must hold - either alone is an ordinary day:
+    #   |mean| <= max_abs_mean_pct     the tape is going nowhere NET
+    #   dispersion >= min_dispersion   but the names ARE moving
+    #
+    # Bearish keeps precedence over choppy: a falling tape is worse.
+    chop:
+      enabled: true
+      max_abs_mean_pct: 0.25
+      min_dispersion_pct: 0.6
+      # A LOWER take-profit ladder for entries opened while choppy. On a chop
+      # day +0.5% is the whole move, and the normal 1.0/1.25/1.5% ladder
+      # carries positions that were genuinely up back through breakeven
+      # waiting for a level the day will not produce. Applied at entry, so a
+      # position keeps the ladder it opened with.
+      take_profit_tiers:
+        - {gain_pct: 0.4, sell_fraction: 0.5}
+        - {gain_pct: 0.7, sell_fraction: 0.5}
+        - {gain_pct: 1.0, sell_fraction: 1.0}
     # Fallback-only thresholds (no VWAP available):
     bearish_below_pct: -0.3    # either reading below this -> bearish
     bullish_above_pct: 0.0     # BOTH readings at/above this -> bullish
@@ -1651,6 +1934,30 @@ logging:
   log_file: "logs/trading.log"
 
 notifications:
+  # ---------------------------------------------------------------------
+  # Operational alerts (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # One-off alerts DURING and AFTER a session, as distinct from the daily
+  # report. They go to every configured channel - email and Pushover both.
+  #
+  # EmailNotifier.send_alert() has existed, wired to both channels and tested,
+  # with zero call sites since it was written - so no alert has ever actually
+  # been delivered. On 2026-09-02 the session ended at 09:38 on the daily loss
+  # limit and nothing said so until the journal was read hours later.
+  #
+  # The bar for each of these is "would you want to be interrupted", not "is
+  # this interesting". Individual fills, individual exits and sub-threshold
+  # velocity warnings deliberately stay in the log: a channel that buzzes for
+  # ordinary events gets muted, and then the important ones do not arrive
+  # either.
+  alerts:
+    enabled: true
+    preflight: true            # pre-market readiness, PASS included
+    session_end: true          # every ending, with realized + unrealized P&L
+    loss_limit: true           # the circuit breaker fired - sent while it is news
+    degraded: true             # still running but cannot trade properly
+    crash: true                # unhandled exception took the session down
+    positions_left_open: true  # a flatten did not fully succeed
   # ---------------------------------------------------------------------
   # SMTP - the original path. OFF, because it cannot work here.
   # ---------------------------------------------------------------------

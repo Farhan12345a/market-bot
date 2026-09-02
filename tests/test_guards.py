@@ -114,13 +114,19 @@ ok7, why7 = ex_broke.pre_entry_check(10, 100.0, symbol=MINERS[0])
 check("buying power still refuses first", ok7 is False and "buying power" in why7, why7)
 
 
-print("\n=== 2. BREADTH HALT ===")
-def bcfg(**over):
-    c = copy.deepcopy(CFG)
-    c["trading"].setdefault("breadth_halt", {}).update(
-        {"enabled": True, "check_time": "09:45", "min_mean_pct": -0.3,
-         "min_symbols": 5, **over})
-    return c
+print("\n=== 2. BREADTH: MEASUREMENT ONLY (the halt was retired 2026-09-02) ===")
+# _breadth_halt did two jobs: it measured the watchlist's mean move since the
+# open, and it latched a hard NO-NEW-ENTRIES halt below -0.3% at 09:45.
+#
+# The HALT is gone. It had been dead code since regime sizing shipped - the
+# flag was AND-ed with `not regime_active`, and regime_active is true - and
+# keeping it meant two guards answering "is today tradeable?" from different
+# evidence, where whichever ran first won by ordering accident rather than by
+# rule. regime_sizing supersedes it properly: continuous size scaling, and at
+# bearish_multiplier 0.0 it can still refuse everything.
+#
+# The MEASUREMENT stays, and now carries DISPERSION and CROSSINGS too - the
+# chop reading breadth_halt never computed.
 
 
 class MD:
@@ -133,70 +139,94 @@ class MD:
 SYMS = ["A", "B", "C", "D", "E", "F"]
 opens = {s: 100.0 for s in SYMS}
 
+
+def bstate(o):
+    return {"open_px": dict(o)}
+
+
+check("the halt function is gone entirely", not hasattr(M, "_breadth_halt"))
+check("the measurement replaces it", hasattr(M, "_measure_breadth"))
+check("the retired config key is gone", "breadth_halt" not in CFG["trading"])
+check("...and the measurement block remains",
+      CFG["trading"]["breadth"]["enabled"] is True)
+
 # A tape down ~1%: the 2026-08-28 shape, where the mean signal returned -1.045%.
 down = MD({s: 99.0 for s in SYMS})
-st = {"open_px": dict(opens)}
-check("nothing fires before check_time",
-      M._breadth_halt(bcfg(), down, SYMS, st, at("09:44"), ET) is False)
-check("...and it has not marked itself checked yet", not st.get("checked"))
-check("a falling tape halts", M._breadth_halt(bcfg(), down, SYMS, st, at("09:45"), ET) is True)
-check("...and it records what it saw", round(st["mean_move"], 2) == -1.0, st.get("mean_move"))
+st = bstate(opens)
+M._measure_breadth(CFG, down, SYMS, st, at("09:45"), ET)
+check("it records the mean it saw", round(st["mean_move"], 2) == -1.0, st.get("mean_move"))
 check("...and how many symbols it saw", st["breadth_n"] == 6, st.get("breadth_n"))
+check("...and how many are falling", st["falling"] == 6, st.get("falling"))
+check("a uniform move has ~zero dispersion", st["dispersion"] < 0.01, st.get("dispersion"))
 
-# Latched: a recovery must not reopen trading on the evidence that closed it.
+# It measures EVERY poll now, rather than latching after one check. A regime
+# read that only ever sees 09:45 governs 15:45 as well.
 up_now = MD({s: 102.0 for s in SYMS})
-check("a later bounce does NOT un-halt the day",
-      M._breadth_halt(bcfg(), up_now, SYMS, st, at("09:50"), ET) is True)
+M._measure_breadth(CFG, up_now, SYMS, st, at("09:50"), ET)
+check("a later poll RE-measures rather than latching", round(st["mean_move"], 2) == 2.0,
+      st.get("mean_move"))
 
-# A rising tape must not halt, and must not re-evaluate later either.
-st2 = {"open_px": dict(opens)}
-check("a rising tape does not halt",
-      M._breadth_halt(bcfg(), MD({s: 101.0 for s in SYMS}), SYMS, st2, at("09:45"), ET) is False)
-check("...and having checked once, it does not check again",
-      M._breadth_halt(bcfg(), down, SYMS, st2, at("09:50"), ET) is False)
+# Dispersion is the number the old function never computed, and the one that
+# tells "nothing is happening" apart from "everything is happening in both
+# directions at once".
+st_chop = bstate(opens)
+M._measure_breadth(CFG, MD({"A": 101.5, "B": 98.5, "C": 101.2, "D": 98.8,
+                            "E": 100.9, "F": 99.1}), SYMS, st_chop, at("09:45"), ET)
+check("a scattered tape reads near-zero MEAN", abs(st_chop["mean_move"]) < 0.25,
+      st_chop.get("mean_move"))
+check("...but HIGH dispersion", st_chop["dispersion"] > 0.6, st_chop.get("dispersion"))
+check("...which _chop_reading calls CHOPPY", M._chop_reading(CFG, st_chop)[0] is True)
+check("the uniformly falling tape is NOT chop - that is bearish",
+      M._chop_reading(CFG, {"mean_move": -1.0, "dispersion": 0.005})[0] is False)
 
-# Exactly at the threshold is not below it.
-st3 = {"open_px": dict(opens)}
-check("a mean exactly AT the floor does not halt",
-      M._breadth_halt(bcfg(), MD({s: 99.7 for s in SYMS}), SYMS, st3, at("09:45"), ET) is False)
-
-# Thin evidence must not halt a day. This is the expensive failure: a stream
-# serving 3 symbols would otherwise decide the session for 27.
+# Thin evidence must never produce a reading. A stream serving 3 symbols would
+# otherwise decide the session for 27.
 st4 = {"open_px": {"A": 100.0, "B": 100.0}}
-check("too few symbols -> no halt",
-      M._breadth_halt(bcfg(), MD({"A": 90.0, "B": 90.0}), ["A", "B"], st4, at("09:45"), ET) is False)
-check("...and it does NOT latch, so a real sample can still be read",
-      st4.get("halted") is not True)
+M._measure_breadth(CFG, MD({"A": 90.0, "B": 90.0}), ["A", "B"], st4, at("09:45"), ET)
+check("too few symbols -> no mean at all, rather than a confident wrong one",
+      st4.get("mean_move") is None, st4.get("mean_move"))
+check("...and no dispersion either", st4.get("dispersion") is None)
+check("...so the chop reading abstains", M._chop_reading(CFG, st4)[0] is False)
 
 # Missing open prices are simply symbols the check cannot see.
 st5 = {"open_px": {s: 100.0 for s in SYMS[:5]}}
-M._breadth_halt(bcfg(), MD({s: 99.0 for s in SYMS}), SYMS, st5, at("09:45"), ET)
-check("only symbols with an open price are counted", st5.get("breadth_n") == 5, st5.get("breadth_n"))
+M._measure_breadth(CFG, MD({s: 99.0 for s in SYMS}), SYMS, st5, at("09:45"), ET)
+check("only symbols with an open price are counted", st5.get("breadth_n") == 5,
+      st5.get("breadth_n"))
 
-# Disabled means inert.
-st6 = {"open_px": dict(opens)}
-c_off = copy.deepcopy(CFG); c_off["trading"]["breadth_halt"] = {"enabled": False}
-check("disabled -> never halts",
-      M._breadth_halt(c_off, down, SYMS, st6, at("09:45"), ET) is False)
+# Crossings: a name that keeps flipping sides of its own open is chop's most
+# direct signature.
+st6 = bstate(opens)
+for px in (101.0, 99.0, 101.0, 99.0):
+    M._measure_breadth(CFG, MD({s: px for s in SYMS}), SYMS, st6, at("09:45"), ET)
+check("repeated flips across the open are counted per symbol",
+      st6["crossings"]["A"] >= 3, st6.get("crossings"))
+check("...and surfaced as choppy_symbols", st6["choppy_symbols"] == len(SYMS),
+      st6.get("choppy_symbols"))
+st7 = bstate(opens)
+for px in (100.5, 101.0, 101.5):
+    M._measure_breadth(CFG, MD({s: px for s in SYMS}), SYMS, st7, at("09:45"), ET)
+check("a steadily rising tape records no crossings at all",
+      not any(st7.get("crossings", {}).values()), st7.get("crossings"))
 
 
-print("\n=== 3. THE HALT AND THE WINDOW FIT TOGETHER ===")
+print("\n=== 3. THE REGIME AND THE WINDOW FIT TOGETHER ===")
 _t = CFG["trading"]
-_h = _t["breadth_halt"]
-check("halt is enabled", _h["enabled"] is True)
-check("halt checks at 09:45", _h["check_time"] == "09:45")
+_r = _t["regime_sizing"]
+check("regime sizing is enabled", _r["enabled"] is True)
+check("its authoritative read is at 09:40 (moved from 09:45 - the 2026-09-02 "
+      "session was over at 09:38:19)", _r["check_time"] == "09:40")
 check("entry window ends 10:15", _t["entry_window_end"] == "10:15")
-# A halt only buys evidence if there is still window left to act on afterwards.
 _start = _t["entry_window_start"]
-check("the halt lands INSIDE the entry window",
-      _start < _h["check_time"] < _t["entry_window_end"],
-      (_start, _h["check_time"], _t["entry_window_end"]))
-_mins_before = (int(_h["check_time"][:2]) * 60 + int(_h["check_time"][3:])) - \
-               (int(_start[:2]) * 60 + int(_start[3:]))
+check("the read lands INSIDE the entry window",
+      _start < _r["check_time"] < _t["entry_window_end"],
+      (_start, _r["check_time"], _t["entry_window_end"]))
 _mins_after = (int(_t["entry_window_end"][:2]) * 60 + int(_t["entry_window_end"][3:])) - \
-              (int(_h["check_time"][:2]) * 60 + int(_h["check_time"][3:]))
-check("at least 10 minutes of tape before the decision", _mins_before >= 10, _mins_before)
+              (int(_r["check_time"][:2]) * 60 + int(_r["check_time"][3:]))
 check("at least 10 minutes of window left after it", _mins_after >= 10, _mins_after)
+# ...and unlike the old halt, it is no longer the FIRST reading of the day.
+check("the regime also reads every poll from the open, so 09:30-09:40 is not "
+      "ungoverned", _r["cadence"]["opening_seconds"] == 0)
 
 
 print("\n=== 4. UNIVERSE RANK ===")

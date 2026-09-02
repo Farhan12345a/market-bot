@@ -22,7 +22,19 @@ ENTRY_CONFIRM_GRACE_SECONDS = 120
 # Exit reasons that represent a protective stop firing (vs. a discretionary/
 # time-based exit) - used to fill the "was a stop-loss used" column in the
 # daily trade report.
-STOP_LOSS_EXIT_REASONS = {"FINAL_EXIT_-1.0%", "FIRST_EXIT_-0.5%", "TRAILING_STOP", "FLATTEN_ALL"}
+# Matched by PREFIX for the two threshold-bearing reasons, because the
+# threshold in the string is built from the position's own exit config - a
+# burst trade says "FINAL_EXIT_-0.35%", a session trade "FINAL_EXIT_-1.0%".
+STOP_LOSS_EXIT_PREFIXES = ("FINAL_EXIT_", "FIRST_EXIT_")
+STOP_LOSS_EXIT_REASONS = {"TRAILING_STOP", "FLATTEN_ALL"}
+
+
+def is_stop_loss_exit(reason):
+    """True when `reason` names a loss-side exit, at any threshold."""
+    reason = str(reason or "")
+    return reason.startswith(STOP_LOSS_EXIT_PREFIXES) or reason in STOP_LOSS_EXIT_REASONS
+
+
 # TAKE_PROFIT is deliberately NOT a stop-loss reason - it is a gain being banked.
 
 # FIRST_EXIT_-0.5% is the only exit reason that ever sells a PARTIAL position
@@ -34,7 +46,8 @@ STOP_LOSS_EXIT_REASONS = {"FINAL_EXIT_-1.0%", "FIRST_EXIT_-0.5%", "TRAILING_STOP
 # TAKE_PROFIT sells take_profit_fraction and leaves the rest running, so like
 # FIRST_EXIT it must not decrement the open-position count or be coloured as a
 # full close.
-PARTIAL_EXIT_REASONS = {"FIRST_EXIT_-0.5%", "TAKE_PROFIT"}
+PARTIAL_EXIT_REASONS = {"TAKE_PROFIT"}
+PARTIAL_EXIT_PREFIXES = ("FIRST_EXIT_",)
 
 # Take-profit reasons carry their tier ("TAKE_PROFIT_1.25%"), so membership has
 # to be a prefix test rather than an exact match. The TOP tier sells everything
@@ -75,7 +88,7 @@ def is_partial_exit(reason, qty, qty_before):
             pass
     if reason.startswith(TAKE_PROFIT_PREFIX):
         return True
-    return reason in PARTIAL_EXIT_REASONS
+    return reason.startswith(PARTIAL_EXIT_PREFIXES) or reason in PARTIAL_EXIT_REASONS
 
 ANSI_GREEN = "\033[92m"
 ANSI_RED = "\033[91m"
@@ -162,6 +175,24 @@ class Executor:
         # holds). The caller commits to Strategy with the qty it originally
         # computed unless it reads this first - see exit_qty_actually_submitted.
         self._last_exit_qty = {}
+        # symbol -> time.monotonic() when a PHANTOM entry was last dropped, and
+        # symbol -> how many entry orders have been SUBMITTED for it today.
+        #
+        # 2026-09-02: WDAY was submitted 8 times and RBLX 4 in five minutes.
+        # Every one was a phantom - the order never filled, the guard below
+        # dropped it, and nothing stopped the next poll from buying it again,
+        # because reentry_cooldown_after_loss_only is on and a dropped phantom
+        # is not a LOSS. A failure to fill is precisely the event that should
+        # not be retried ten seconds later, so it arms the cooldown on its own
+        # terms, independent of that setting.
+        self._phantom_dropped_at = {}
+        # symbol -> consecutive marketable-limit exit attempts that have not
+        # filled, so the exit can escalate to a market order rather than
+        # chasing a falling price one poll at a time.
+        self._limit_exit_attempts = {}
+        self._logged_loss_limit = None
+        self._entry_attempts = {}
+        self._entry_attempts_day = None
 
     def refresh_account_snapshot(self):
         """
@@ -340,9 +371,45 @@ class Executor:
             row["post_exit_note"] = note
         self._post_exit_pending = still_pending
 
+    def _count_entry_attempt(self, symbol):
+        """Tally entry SUBMISSIONS per symbol per day, for the attempt cap."""
+        today = datetime.now().date()
+        if self._entry_attempts_day != today:
+            self._entry_attempts_day = today
+            self._entry_attempts = {}
+        self._entry_attempts[symbol] = self._entry_attempts.get(symbol, 0) + 1
+
+    def entry_attempts_today(self, symbol):
+        """How many entry orders have been submitted for `symbol` today."""
+        if self._entry_attempts_day != datetime.now().date():
+            return 0
+        return self._entry_attempts.get(symbol, 0)
+
     def _note_position_closed(self, symbol, closed_at_loss):
         """Record when a position fully closed, to enforce the re-entry cooldown."""
         self._last_close_at[symbol] = (time.monotonic(), closed_at_loss)
+
+    def phantom_cooldown_remaining(self, symbol):
+        """
+        Seconds left before `symbol` may be bought again after a PHANTOM drop.
+
+        Checked SEPARATELY from the ordinary cooldown, and never skipped, so
+        that opening_burst.skip_reentry_cooldown cannot switch it off. That
+        flag exists so an opening trade does not block the normal session from
+        re-entering the same name later - a deliberate choice about the
+        EXPERIMENT. It was never meant to license re-submitting an order the
+        broker has just declined to fill, which is a different thing entirely
+        and the shape that produced eight WDAY submissions in five minutes.
+        """
+        at = self._phantom_dropped_at.get(symbol)
+        if at is None:
+            return 0.0
+        minutes = self.config["trading"].get("phantom_reentry_cooldown_minutes")
+        if minutes is None:
+            minutes = self.config["trading"].get("reentry_cooldown_minutes", 0)
+        if not minutes:
+            return 0.0
+        return max(0.0, minutes * 60 - (time.monotonic() - at))
 
     def reentry_cooldown_remaining(self, symbol):
         """
@@ -362,6 +429,18 @@ class Executor:
         more than it saved.
         """
         minutes = self.config["trading"].get("reentry_cooldown_minutes", 0)
+
+        # A dropped PHANTOM is checked FIRST and is never subject to
+        # reentry_cooldown_after_loss_only. It is neither a win nor a loss -
+        # it is the broker declining to fill - so the loss-only gate lets it
+        # through, which is how one symbol got submitted eight times in five
+        # minutes on 2026-09-02. Its own knob so it can be tuned (or zeroed)
+        # without touching the ordinary post-exit cooldown; falls back to that
+        # one when unset.
+        left = self.phantom_cooldown_remaining(symbol)
+        if left > 0:
+            return left
+
         if not minutes:
             return 0.0
 
@@ -449,6 +528,22 @@ class Executor:
         # still name a symbol the broker no longer holds. Two concentration
         # guards disagreeing about what is held is how one of them ends up
         # refusing entries against positions that closed minutes ago.
+        # Hard per-symbol attempt cap. The cooldown above is the first line of
+        # defence against a re-entry loop; this is the backstop for the case
+        # the cooldown does not cover, because a loop of this shape has now
+        # been produced twice from two different causes (45 minutes of retried
+        # sells on 2026-09-01, eight submissions of one symbol on 2026-09-02).
+        # A guard that only closes the specific hole last seen will be
+        # rediscovered by the next one.
+        max_attempts = self.config["trading"].get("max_entry_attempts_per_symbol_per_day")
+        if max_attempts and symbol:
+            attempts = self.entry_attempts_today(symbol)
+            if attempts >= max_attempts:
+                return False, (
+                    f"at max_entry_attempts_per_symbol_per_day "
+                    f"({attempts}/{max_attempts}) - not buying {symbol} again today"
+                )
+
         max_per_sector = self.config["trading"].get("max_positions_per_sector")
         if max_per_sector and symbol:
             try:
@@ -552,6 +647,14 @@ class Executor:
             self._pending_cost[symbol] = qty * price
         self._open_symbols.add(symbol)
         self._entry_recorded_at[symbol] = time.monotonic()
+        self._count_entry_attempt(symbol)
+        # A NEW position gets a fresh marketable-limit budget. Deliberately
+        # reset here and not on exit: this executor records a position as
+        # closed the moment the exit ORDER is submitted, not when it fills, so
+        # clearing the counter there reset it after every single attempt and
+        # the escalation to a market order could never fire. Caught by
+        # tests/test_0902b.py section 11.
+        self._limit_exit_attempts.pop(symbol, None)
 
         logger.info(f"{ANSI_GREEN}Entry order submitted for {symbol}: {qty} shares at {price}{ANSI_RESET}")
         return order
@@ -664,6 +767,7 @@ class Executor:
                 self._entry_recorded_at.pop(symbol, None)
                 self._pending_cost.pop(symbol, None)
                 self.open_entries.pop(symbol, None)
+                self._phantom_dropped_at[symbol] = time.monotonic()
                 return PHANTOM_EXIT
 
             if live_qty is not None and live_qty < qty:
@@ -680,8 +784,67 @@ class Executor:
                 # genuinely still holds.
                 self._last_exit_qty[symbol] = qty
 
+        # MARKETABLE LIMIT rather than pure market, when configured.
+        #
+        # A market sell takes whatever the book offers. In a thin, fast,
+        # one-directional tape that is an unbounded price: on 2026-09-02 a
+        # -1.0% stop realized -1.46% (NOW), -1.59% (WDAY) and -1.07% (CRM).
+        # A limit placed slippage_pct BELOW the current bid still crosses the
+        # spread - so it fills immediately in any normal book - but refuses to
+        # fill arbitrarily far away. The trade-off is explicit and worth
+        # stating: an order that does not fill leaves the position OPEN, which
+        # is why the band is generous relative to a stop (default 0.30% against
+        # a 0.5%/1.0% stop) and why an unfilled limit is retried as a plain
+        # market order on the NEXT poll rather than being left hanging.
+        limit_px = None
+        exit_cfg = (self.config.get("trading") or {}).get("marketable_limit_exits") or {}
+        # ESCALATION. An unfilled limit is cancelled and re-submitted by the
+        # next poll (see the unconditional cancel_open_orders above), which in
+        # a gapping tape means chasing the price down one poll at a time and
+        # never actually getting out. After max_attempts tries this drops back
+        # to a plain market order: a bounded-price exit is better than a market
+        # exit, but ANY exit is better than an open position the stop has
+        # already condemned.
+        _tries = self._limit_exit_attempts.get(symbol, 0)
+        _max_tries = int(exit_cfg.get("max_attempts", 2) or 0)
+        if _max_tries and _tries >= _max_tries:
+            logger.warning(
+                f"{symbol}: {_tries} marketable-limit exit attempts did not fill - "
+                f"falling back to a MARKET order to guarantee the exit"
+            )
+            exit_cfg = {}
+        if exit_cfg.get("enabled") and price:
+            try:
+                band = float(exit_cfg.get("slippage_pct", 0.3)) / 100.0
+                # Selling: allow filling BELOW the reference. Covering a short:
+                # allow filling above it.
+                limit_px = round(price * ((1 + band) if is_cover else (1 - band)), 2)
+            except Exception as e:
+                logger.debug(f"{symbol}: marketable limit price unavailable ({e}) - using market")
+                limit_px = None
+
         try:
-            order = self.broker.submit_market_order(symbol, qty, side=side)
+            order = None
+            if limit_px:
+                try:
+                    order = self.broker.submit_limit_order(symbol, qty, limit_px, side=side)
+                    self._limit_exit_attempts[symbol] = _tries + 1
+                    logger.info(
+                        f"{symbol}: exit routed as a MARKETABLE LIMIT at {limit_px} "
+                        f"({exit_cfg.get('slippage_pct', 0.3)}% through {price}) - "
+                        f"bounds the fill instead of accepting any price the book offers"
+                    )
+                except Exception as e:
+                    # A limit route that cannot even be SUBMITTED must never
+                    # cost the exit. Bounding the fill price is an improvement;
+                    # getting out at all is the requirement.
+                    logger.warning(
+                        f"{symbol}: marketable-limit exit could not be submitted "
+                        f"({type(e).__name__}: {e}) - falling back to a market order"
+                    )
+                    order = None
+            if order is None:
+                order = self.broker.submit_market_order(symbol, qty, side=side)
         except Exception as e:
             logger.error(f"Failed to submit exit order for {symbol}: {e}")
             return None
@@ -741,7 +904,7 @@ class Executor:
                 "qty": qty,
                 "exit_reason": reason,
                 "exit_rsi": exit_rsi,
-                "stop_loss_used": reason in STOP_LOSS_EXIT_REASONS,
+                "stop_loss_used": is_stop_loss_exit(reason),
                 "order_id": order.id if hasattr(order, "id") else None,
             }
             if entry_price and price is not None:
@@ -865,6 +1028,58 @@ class Executor:
                 continue
         return self._realized_pnl_today + unrealized
 
+    def daily_loss_limit_usd(self):
+        """
+        Today's loss ceiling in dollars.
+
+        Fixed by default. When trading.daily_loss_limit.mode is
+        "percent_of_equity" it is a FRACTION OF THE ACCOUNT instead, which is
+        the right shape for a risk limit - $500 means something different on a
+        $50k account than on a $200k one, and hardcoding dollars means the
+        limit silently changes meaning as the account moves.
+
+        THE CEILING IS THE POINT, and it is why this is not simply
+        pct x equity. A limit that rises automatically with the balance lets a
+        good run quietly authorise larger losses - the account grows, the
+        permitted daily loss grows with it, and nobody ever decided that.
+        Raising ceiling_usd is a deliberate act, taken after the strategy has
+        shown a stable edge, not a side effect of a profitable week. The floor
+        is the mirror image: a drawdown must not shrink the limit to something
+        so tight that one ordinary opening trade ends the session.
+
+        Falls back to max_daily_loss_usd on any problem, including equity not
+        yet being known - a risk limit must never fail OPEN.
+        """
+        t = self.config.get("trading") or {}
+        static = t.get("max_daily_loss_usd")
+        cfg = t.get("daily_loss_limit") or {}
+        if (cfg.get("mode") or "fixed") != "percent_of_equity":
+            return static
+        try:
+            equity = float(self._equity or 0)
+            if equity <= 0:
+                return static
+            pct = float(cfg.get("pct_of_equity", 0.75)) / 100.0
+            floor = float(cfg.get("floor_usd", static or 500))
+            ceiling = float(cfg.get("ceiling_usd", static or 1000))
+            limit = max(floor, min(ceiling, equity * pct))
+            if self._logged_loss_limit != round(limit, 2):
+                self._logged_loss_limit = round(limit, 2)
+                logger.info(
+                    f"Daily loss limit: ${limit:,.2f} "
+                    f"({cfg.get('pct_of_equity', 0.75)}% of ${equity:,.2f} equity, "
+                    f"floor ${floor:,.0f} / ceiling ${ceiling:,.0f}). The ceiling "
+                    f"does NOT rise with the account on its own - raise it "
+                    f"deliberately once the edge is established."
+                )
+            return limit
+        except Exception as e:
+            logger.warning(
+                f"Percent-of-equity loss limit failed ({e}) - falling back to "
+                f"the fixed ${static} limit."
+            )
+            return static
+
     def check_daily_loss_limit(self):
         """
         True once the day is down by more than max_daily_loss_usd.
@@ -878,7 +1093,7 @@ class Executor:
         account.daily_pnl behind a hasattr() guard and Alpaca's account model
         has no such field, making it a silent no-op.
         """
-        max_loss = self.config["trading"].get("max_daily_loss_usd")
+        max_loss = self.daily_loss_limit_usd()
         if not max_loss:
             return False
         if self.daily_pnl <= -abs(max_loss):
@@ -918,7 +1133,10 @@ class Executor:
         cfg = (self.config.get("trading") or {}).get("loss_velocity_warning") or {}
         if not cfg.get("enabled"):
             return None
-        max_loss = abs((self.config.get("trading") or {}).get("max_daily_loss_usd") or 0)
+        # The SAME number check_daily_loss_limit uses, so the warnings are
+        # fractions of the limit that will actually fire rather than of a
+        # static value the percent-of-equity mode may have replaced.
+        max_loss = abs(self.daily_loss_limit_usd() or 0)
         if not max_loss:
             return None
 

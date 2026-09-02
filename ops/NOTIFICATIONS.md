@@ -108,20 +108,45 @@ and the report is still on disk.
 
 ---
 
-## Still to wire: the alerts that actually matter
+## The alerts (wired 2026-09-02)
 
-`EmailNotifier.send_alert(subject, text)` exists and is tested, but nothing
-calls it yet. Ranked by how much you would want the interruption:
+`EmailNotifier.send_alert(subject, text)` had existed, tested and wired to both
+channels, with **zero call sites** — so no alert had ever been delivered. On
+2026-09-02 the session ended at 09:38:19 on the daily loss limit and nothing
+said so until the journal was read hours later. `src/notifications/alerts.py`
+is now the call-site layer, toggled under `notifications.alerts` in config.yaml:
 
-1. **The bot is not running** at 09:25 ET on a trading day. Silence currently
-   looks identical to a healthy morning — this is the big one.
-2. **Daily loss limit fired** — everything just got flattened.
-3. **Stream fell back to REST** at the open, so entries are running on delayed
-   prices again.
-4. Daily report at the close. Already handled, and the least urgent.
+| Alert | Fires when |
+|---|---|
+| `preflight` | every pre-market run, **PASS included** |
+| `loss_limit` | the circuit breaker fires — sent *before* the flatten |
+| `session_end` | every ending: realized + unrealized P&L, reason, entries, trades |
+| `degraded` | the stream died and the session is on ~15-min-delayed REST |
+| `crash` | an unhandled exception ended the session — sent *before* cleanup |
+| `positions_left_open` | a flatten did not fully succeed; shares held overnight |
 
-(1) needs a watchdog outside the bot process — a cron on the Droplet, since a
-dead process cannot alert about itself. Say the word and I will add it.
+Deliberately NOT alerted: individual fills, individual exits, sub-threshold
+velocity warnings. A channel that buzzes for ordinary events gets muted, and
+then the six above stop arriving too.
+
+Every path is fail-safe: an alert that cannot be delivered never interrupts
+trading, and `ops/send-preflight-alert.py` always exits 0 so a notification
+problem can never make the preflight itself look like a readiness failure.
+
+### Still missing: the dead-process watchdog
+
+**The bot not running at 09:25 on a trading day is still silent**, and it is
+the most important gap left. A dead process cannot alert about itself, so this
+needs something outside it — a cron or systemd timer on the Droplet that checks
+`systemctl is-active market-bot` and sends if the answer is not `active`.
+
+Note that `ops/preflight.sh` now sends its result, so a *scheduled* preflight
+at ~09:05 covers most of this in practice: if the preflight alert does not
+arrive, something is wrong at the box level. That is a weaker guarantee than a
+real watchdog — it says the cron ran, not that the bot is healthy — but it
+turns a silent morning into a noticeable one. Add to crontab:
+
+    5 9 * * 1-5 cd /root/market-bot && bash ops/preflight.sh >/dev/null 2>&1
 
 ---
 

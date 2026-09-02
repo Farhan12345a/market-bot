@@ -518,10 +518,21 @@ class PriceStream:
     def _market_open_monotonic(self):
         """Today's 09:30 ET as a monotonic timestamp, or -inf outside a session.
 
-        Returns -inf when the open has already passed, so the watchdog behaves
-        exactly as it always did once the session is under way: the max() in the
-        caller then falls through to _started_at. Only the pre-market case is
-        changed.
+        The watchdog's budget is meant to be 120 seconds of silence DURING
+        MARKET HOURS. Returning it only while still pre-market was not enough,
+        and 2026-09-02 is the proof: the stream subscribed at ~09:28, the
+        watchdog woke at 09:30:01, `now >= open_at` was already true, this
+        returned -inf, the max() in the caller fell through to _started_at -
+        which was 120 seconds ago, all of it pre-market - and a working socket
+        was killed ONE SECOND after the bell. The reconnect cost the opening
+        burst its first 90 seconds: zero baselines until 09:31:38 against a
+        window that closes at 09:33.
+
+        So the open is returned for the whole session, not just before it. Once
+        the market is open the budget runs 09:30 -> 09:32 no matter how long
+        before the bell the socket connected, which is what "120 seconds of
+        silence during market hours" was always supposed to mean. Outside a
+        session -inf restores the old behaviour of counting from connect.
         """
         try:
             import pytz
@@ -529,8 +540,12 @@ class PriceStream:
             et = pytz.timezone("America/New_York")
             now = datetime.now(et)
             open_at = now.replace(hour=9, minute=30, second=0, microsecond=0)
-            if now >= open_at:
+            close_at = now.replace(hour=16, minute=0, second=0, microsecond=0)
+            if now >= close_at:
                 return float("-inf")
+            # Pre-market: the open is still ahead, so the budget cannot start.
+            # Intraday: the open is behind, so this is a NEGATIVE offset - the
+            # budget started at the bell and has been running since.
             return time.monotonic() + (open_at - now).total_seconds()
         except Exception:
             # Never let a clock problem disable the watchdog entirely.

@@ -165,9 +165,16 @@ class FakePos:
 
 
 class FakeBroker:
-    """Fills market orders immediately unless told otherwise."""
+    """Fills market orders immediately unless told otherwise.
+
+    Also serves LIMIT orders as of 2026-09-02: exits are routed as marketable
+    limits (0.3% through the reference) and fall back to market only if the
+    limit route cannot be submitted. A broker without submit_limit_order would
+    exercise the fallback on every exit and never the real path.
+    """
 
     def __init__(self, market, cash=100000.0, fill=True):
+        self.limit_orders = []
         self.market = market
         self.cash = cash
         self.positions = {}
@@ -203,6 +210,14 @@ class FakeBroker:
 
     def get_filled_sell_orders_since(self, symbol, since):
         return []
+
+    def submit_limit_order(self, symbol, qty, limit_price, side="buy",
+                           extended_hours=False):
+        """A marketable limit crosses the spread, so in this simulation it
+        fills exactly like a market order. The point of routing exits this way
+        is bounding the WORST fill, not changing whether one happens."""
+        self.limit_orders.append((symbol, qty, limit_price, side))
+        return self.submit_market_order(symbol, qty, side=side)
 
     def submit_market_order(self, symbol, qty, side="buy"):
         self.n += 1
@@ -247,6 +262,14 @@ class FakeNotifier:
 
     def send_report(self, *a, **k):
         self.sent.append(("report", k))
+        return True
+
+    def send_alert(self, subject, text):
+        # Added 2026-09-02: src/notifications/alerts.py now has call sites
+        # (session end, loss limit, crash, degraded, positions left open), so
+        # the simulated session exercises them for real rather than logging a
+        # delivery failure that the "no unexpected errors" check then trips on.
+        self.sent.append(("alert", subject, text))
         return True
 
 

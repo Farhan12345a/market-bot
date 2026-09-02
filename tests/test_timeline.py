@@ -231,10 +231,16 @@ if prev.returncode == 0:
         # reach take-profit before the window closes. The halt's own -0.3%
         # floor is untouched - this is downstream of it, not a loosening of it.
         "entry_window_end": "10:15",
-        # 2000 -> 1000 -> 500 across 2026-09-02. 2000 was raised in test to let
-        # a session run further before halting; 500 is the number now live.
-        # See config.yaml for the real-money reminder attached to this.
-        "max_daily_loss_usd": 500,
+        # 2000 -> 1000 -> 500 -> 1000 across 2026-09-02. The $500 setting fired
+        # at 09:38:19 that morning on a MARK-TO-MARKET number (-$517.07) that
+        # included ~$190 of unrealized loss; flattening the five open positions
+        # actually realized only -$76.40, so the day closed at -$403.66 realized.
+        # A ceiling that trips on marks worse than the achievable exits ends
+        # sessions the account never actually lost.
+        #
+        # It is also percent-of-equity now (trading.daily_loss_limit), so this
+        # key is the FALLBACK and the ceiling, not the whole rule.
+        "max_daily_loss_usd": 1000,
         # 0.33/0.40/1.0 -> 0.40/0.30/1.0 for 2026-09-02: take more off the
         # first tier, same 30% of the original left to run past +1.5%.
         "take_profit_tiers": [

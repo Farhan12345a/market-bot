@@ -128,8 +128,21 @@ et = pytz.timezone("America/New_York")
 now_et = datetime.now(et)
 ps = S.PriceStream.__new__(S.PriceStream)
 got = S.PriceStream._market_open_monotonic(ps)
-if now_et.hour * 60 + now_et.minute >= 9 * 60 + 30:
-    check("after the open it falls through to subscribe time", got == float("-inf"), got)
+# CHANGED 2026-09-02. The old code returned -inf the moment the bell rang, so
+# max() in the caller fell back to _started_at - the SUBSCRIBE time, up to four
+# minutes pre-market - and a healthy socket was killed at 09:30:01 with its
+# whole 120s budget already spent on pre-market silence. That cost the opening
+# burst its first 90 seconds. The open is now returned for the WHOLE session,
+# so the budget genuinely runs 09:30 -> 09:32 however early the socket
+# connected. Only outside a session does it fall through to subscribe time.
+# NOT named `mins` - that shadows the mins() helper this file uses further down.
+now_mins = now_et.hour * 60 + now_et.minute
+if now_mins >= 16 * 60:
+    check("after the CLOSE it falls through to subscribe time", got == float("-inf"), got)
+elif now_mins >= 9 * 60 + 30:
+    check("intraday the budget is anchored to the BELL, not to subscribe time "
+          "(a negative offset - the open is behind us)",
+          got != float("-inf") and got < time.monotonic(), got)
 else:
     check("before the open it defers to the bell", got > time.monotonic(), got)
 check("the give-up budget is unchanged at 120s", S.NO_DATA_GIVE_UP_SECONDS == 120,

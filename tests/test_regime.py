@@ -74,8 +74,17 @@ off_cfg = copy.deepcopy(RC); off_cfg["trading"]["regime_sizing"]["enabled"] = Fa
 m, label = M._regime_multiplier(off_cfg, {}, breadth(0.5, 100.0), [(0, 101.0)], dt("10:00"), ET)
 check("disabled -> full size, no label", m == 1.0 and label is None, (m, label))
 
-m, label = M._regime_multiplier(RC, {}, breadth(0.5, 100.0), [(0, 101.0)], dt("09:40"), ET)
-check("before check_time -> full size, no label", m == 1.0 and label is None, (m, label))
+# CHANGED 2026-09-02: the regime is now read CONTINUOUSLY (every poll from the
+# open to check_time, then every 60s, then every 300s) rather than once at
+# check_time and latched. The old "no opinion before check_time" behaviour left
+# 09:30-09:45 ungoverned, and on 2026-09-02 the session was over at 09:38.
+# BEFORE THE OPEN there is still nothing to read, and that is what this asserts.
+m, label = M._regime_multiplier(RC, {}, breadth(0.5, 100.0), [(0, 101.0)], dt("09:15"), ET)
+check("before the OPEN -> full size, no label (nothing has traded yet)",
+      m == 1.0 and label is None, (m, label))
+m, label = M._regime_multiplier(RC, {}, breadth(0.5, 100.0), [(0, 101.0)], dt("09:35"), ET)
+check("after the open it DOES read, rather than waiting for check_time",
+      label is not None, (m, label))
 
 m, label = M._regime_multiplier(RC, {}, breadth(None, None), [], dt("09:45"), ET)
 check("no readings at all -> full size (same guard breadth_halt uses), not penalized",
@@ -173,7 +182,7 @@ check("...for SPY and QQQ specifically",
 # fifteen.
 check("benchmarks are sampled from the MARKET OPEN, not from entry_window_start",
       _msrc.index("BENCHMARK SAMPLING - from the market OPEN")
-      < _msrc.index("halted = breadth_would_halt"))
+      < _msrc.index("_measure_breadth(config, market_data, symbols, breadth_state, now, et)"))
 check("a 0x regime is reported as a stand-down, not a sizing rounding error",
       "regime_sizing standing down" in _msrc)
 
@@ -207,12 +216,17 @@ ex.regime_size_multiplier = 0.0
 check("0.0x regime multiplier -> zero shares, entry would be skipped",
       M._position_size(sizing_cfg, ex, 100.0) == 0)
 
-print("\n=== 7. main.py: regime_sizing REPLACES breadth_halt, never layers with it ===")
+print("\n=== 7. main.py: regime_sizing is the SINGLE owner; breadth_halt retired ===")
 src = open(repo_file("src", "main.py")).read()
-check("breadth_halt's measurement always runs (reused as regime evidence)",
-      "breadth_would_halt = _breadth_halt(" in src)
-check("the actual halt is suppressed while regime_sizing is active",
-      "halted = breadth_would_halt and not regime_active" in src)
+# RETIRED 2026-09-02. The halt had been dead code since regime sizing shipped
+# (`halted = breadth_would_halt and not regime_active`, regime_active true), and
+# two guards answering "is today tradeable?" from different evidence meant
+# whichever ran first won by ordering accident. The MEASUREMENT survives and now
+# also feeds the chop reading.
+check("the breadth MEASUREMENT always runs (reused as regime evidence)",
+      "_measure_breadth(config, market_data, symbols" in src)
+check("the halt function is gone entirely", "def _breadth_halt(" not in src)
+check("...and nothing gates entries on a halt flag", "if halted:" not in src)
 check("regime multiplier is written onto the executor for _position_size to read",
       "executor.regime_size_multiplier = _mult" in src)
 check("_position_size reads it back via getattr with a safe 1.0 default",
@@ -221,10 +235,12 @@ check("_position_size reads it back via getattr with a safe 1.0 default",
 print("\n=== 8. LIVE CONFIG ===")
 rc_live = CFG["trading"].get("regime_sizing") or {}
 check("regime_sizing is shipped enabled", rc_live.get("enabled") is True)
-check("breadth_halt stays enabled too - its measurement is reused, only the halt is bypassed",
-      CFG["trading"].get("breadth_halt", {}).get("enabled") is True)
+check("the retired breadth_halt config key is gone",
+      "breadth_halt" not in CFG["trading"])
+check("...and the measurement block replaces it",
+      CFG["trading"].get("breadth", {}).get("enabled") is True)
 check("bearish floor mirrors breadth_halt's own min_mean_pct",
-      rc_live.get("bearish_below_pct") == CFG["trading"]["breadth_halt"]["min_mean_pct"])
+      rc_live.get("bearish_below_pct") == -0.3)   # breadth_halt retired 2026-09-02
 check("bearish ships as NO NEW LONGS (0.0), the stronger claim to test first",
       rc_live.get("bearish_multiplier") == 0.0, rc_live.get("bearish_multiplier"))
 check("the three bands are ordered bullish > neutral > bearish",
