@@ -90,6 +90,96 @@ check("the code says why milestones and not continuous recalculation",
 check("...and that widening a live stop is the worst thing it could do",
       "single worst thing" in sstrat)
 
+
+# ===================================================================
+print("\n=== 4. HALT-RISK SCORER ===")
+from src.screener.halt_risk import halt_risk_score, is_halt_prone, filter_symbols
+HR = CFG["trading"]["halt_risk"]
+check("shipped OFF - enabling it is an ENTRY change", HR["enabled"] is False)
+
+_calm = dict(atr_pct=1.2, price=264.0, dollar_volume=800e6)
+check("a large-cap SaaS name scores 0", halt_risk_score("CRM", **_calm)[0] == 0)
+check("...and is allowed", is_halt_prone("CRM", **_calm)[0] is False)
+
+_bio = dict(atr_pct=9.0, price=8.0, dollar_volume=15e6)
+sc, why = halt_risk_score("BIO", **_bio, cfg=HR)
+check("a volatile thin biotech scores high", sc >= HR["refuse_at_score"], (sc, why))
+check("...and is refused", is_halt_prone("BIO", cfg=HR, **_bio)[0] is True)
+check("...with the reasons attached, so a refusal can be read back",
+      "ATR" in " ".join(why) and "thin" in " ".join(why), why)
+
+_promo = dict(atr_pct=12.0, price=1.80, dollar_volume=4e6)
+check("a low-float promo name scores higher still",
+      halt_risk_score("P", **_promo, cfg=HR)[0] > sc)
+
+check("ATR is the dominant input - an LULD trip needs a move a calm name "
+      "cannot reach",
+      halt_risk_score("A", atr_pct=9.0, cfg=HR)[0]
+      > halt_risk_score("B", price=4.0, cfg=HR)[0])
+
+check("earnings day is scored, because the DATE is knowable in advance",
+      halt_risk_score("E", earnings_today=True, cfg=HR)[0] == HR["earnings_today_points"])
+check("...but does not by itself refuse a large cap - that trade-off is the "
+      "user's, and the list builder ADDS earnings names on purpose",
+      is_halt_prone("CRM", cfg=HR, earnings_today=True, **_calm)[0] is False)
+
+check("no inputs -> score 0, documented as failing OPEN rather than pretended "
+      "to be a measurement", halt_risk_score("NEW")[0] == 0)
+hsrc = open(repo_file("src", "screener", "halt_risk.py")).read()
+check("...and the docstring says so plainly instead of claiming otherwise",
+      "scores it as if it were" in hsrc)
+check("the module is honest that news halts cannot be predicted",
+      "claiming to know tomorrow's news" in hsrc)
+check("...and flags the conflict with the earnings list builder",
+      "ADDS symbols reporting earnings" in hsrc or "ADDS" in hsrc)
+
+kept, dropped = filter_symbols([
+    {"symbol": "CRM", **_calm},
+    {"symbol": "BIO", **_bio},
+], cfg=HR)
+check("filter_symbols drops only the risky one", kept == ["CRM"], kept)
+check("...and reports what it dropped", len(dropped) == 1 and dropped[0][0] == "BIO", dropped)
+kept2, dropped2 = filter_symbols([{"symbol": "BIO", **_bio}], cfg=HR)
+check("an all-risky list comes back INTACT - watching nothing guarantees a "
+      "blank day", kept2 == ["BIO"] and dropped2 == [], (kept2, dropped2))
+
+print("\n=== 5. WATCHDOG ===")
+import os as _os
+import subprocess as _sp
+wd = repo_file("ops", "watchdog.sh")
+check("the script exists and is executable", _os.access(wd, _os.X_OK))
+check("shell syntax is valid",
+      _sp.run(["bash", "-n", wd], capture_output=True).returncode == 0)
+w = open(wd).read()
+check("it checks the unit is active", "systemctl is-active" in w)
+check("...AND that it has logged recently - active but wedged is still broken",
+      "WEDGED" in w and "journalctl" in w)
+check("...AND that the box has disk - a full disk stops the CSVs without "
+      "stopping the process", "DISK" in w and "df " in w)
+check("it stays SILENT when healthy - a watchdog that reports success daily "
+      "is one you stop reading",
+      '[ -z "$PROBLEMS" ] && exit 0' in w)
+check("it uses the venv interpreter, not a bare python3",
+      "_python.sh" in w and "venv/bin/python3" in w)
+check("it explains why it lives outside the bot",
+      "cannot alert about itself" in w or "sent BY the bot" in w)
+for f in ("market-bot-watchdog.service", "market-bot-watchdog.timer", "README.md"):
+    check(f"ops/systemd/{f} exists", _os.path.exists(repo_file("ops", "systemd", f)))
+rd = open(repo_file("ops", "systemd", "README.md")).read()
+check("the install doc says to VERIFY it alerts, not assume", "systemctl stop market-bot" in rd)
+check("...and warns the timer is evaluated in the system timezone", "SYSTEM timezone" in rd)
+
+print("\n=== 6. THE ENTRY-CHANGE LIST IS COMPLETE, NOT A SAMPLE ===")
+doc = open(repo_file("CLAUDE.md")).read()
+for k in ("use_dynamic_universe", "num_stocks_to_trade", "max_daily_entries",
+          "regime_sizing", "correlation_limit", "min_screener_score",
+          "max_concurrent_positions", "liquidity_cap"):
+    check(f"{k} is listed as an entry change", k in doc)
+check("...and exit settings are explicitly marked as free to tune",
+      "NOT an entry change" in doc and "final_exit_loss_pct" in doc)
+check("the note admits the earlier list was incomplete",
+      "as though that were" in doc)
+
 print(f"\n{P} passed, {F} failed")
 import sys
 sys.exit(1 if F else 0)

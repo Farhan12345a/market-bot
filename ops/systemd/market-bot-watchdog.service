@@ -1,0 +1,11 @@
+[Unit]
+Description=market-bot watchdog - checks the trading bot is alive and alerts if not
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/market-bot
+EnvironmentFile=-/etc/market-bot.env
+ExecStart=/root/market-bot/ops/watchdog.sh
+# A watchdog that fails must not itself page anyone; it logs and exits.
+SuccessExitStatus=0 1

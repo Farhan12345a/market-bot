@@ -65,10 +65,62 @@ The sample size that matters is **trades since the last config change**, not
 total trades. ~400 trades exist across roughly 15 different configurations,
 which is not 400 observations of anything.
 
-Entry-side settings this applies to: `rapid_increase_pct`,
-`rapid_increase_max_pct`, `max_extension_from_open_pct`, `min_move_pct`,
-`min_move_to_spread_ratio`, `entry_window_start`/`_end`, `use_pullback_entry`,
-`use_three_bar_momentum`, screener thresholds, and universe selection.
+### Which settings count as ENTRY changes
+
+Anything that changes WHICH TRADES EXIST. That is a much longer list than the
+signal thresholds, and an earlier version of this note said "rapid_increase_pct,
+min_move_pct, max_extension_from_open_pct, entry_window_*" as though that were
+all of it. It is not - roughly fifty settings qualify.
+
+**Tier 1 - changes the signal itself. Never change two at once.**
+`rapid_increase_pct`, `rapid_increase_lookback_minutes`,
+`rapid_increase_max_pct`, `use_three_bar_momentum`,
+`three_bar_require_acceleration`, `use_pullback_entry`,
+`use_opening_reversal_entry`, `use_continuation_score`, and everything under
+`opening_burst` (`min_move_pct`, `min_move_to_spread_ratio`, `max_positions`,
+`baseline_time`, `decide_by`, `multifactor_rank`).
+
+**Tier 2 - changes which signals survive to become trades.**
+`max_extension_from_open_pct`, `min_stock_price`, `max_stock_price`,
+`max_plausible_spread_pct`, `liquidity_cap`, `halt_check`, `halt_risk`,
+`require_fresh_data_for_entry`, `exclude_leveraged_etfs`,
+`exclude_basket_etfs`, `exclude_symbols`.
+
+**Tier 3 - changes how many trades exist, not which.** Still an entry change,
+because it changes the sample you are measuring.
+`max_daily_entries`, `max_concurrent_positions`, `max_positions_per_sector`,
+`correlation_limit`, `use_burst_throttle`, `burst_width_threshold`,
+`burst_max_entries`, `reentry_cooldown_minutes`,
+`reentry_cooldown_after_loss_only`, `phantom_reentry_cooldown_minutes`,
+`max_entry_attempts_per_symbol_per_day`, `rate_limits`.
+
+**Tier 4 - can refuse everything, so it silently changes the sample.**
+`regime_sizing` (including `chop` and the multipliers), `loss_tiers`,
+`daily_loss_limit`, `max_daily_loss_usd`.
+
+**Tier 5 - changes what can EVER be selected.** The biggest lever of all, and
+the easiest to change without noticing it is an entry change.
+`use_dynamic_universe`, `universe_size`, `universe_shortlist_size`,
+`max_screen_candidates`, `universe_min_dollar_volume`, `min_avg_volume`,
+`min_screener_score`, `num_stocks_to_trade`, `merge_default_universe`,
+`screener_start_time`, `stock_universe`, `candidates_file`, and the
+earnings/QQQ list-builder settings.
+
+**Timing.** `entry_window_start`/`_end`, `entry_check_interval_seconds`,
+`opening_fast_poll`.
+
+### What is NOT an entry change - tune these freely
+
+Replayable against recorded paths, so they can be evaluated without waiting:
+`final_exit_loss_pct`, `first_exit_loss_pct`, `trailing_stop_pct`,
+`take_profit_tiers`, `breakeven_tiers`, `use_breakeven_floor`,
+`trail_tightening`, `dynamic_stops`, `gap_exit`, `time_stop_hour`,
+`marketable_limit_exits`, and the `opening_burst.exits` block.
+
+Sizing sits in between: `sizing_mode`, `volatility_sizing`,
+`max_position_per_stock_usd`, `max_total_exposure_fraction`. These change P&L
+per trade but not WHICH trades exist, so outcomes stay comparable - a changed
+size scales a result, it does not replace it.
 
 ## Testing and deployment
 

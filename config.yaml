@@ -1127,6 +1127,45 @@ trading:
     alert_on_held: true
 
   # ---------------------------------------------------------------------
+  # Halt-risk filter (added 2026-09-02) - SHIPPED OFF
+  # ---------------------------------------------------------------------
+  # WHAT THIS CANNOT DO, first. A halt is almost always a NEWS event, or an
+  # LULD trip caused by one. None of that is predictable from price history,
+  # and a filter claiming to avoid halts is claiming to know tomorrow's news.
+  #
+  # What it CAN do is narrower: halts concentrate overwhelmingly in a
+  # describable kind of stock, and that kind is visible in data already on
+  # hand - high ATR (an LULD trip needs a 5-10% move in five minutes, which a
+  # 0.8%-ATR name essentially cannot reach), low price (wider bands, and where
+  # promotion and dilution live), thin dollar volume, and a SCHEDULED binary
+  # event.
+  #
+  # OFF because turning it on is an ENTRY CHANGE - it changes which trades
+  # exist, and per CLAUDE.md that needs one variable held for a week rather
+  # than being switched on alongside everything else.
+  #
+  # AND BECAUSE IT PARTLY UNDOES A DELIBERATE FEATURE. The pre-open list
+  # builder ADDS symbols reporting earnings today, on purpose: an earnings
+  # reaction is a gap plus volume, which is what this strategy hunts. Those are
+  # also the most halt-prone names on the watchlist. Enabling
+  # earnings_today_points is a decision about that trade-off, not a bug fix.
+  #
+  # For the CURRENT universe this is close to inert anyway - CRM, NOW, WDAY and
+  # the rest score 0. It earns its keep against the low-float / biotech
+  # expansion in PENDING_WORK's WHEN I START WINNING section, which is exactly
+  # where halts actually live.
+  halt_risk:
+    enabled: false
+    refuse_at_score: 5
+    atr_pct_high: 4.0
+    atr_pct_extreme: 8.0
+    price_low: 5.0
+    price_very_low: 2.0
+    dollar_volume_thin: 20000000
+    dollar_volume_very_thin: 5000000
+    earnings_today_points: 3   # see the note above before raising this
+
+  # ---------------------------------------------------------------------
   # Gap exit (added 2026-09-02)
   # ---------------------------------------------------------------------
   # THE HONEST FRAMING FIRST. A stop is not a promise about execution. If a

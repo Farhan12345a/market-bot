@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the market-bot watchdog through the trading session
+Documentation=file:///root/market-bot/ops/watchdog.sh
+
+[Timer]
+# Every 5 minutes, 09:20-16:05 ET, weekdays. OnCalendar is evaluated in the
+# system timezone - set it with `timedatectl set-timezone America/New_York`,
+# or convert these to UTC if the box must stay on UTC.
+OnCalendar=Mon..Fri 09,10,11,12,13,14,15:00/5
+OnCalendar=Mon..Fri 16:00,16:05
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
