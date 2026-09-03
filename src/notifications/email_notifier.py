@@ -646,6 +646,87 @@ class EmailNotifier:
             + rows + '</table></div>'
         )
 
+    def _after_exit_ratio_html(self, trades):
+        """
+        Ratio summary of the After Exit column, at the top of the report.
+
+        The After Exit column (post_exit_pct/post_exit_note) already scores
+        every exit after the fact - whether a stop/breakeven fired too early
+        (price bounced back) or was justified (price kept falling), and
+        whether a take-profit tier left money on the table (price ran
+        further) or was exited at the right time (price gave it back
+        afterward). That verdict existed per-trade but nothing ever
+        aggregated it, so "are the stops too tight" had to be answered by
+        reading rows one at a time. This is the ratio, computed once per
+        report so it is visible before scrolling to a single trade.
+
+        Two separate ratios because they measure different things: stop-type
+        exits (BREAKEVEN_STOP, FIRST_EXIT, TRAILING_STOP, RESISTANCE,
+        FINAL_EXIT) answer "is the stop too tight", take-profit exits answer
+        "is the top tier too low". Mixing them into one number would answer
+        neither question.
+        """
+        STOP_EARLY = "bounced - exit was early"
+        STOP_RIGHT = "kept falling - exit was right"
+        TP_LEFT_ON_TABLE = "ran further"
+        TP_RIGHT = "gave it back"
+        FLAT = "flat"
+
+        stop_notes, tp_notes = [], []
+        for t in (trades or []):
+            note = t.get("post_exit_note")
+            if not note:
+                continue
+            reason = t.get("exit_reason") or ""
+            if "TAKE_PROFIT" in reason:
+                tp_notes.append(note)
+            else:
+                stop_notes.append(note)
+
+        if not stop_notes and not tp_notes:
+            return ""
+
+        def _block(title, notes, left_label, right_label, left_key, right_key, neutral_key):
+            left = notes.count(left_key)
+            right = notes.count(right_key)
+            neutral = notes.count(neutral_key)
+            total = len(notes)
+            if total == 0:
+                return ""
+            ratio = f"{left}:{right}" if right else (f"{left}:0" if left else "0:0")
+            lp = left / total * 100
+            rp = right / total * 100
+            return (
+                f'<div style="flex:1;min-width:200px;">'
+                f'<div style="font-size:11px;color:#6b7280;text-transform:uppercase;'
+                f'letter-spacing:.04em;margin-bottom:2px;">{title}</div>'
+                f'<div style="font-size:18px;font-weight:700;color:#1a1f2e;">{ratio}</div>'
+                f'<div style="font-size:12px;color:#6b7280;">'
+                f'{left_label}: {left} ({lp:.0f}%) &middot; {right_label}: {right} ({rp:.0f}%)'
+                + (f' &middot; flat: {neutral}' if neutral else '') +
+                '</div></div>'
+            )
+
+        stop_html = _block(
+            "Stop/Breakeven exits - early vs. right", stop_notes,
+            "too early", "right", STOP_EARLY, STOP_RIGHT, FLAT,
+        )
+        tp_html = _block(
+            "Take-profit exits - left on table vs. right", tp_notes,
+            "ran further", "gave it back", TP_LEFT_ON_TABLE, TP_RIGHT, FLAT,
+        )
+        if not stop_html and not tp_html:
+            return ""
+        return (
+            '<div style="background:#f5f7fa;border-left:4px solid #8b5cf6;'
+            'padding:12px 15px;border-radius:8px;margin-bottom:20px;">'
+            '<h3 style="margin:0 0 8px 0;font-size:13px;color:#6b7280;'
+            'text-transform:uppercase;letter-spacing:.04em;">After-Exit Ratios</h3>'
+            '<div style="display:flex;gap:24px;flex-wrap:wrap;">'
+            + stop_html + tp_html +
+            '</div></div>'
+        )
+
     def _generate_html_summary(self, trades, burst_summary="", label="Daily Summary",
                                open_positions=None):
         """Generate the HTML report: closed trades, and any still-open positions."""
@@ -658,6 +739,7 @@ class EmailNotifier:
         # Color coding
         pl_color = "#10b981" if total_pl >= 0 else "#ef4444"
 
+        after_exit_ratio_html = self._after_exit_ratio_html(trades)
         run_context_html = self._run_context_html()
         replay_progress_html = self._replay_progress_html()
         opening_burst_html = self._opening_burst_html(trades)
@@ -728,6 +810,7 @@ class EmailNotifier:
                         <div class="value">{len(winning_trades)} / {len(losing_trades)}</div>
                     </div>
                 </div>
+                {after_exit_ratio_html}
                 {run_context_html}
                 {replay_progress_html}
                 {open_summary_html}

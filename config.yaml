@@ -1245,6 +1245,20 @@ trading:
     spread_multiple: 1.5
     max_slippage_pct: 0.6
 
+    # WIDER BAND FOR THE OPENING BURST SPECIFICALLY (2026-09-03). Every one of
+    # that day's 7 opening-burst entries phantomed - the marketable-limit buy
+    # never crossed the spread before opening_fast_poll's 3-second exit-check
+    # cancelled it as unfilled. The normal-window band (above) is tuned
+    # against a calmer, slower-moving tape; the first three minutes are
+    # neither, so give burst entries more room to actually cross rather than
+    # get cancelled unfilled. Requested explicitly: "highest chance for the
+    # orders to fill in that window" - only applied to is_opening_burst=True
+    # entries, the normal-window band above is untouched.
+    opening_burst:
+      slippage_pct: 0.35
+      spread_multiple: 2.5
+      max_slippage_pct: 1.0
+
   marketable_limit_exits:
     enabled: true
     slippage_pct: 0.3
@@ -2225,7 +2239,11 @@ trading:
   # less spread-hostile pool, and it should be judged against the following
   # week's edge rather than assumed correct.
   min_stock_price: 20
-  max_stock_price: 300
+  max_stock_price: 400  # raised from 300 on 2026-09-03 - was accidentally excluding
+                        # META and other names priced above the old ceiling. Combined
+                        # with min_stock_price: 20 as ONE tracked variable, "universe
+                        # price band 20-400" - see PENDING_WORK.md, measurement window
+                        # restarted today rather than run two entry variables at once.
 
   # ---------------------------------------------------------------------
   # Untradeable symbols (added 2026-09-02) - PENDING_WORK item 0d, bullet 3

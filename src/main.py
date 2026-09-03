@@ -581,10 +581,27 @@ def _dynamic_exit_config(config, symbol, base_override=None):
         stop, why = engine.stop_for(symbol, 0.0)
         base = copy.deepcopy(base_override) if base_override else copy.deepcopy(config)
         current = base["trading"].get("final_exit_loss_pct")
-        if current is not None and stop >= current:
-            # No tightening available for this name - leave it exactly as it
-            # would have been rather than logging a change that is not one.
-            return base_override
+        if current is not None:
+            # engine.stop_for() caps its answer against the ENGINE's own
+            # static stop - the session's top-level final_exit_loss_pct,
+            # baked in when the engine was built at screener completion. That
+            # is the wrong ceiling whenever `base_override` carries its OWN
+            # tighter final_exit_loss_pct (the opening burst's -0.35%/-0.3%):
+            # the engine has no idea the burst profile exists, so its -1.0%
+            # answer is not "no tightening available", it is simply LOOSER
+            # than what this position is actually supposed to run under.
+            # Confirmed live 2026-09-03: MRNA, HOOD, RBLX, BMNR, MSTR, CHWY
+            # and WDAY all logged "DYNAMIC STOP -0.35% -> -1.0%" on entry -
+            # every opening-burst position that day had its stop WIDENED,
+            # not tightened. Re-cap against the profile that is actually in
+            # force before deciding whether this is a real tightening.
+            if stop < current:
+                stop = current
+            if stop >= current:
+                # No tightening available under THIS profile's own ceiling -
+                # leave it exactly as it would have been rather than logging
+                # a change that is not one.
+                return base_override
         base["trading"]["final_exit_loss_pct"] = stop
         logger.info(f"{symbol}: DYNAMIC STOP {current}% -> {stop}% ({why})")
         return base
@@ -1580,9 +1597,20 @@ def _effective_stop_pct(config, symbol, trading):
         return static
 
 
-def _position_size(config, executor, price, symbol=None, volume_history=None):
+def _position_size(config, executor, price, symbol=None, volume_history=None,
+                    trading_override=None):
     """
     Shares to buy for one entry. Returns 0 when no position should be taken.
+
+    `trading_override` is the RESOLVED trading dict this entry will actually
+    run under (burst profile + chop + dynamic stops already applied by the
+    caller), when the caller has one. Without it, sizing fell back to the
+    plain session config's final_exit_loss_pct even for an opening-burst
+    entry running under its own -0.35% profile - risk-parity sizing was
+    computed off a stop the position was never actually going to use. See
+    _effective_stop_pct's own docstring: sizing and the exit rule must read
+    the SAME stop, or dollar risk per trade stops being constant, which is
+    the entire point of risk-parity sizing.
 
     Sizing used to be a flat `max_position_per_stock_usd / price` - a fixed
     $10,000 of notional into every name regardless of account size or how many
@@ -1619,7 +1647,7 @@ def _position_size(config, executor, price, symbol=None, volume_history=None):
     Returns 0 if equity isn't known yet (before the first snapshot refresh),
     so entries fail closed rather than sizing off a zero/stale account.
     """
-    trading = config["trading"]
+    trading = trading_override or config["trading"]
     if price <= 0:
         return 0
 
@@ -2656,8 +2684,17 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     was accepted by Alpaca's margin account as opening a real, completely
     untracked short position. 16 of them happened this way in one session.
     """
+    # Resolved BEFORE sizing, not just before strategy.confirm_entry below -
+    # see _position_size's own docstring on trading_override. Computed once
+    # and reused at both call sites so sizing and the eventual exit rule are
+    # guaranteed to agree on the same stop, which is the property risk-parity
+    # sizing depends on to mean anything.
+    _resolved_exit_cfg = _dynamic_exit_config(
+        config, symbol, _chop_exit_config(config, _REGIME_STATE.get("state"), exit_config))
     qty = int(_position_size(config, executor, price, symbol=symbol,
-                             volume_history=volume_history) * size_multiplier)
+                             volume_history=volume_history,
+                             trading_override=(_resolved_exit_cfg or {}).get("trading")
+                             ) * size_multiplier)
     if qty <= 0:
         # Distinguish "the regime says stand down" from "the arithmetic came
         # out at zero shares". Both refuse the entry, but only one of them is
@@ -2825,7 +2862,8 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
         except Exception:
             _spread = None
     order = executor.submit_entry_order(symbol, qty, price, entry_method=entry_method,
-                                        entry_rsi=symbol_rsi, spread_pct=_spread)
+                                        entry_rsi=symbol_rsi, spread_pct=_spread,
+                                        is_opening_burst=is_opening_burst)
     if order is None:
         return False  # broker rejected/failed - already logged by submit_entry_order, nothing committed
 
@@ -2833,10 +2871,12 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     # take-profit ladder, dynamic stops tighten its stop. Each returns its
     # input unchanged when it has nothing to say, so a plain session entry on a
     # normal day comes through as None and behaves exactly as before.
-    _exit_cfg = _chop_exit_config(config, _REGIME_STATE.get("state"), exit_config)
+    # _resolved_exit_cfg was already computed above, before sizing - reused
+    # here rather than recomputed so this can never drift from what sizing
+    # actually used.
     strategy.confirm_entry(
         symbol, price, qty,
-        config_override=_dynamic_exit_config(config, symbol, _exit_cfg),
+        config_override=_resolved_exit_cfg,
     )
     executor.entry_meta.setdefault(symbol, {})["list_source"] = symbol_source.get(symbol, "screener")
     # Market/stock state at the entry instant, for trade_context.csv. Stored
@@ -3399,6 +3439,28 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     halt_state["last"] = None
             except Exception as e:
                 logger.debug(f"held-position halt check skipped: {e}")
+
+        # UNCONFIRMED-EXIT SAFETY NET. Every poll, cheap no-op unless a
+        # marketable-limit exit is still waiting on confirmation - see
+        # Executor.retry_unconfirmed_exits for why this is narrower than (and
+        # runs more often than) the periodic reconcile below.
+        try:
+            def _alert_forced_exit(sym, qty):
+                from src.notifications import alerts as _AL
+                _AL.degraded(
+                    config, email_notifier,
+                    what=f"{sym}: forced a market exit for {qty} unconfirmed share(s)",
+                    detail=f"{sym}'s marketable-limit exit did not fill and the "
+                           f"position sat untracked at the broker past the grace "
+                           f"period. A market order was just submitted for the "
+                           f"outstanding {qty} share(s) to close the gap - verify "
+                           f"it filled and that trade_history.csv's exit price for "
+                           f"this symbol reflects the real fill, not the original "
+                           f"decision price.",
+                )
+            executor.retry_unconfirmed_exits(alert_fn=_alert_forced_exit)
+        except Exception as e:
+            logger.debug(f"retry_unconfirmed_exits skipped: {e}")
 
         # PERIODIC RECONCILE. The broker is truth; this reports divergence and
         # alerts, it does not silently repair - see

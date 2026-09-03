@@ -7,6 +7,21 @@ not done.
 
 ---
 
+## Active entry-variable measurement window
+
+Per CLAUDE.md: one entry variable at a time, held for a week, read via
+`ops/session-metrics.py` against the prior window.
+
+**Window started 2026-09-03**: `min_stock_price: 20` (from 10) + `max_stock_price: 400`
+(from 300), tracked together as ONE variable - "universe price band 20-400".
+`max_stock_price` was raised the same day the window started rather than run as a
+second, separate variable, since 300 was found to be accidentally excluding META and
+other names above that price - restarting the window kept this to one attributable
+change instead of stacking two. Compare against the pre-2026-09-03 window once a
+week of trades since this change exists.
+
+---
+
 # RISK MANAGEMENT — Tier 2 and 3
 
 Tier 1 (rate limits, two-tier loss response, slippage persistence, no-entry-on-

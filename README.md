@@ -181,6 +181,23 @@ Logs go to both console and `logs/trading.log`:
 
 All trades are also saved to `logs/trades.json` for analysis.
 
+## Emergency: a position is stuck / untracked at the broker
+
+If `RECONCILE` logs keep showing a symbol the bot is no longer tracking but
+the broker still holds (e.g. `WLY: broker holds 18 but the bot is not
+tracking it`), or you just want everything closed right now:
+
+```
+python3 ops/flatten-now.py --yes
+```
+
+This sells every position the broker actually holds, regardless of what the
+bot's own tracking believes - do this first and ask questions after; a stuck
+position with no active stop is the most dangerous state the bot can be in.
+`retry_unconfirmed_exits()` in `Executor` is meant to catch this automatically
+now (see `src/executor/executor.py`), but don't wait on it if you're already
+looking at a live loss - close it by hand.
+
 ## Common Issues
 
 **"No API credentials"**

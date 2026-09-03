@@ -94,6 +94,7 @@ def is_partial_exit(reason, qty, qty_before):
 ANSI_GREEN = "\033[92m"
 ANSI_RED = "\033[91m"
 ANSI_YELLOW = "\033[93m"
+ANSI_BLUE = "\033[94m"
 ANSI_RESET = "\033[0m"
 
 class Executor:
@@ -153,6 +154,8 @@ class Executor:
         self._equity = 0.0
         self._buying_power = 0.0
         self._total_exposure_usd = 0.0
+        self._last_equity = 0.0
+        self._unrealized_pl_cached = 0.0
 
         # Open positions are tracked as a SET OF SYMBOLS, not a bare count.
         # A count was maintained by two mechanisms that could disagree -
@@ -191,7 +194,27 @@ class Executor:
         # filled, so the exit can escalate to a market order rather than
         # chasing a falling price one poll at a time.
         self._limit_exit_attempts = {}
+        # symbol -> {"ts": time.monotonic() at submission, "qty": int, "side": str}
+        # for every exit order submitted. Bookkeeping (open_symbols, trade
+        # history) is committed the instant the order is SUBMITTED, not once
+        # it fills - correct for market orders (fill within the same poll,
+        # effectively always) but not for a marketable-limit exit, which is a
+        # BOUNDED price and can simply not fill. On 2026-09-03, WLY's GAP_EXIT
+        # submitted a marketable-limit sell, the bot's own tracking dropped the
+        # position immediately, and the broker still held all 18 shares 25+
+        # minutes later with no stop protecting them and nothing ever checking
+        # back - the escalation-to-market logic (_limit_exit_attempts) exists
+        # for exactly this case but never got a second chance to run, because
+        # nothing was still tracking the position to re-trigger it. The
+        # escalation logic was built correctly; it just never got a second
+        # turn.
+        # retry_unconfirmed_exits() is the safety net: it verifies each entry
+        # here against what the broker actually holds and, if shares remain
+        # after a grace period, forces a market exit rather than leaving a
+        # position silently unmanaged.
+        self._pending_exit_verify = {}
         self._logged_loss_limit = None
+        self._last_loss_limit_log_at = 0.0  # time.monotonic() of the last "Daily loss limit" log line
         self._logged_loss_tier = 1.0
         # PRE-TRADE RATE CONTROLS. A rolling window of (monotonic_ts, notional)
         # for every order SUBMITTED, entries and exits alike. See
@@ -215,6 +238,18 @@ class Executor:
             positions = self.broker.get_positions()
             self._equity = float(account.equity)
             self._buying_power = float(account.buying_power)
+            # Cached for daily_loss_limit_usd's P&L line, so that log does not
+            # need its own broker calls every time it wants to report P&L.
+            try:
+                self._last_equity = float(getattr(account, "last_equity", 0) or 0)
+            except (TypeError, ValueError):
+                self._last_equity = 0.0
+            self._unrealized_pl_cached = 0.0
+            for p in (positions or {}).values():
+                try:
+                    self._unrealized_pl_cached += float(getattr(p, "unrealized_pl", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
 
             # Reconcile rather than overwrite. The broker's list is the source
             # of truth for anything it reports, but it LAGS recent fills, so a
@@ -546,6 +581,138 @@ class Executor:
             )
         return out, None
 
+    def retry_unconfirmed_exits(self, grace_seconds=15, alert_fn=None):
+        """
+        Verify every marketable-limit exit this executor submitted actually
+        cleared the position, and force a market exit for any that did not.
+
+        WHY THIS EXISTS. submit_exit_order drops a symbol's tracking the
+        instant the exit order is SUBMITTED, not once it fills - correct for a
+        market order (fills against the book essentially immediately) but not
+        for a marketable-limit exit, which is a BOUNDED price and can simply
+        sit unfilled. The escalation this codebase already has for that
+        (_limit_exit_attempts, "N attempts did not fill - falling back to a
+        MARKET order") can only fire if something re-checks the position on a
+        later poll - and once tracking is dropped, nothing does. On
+        2026-09-03, WLY's GAP_EXIT submitted a marketable-limit sell for 18
+        shares, tracking was dropped immediately, and the broker still held
+        all 18 shares 25+ minutes later with no stop protecting them; nothing
+        in the codebase ever looked at WLY again except the 5-minute
+        RECONCILE log line and the eventual 16:00 time-stop.
+
+        Cheap to call every poll: a no-op unless something is actually
+        pending. `grace_seconds` gives a genuinely-still-filling limit order
+        room before this intervenes - most fill inside a second or two.
+
+        Deliberately narrower than a general reconcile-and-repair: this only
+        ever acts on a symbol THIS executor just tried to exit itself, never
+        on an arbitrary broker/tracking mismatch (see reconcile_against_broker
+        for why blind repair of the general case is not safe).
+        """
+        if not self._pending_exit_verify:
+            return []
+
+        try:
+            live = self.broker.get_positions() or {}
+        except Exception as e:
+            logger.debug(f"retry_unconfirmed_exits: could not fetch positions ({e})")
+            return []
+
+        forced = []
+        for symbol, info in list(self._pending_exit_verify.items()):
+            try:
+                held = int(float(getattr(live.get(symbol), "qty", 0) or 0))
+            except (TypeError, ValueError):
+                held = 0
+
+            if held == 0:
+                # Confirmed - the limit order filled, nothing more to do.
+                self._pending_exit_verify.pop(symbol, None)
+                continue
+
+            age = time.monotonic() - info.get("ts", 0)
+            if age < grace_seconds:
+                continue  # still inside the normal fill window
+
+            logger.warning(
+                f"{symbol}: marketable-limit exit submitted {age:.0f}s ago "
+                f"still shows {held} share(s) held at the broker - the bot's "
+                f"tracking already dropped this position. Forcing a MARKET "
+                f"exit rather than leaving it unmanaged."
+            )
+            try:
+                side = info.get("side", "sell")
+                order = self.broker.submit_market_order(symbol, held, side=side)
+                if order is not None:
+                    forced.append((symbol, held))
+                    self._pending_exit_verify.pop(symbol, None)
+                    self._correct_trade_record_for_forced_exit(symbol, held, order, info)
+                    if alert_fn is not None:
+                        alert_fn(symbol, held)
+                else:
+                    # Leave it in the dict - try again next poll.
+                    info["ts"] = time.monotonic() - grace_seconds + 5
+            except Exception as e:
+                logger.error(f"{symbol}: forced market exit failed ({e}) - will retry")
+
+        return forced
+
+    def _correct_trade_record_for_forced_exit(self, symbol, qty, order, info):
+        """
+        Fix the trade_history.csv row a stuck marketable-limit exit wrote at
+        the DECISION price, now that the forced market order has the real
+        fill.
+
+        The original row for this symbol was written when the limit order was
+        submitted, using price_for_pnl = fill_px or price - and since the
+        limit order never confirmed a fill, that fell back to the decision
+        price, not what actually happened. Only fixable while the row is
+        still in memory (self.trades_log / logs/trades.json); if it has
+        already been flushed to trade_history.csv the row on disk stays
+        stale and this only logs a warning so a human can fix it by hand -
+        rewriting an already-written CSV row is a bigger, riskier change than
+        this fix is worth.
+        """
+        record = info.get("record")
+        if record is None:
+            logger.warning(
+                f"{symbol}: forced exit filled but no trade_history row was "
+                f"linked to correct - check trade_history.csv by hand."
+            )
+            return
+        try:
+            fill_px = None
+            for attr in ("filled_avg_price", "avg_fill_price"):
+                raw = getattr(order, attr, None)
+                if raw:
+                    fill_px = float(raw)
+                    break
+            if fill_px is None:
+                logger.warning(
+                    f"{symbol}: forced exit submitted but no fill price was "
+                    f"available yet - trade_history.csv's row for this exit "
+                    f"still shows the original decision price. Verify the "
+                    f"actual fill in the broker and correct it by hand if it "
+                    f"differs materially."
+                )
+                return
+            direction = info.get("direction", 1)
+            entry_price = info.get("entry_price")
+            record["exit_price"] = fill_px
+            record["exit_reason"] = f"{record.get('exit_reason', '')}_FORCED_RETRY"
+            if entry_price:
+                record["pl"] = direction * (fill_px - entry_price) * qty
+                record["pl_pct"] = direction * (fill_px - entry_price) / entry_price * 100
+            logger.warning(
+                f"{symbol}: corrected trade_history row for the forced exit - "
+                f"real fill ${fill_px:.4f}, P&L ${record.get('pl', 0):.2f} "
+                f"({record.get('pl_pct', 0):+.2f}%). If this row was already "
+                f"written to trade_history.csv (check the timestamp), the CSV "
+                f"itself is still stale and needs a manual correction."
+            )
+        except Exception as e:
+            logger.debug(f"{symbol}: could not correct trade record ({e})")
+
     def rate_limit_check(self, qty=None, price=None, is_opening_burst=False):
         """
         (ok, reason) for PRE-TRADE rate controls. Never raises.
@@ -789,7 +956,7 @@ class Executor:
         }
 
     def submit_entry_order(self, symbol, qty, price=None, entry_method=None,
-                           entry_rsi=None, spread_pct=None):
+                           entry_rsi=None, spread_pct=None, is_opening_burst=False):
         """
         Submit a market order to enter a position. Returns the order on
         success, or None on failure (does NOT raise) - callers must check the
@@ -838,6 +1005,13 @@ class Executor:
         # clear the offer rather than pretending the book is tighter than it is.
         limit_px = None
         ecfg = (self.config.get("trading") or {}).get("marketable_limit_entries") or {}
+        if is_opening_burst and ecfg.get("opening_burst"):
+            # A wider band for the burst specifically - see the config
+            # comment. Falls through to the normal-window ecfg values (via
+            # ecfg.get(..., ecfg.get(...))) for any key the burst override
+            # does not set.
+            _burst_ecfg = ecfg["opening_burst"]
+            ecfg = {**ecfg, **_burst_ecfg}
         if ecfg.get("enabled") and price:
             try:
                 band_pct = float(ecfg.get("slippage_pct", 0.25))
@@ -1135,6 +1309,17 @@ class Executor:
             logger.error(f"Failed to submit exit order for {symbol}: {e}")
             return None
 
+        # Record this for retry_unconfirmed_exits() to verify. Only a
+        # marketable-limit route needs the safety net - a plain market order
+        # fills against the book essentially immediately, but a bounded limit
+        # can simply not fill (see the note on _pending_exit_verify above).
+        if limit_px:
+            self._pending_exit_verify[symbol] = {
+                "ts": time.monotonic(), "qty": qty, "side": side,
+            }
+        else:
+            self._pending_exit_verify.pop(symbol, None)
+
         # Mirror the immediate cache update in submit_entry_order, for the
         # same reason - keeps pre_entry_check() accurate for any entry
         # checked later in the SAME poll cycle, not just after the next
@@ -1242,6 +1427,17 @@ class Executor:
                 trade_record["pl"] = 0
                 trade_record["pl_pct"] = 0
             self.trades_log.append(trade_record)
+            # Hand retry_unconfirmed_exits a reference to THIS row - not a
+            # copy - so that if the order this row was written for turns out
+            # not to have actually filled, the forced retry can correct the
+            # exit price/P&L/reason in place rather than leaving a
+            # trade_history.csv row that says the exit happened at the
+            # DECISION price when the real fill (if any) came later, at a
+            # different price, from a different order entirely.
+            if symbol in self._pending_exit_verify:
+                self._pending_exit_verify[symbol]["record"] = trade_record
+                self._pending_exit_verify[symbol]["direction"] = direction
+                self._pending_exit_verify[symbol]["entry_price"] = entry_price
             # One row per trade for the exit-rule replay: the market/stock
             # state captured at ENTRY (stashed on entry_meta by main.py)
             # joined to the outcome computed here. Guarded separately from
@@ -1386,14 +1582,28 @@ class Executor:
             floor = float(cfg.get("floor_usd", static or 500))
             ceiling = float(cfg.get("ceiling_usd", static or 1000))
             limit = max(floor, min(ceiling, equity * pct))
-            if self._logged_loss_limit != round(limit, 2):
+            # Was gated only on the ROUNDED limit changing - which, since the
+            # limit is pct*equity and equity drifts every poll with unrealized
+            # P&L, meant this fired on nearly every single poll. Throttled to
+            # once per ~10 minutes instead; the number itself barely moves
+            # poll to poll, so nothing informative was lost by not printing it
+            # every 10 seconds.
+            since_last = time.monotonic() - self._last_loss_limit_log_at
+            if since_last >= 600:
+                self._last_loss_limit_log_at = time.monotonic()
                 self._logged_loss_limit = round(limit, 2)
+                realized = self._realized_pnl_today
+                unrealized = self._unrealized_pl_cached
+                total = realized + unrealized
                 logger.info(
                     f"Daily loss limit: ${limit:,.2f} "
                     f"({cfg.get('pct_of_equity', 0.75)}% of ${equity:,.2f} equity, "
                     f"floor ${floor:,.0f} / ceiling ${ceiling:,.0f}). The ceiling "
                     f"does NOT rise with the account on its own - raise it "
-                    f"deliberately once the edge is established."
+                    f"deliberately once the edge is established. "
+                    f"{ANSI_BLUE}P&L today: ${total:,.2f} total "
+                    f"(${realized:,.2f} realized / ${unrealized:,.2f} unrealized)"
+                    f"{ANSI_RESET}"
                 )
             return limit
         except Exception as e:
