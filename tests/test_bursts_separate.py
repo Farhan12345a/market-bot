@@ -83,7 +83,7 @@ class Exec:
     def loss_tier_multiplier(s): return 1.0
     def phantom_cooldown_remaining(s, sym): return 0.0
     def reentry_cooldown_remaining(s, sym): return 0.0
-    def pre_entry_check(s, qty, price, symbol=None): return True, None
+    def pre_entry_check(s, qty, price, symbol=None, is_opening_burst=False): return True, None
     def submit_entry_order(s, sym, qty, price, entry_method=None, entry_rsi=None,
                            spread_pct=None):
         s.orders.append(sym)

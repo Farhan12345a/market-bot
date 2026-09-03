@@ -303,7 +303,13 @@ check("the burst closes before normal entries open",
 # The sector cap applies to burst entries too - they go through the same gate -
 # so a burst that filled 7 slots from one complex would be refused after 3.
 check("burst entries pass through pre_entry_check",
-      "executor.pre_entry_check(qty, price, symbol=symbol)" in _src)
+      "executor.pre_entry_check(qty, price, symbol=symbol," in _src)
+# ...but they are exempt from the per-MINUTE rate limits, which exist to catch
+# a runaway loop rather than a bounded, deliberate sequence. Per-ORDER sanity
+# limits still apply to them.
+check("...carrying the opening-burst flag so the rate limiter can exempt them",
+      "is_opening_burst=is_opening_burst" in _src)
+check("...and the burst call site sets it", "is_opening_burst=True," in _src)
 
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)

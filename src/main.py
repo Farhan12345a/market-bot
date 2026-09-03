@@ -2573,6 +2573,11 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
                 context=burst_ctx,
                 market_data=market_data,
                 volume_history=volume_history,
+                # Exempt from the per-MINUTE rate limits: this mode is a
+                # bounded, deliberate sequence capped by its own max_positions,
+                # not the runaway loop those limits exist to catch. Per-order
+                # sanity limits still apply. See Executor.rate_limit_check.
+                is_opening_burst=True,
             )
             if entered:
                 taken.append(symbol)
@@ -2632,7 +2637,7 @@ def _entry_context(cand, spy_pct, qqq_pct, spy_vs_vwap, qqq_vs_vwap,
 def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi,
                    size_multiplier=1.0, burst_note=None, signal_pct=None,
                    skip_cooldown=False, exit_config=None, context=None,
-                   market_data=None, volume_history=None):
+                   market_data=None, volume_history=None, is_opening_burst=False):
     """
     Shared entry path for all three entry signals (three-bar momentum, rapid
     increase immediate, pullback resumption). Returns True if a position was
@@ -2803,7 +2808,8 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
         except Exception as e:
             logger.debug(f"{symbol}: halt check skipped ({e})")
 
-    ok, reason = executor.pre_entry_check(qty, price, symbol=symbol)
+    ok, reason = executor.pre_entry_check(qty, price, symbol=symbol,
+                                          is_opening_burst=is_opening_burst)
     if not ok:
         logger.info(f"{symbol}: entry skipped - {reason}")
         return False

@@ -975,6 +975,19 @@ trading:
     max_shares_per_order: 5000
     max_notional_per_order: 15000     # above max_position_per_stock_usd, so it
                                       # is a sanity backstop, not the sizing rule
+    # The opening burst is EXEMPT from the per-minute ceilings above. They
+    # exist to catch a runaway loop - the same order resubmitted because a
+    # retry never terminated. The burst is the opposite: a bounded, deliberate
+    # sequence of at most opening_burst.max_positions entries in different
+    # symbols, already capped by its own budget. Two unrelated caps colliding
+    # would be a SILENT failure - the mode would take fewer positions and look
+    # like a quiet morning.
+    #
+    # Today 7 entries fit under 12/min anyway. That is a coincidence of the
+    # current numbers, not a guarantee; raise max_positions or lower the cap
+    # and they collide. This makes it a guarantee. Per-ORDER sanity limits
+    # still apply to the burst, since one absurd order is a risk everywhere.
+    exempt_opening_burst: true
 
   # ---------------------------------------------------------------------
   # Two-tier daily loss response (added 2026-09-02)
@@ -2192,7 +2205,26 @@ trading:
   # from 23% of its trades. Deliberately 10 rather than 15: NU at $14.38 was
   # the day's best trade (+$279), and a threshold tuned finely enough to
   # exclude it is fitting noise on a 71-trade sample.
-  min_stock_price: 10
+  # 10 -> 20 on 2026-09-02, at the user's direction. This is an ENTRY change
+  # (CLAUDE.md Tier 2) and is the ONLY entry variable moving for this run, so
+  # its effect stays attributable.
+  #
+  # It was chosen over swapping out the halt-prone names in stock_universe
+  # because it does most of that job with one setting instead of thirty:
+  # 24 of the 31 halt-prone-profile names in the 92-name pool trade under $20
+  # (MARA, RIOT, CLSK, HUT, CIFR, WULF, BITF, PLUG, FCEL, RUN, IONQ, RGTI,
+  # SOUN, AI, TLRY, CGC, AMC, GME, LCID, NIO, XPEV, LI, OPEN, FUBO) and are now
+  # excluded automatically. The seven survivors - AFRM, ASTS, CVNA, RIVN, RKLB,
+  # U, UPST - are genuine mid-caps, not the low-float promotion tier.
+  #
+  # WHAT IT COSTS, recorded honestly: the previous note argued for 10 over 15
+  # because NU at $14.38 was the best trade of 2026-08-19 (+$279), and a
+  # threshold fine enough to exclude it was fitting noise on 71 trades. That
+  # argument still stands - this WILL exclude names that would have won. The
+  # trade being made is narrower breadth for a materially less halt-prone and
+  # less spread-hostile pool, and it should be judged against the following
+  # week's edge rather than assumed correct.
+  min_stock_price: 20
   max_stock_price: 300
 
   # ---------------------------------------------------------------------

@@ -45,7 +45,7 @@ class Exec:
         self._cooldown = cooldown
         self.equity = 100000.0
     def reentry_cooldown_remaining(self, s): return self._cooldown
-    def pre_entry_check(self, qty, price, symbol=None): return True, ""
+    def pre_entry_check(self, qty, price, symbol=None, is_opening_burst=False): return True, ""
     def submit_entry_order(self, s, qty, price, entry_method=None, entry_rsi=None,
                            spread_pct=None):
         self.orders.append({"symbol": s, "qty": qty, "price": price, "method": entry_method})

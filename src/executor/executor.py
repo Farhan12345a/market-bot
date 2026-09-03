@@ -546,7 +546,7 @@ class Executor:
             )
         return out, None
 
-    def rate_limit_check(self, qty=None, price=None):
+    def rate_limit_check(self, qty=None, price=None, is_opening_burst=False):
         """
         (ok, reason) for PRE-TRADE rate controls. Never raises.
 
@@ -580,6 +580,26 @@ class Executor:
         if not cfg.get("enabled", True):
             return True, None
 
+        # THE OPENING BURST IS EXEMPT FROM THE PER-MINUTE LIMITS.
+        #
+        # Those limits exist to catch a RUNAWAY LOOP - the same order
+        # resubmitted because a retry never terminated or a callback was wired
+        # twice. The opening burst is the opposite: a bounded, deliberate
+        # sequence of at most opening_burst.max_positions entries, each in a
+        # different symbol, inside a three-minute window, already capped by its
+        # own budget. Counting it against a per-minute ceiling means two
+        # unrelated caps can collide, and the failure would be silent - the
+        # mode would simply take fewer positions and look like a quiet morning.
+        #
+        # Today 7 entries fit under 12/min and $35,000 under $60,000/min, so
+        # nothing is actually blocked. That is a COINCIDENCE OF THE CURRENT
+        # NUMBERS, not a guarantee: raise max_positions, lower the cap, or size
+        # up, and the collision appears. This makes it a guarantee.
+        #
+        # The PER-ORDER sanity limits still apply. Those catch one absurd
+        # order from a bad price or a bad qty, which is a risk in every mode.
+        exempt = bool(is_opening_burst and cfg.get("exempt_opening_burst", True))
+
         try:
             q = abs(float(qty or 0))
             px = abs(float(price or 0))
@@ -594,6 +614,14 @@ class Executor:
             if max_notional and notional > float(max_notional):
                 return False, (f"order of ${notional:,.0f} exceeds "
                                f"max_notional_per_order ${float(max_notional):,.0f}")
+
+            if exempt:
+                # Per-order checks above have passed; the per-minute ones below
+                # are the ones the burst is exempt from. Its orders are still
+                # RECORDED (see submit_entry_order) so they count against the
+                # normal window afterwards - the exemption is about not being
+                # blocked, not about being invisible.
+                return True, None
 
             window = float(cfg.get("window_seconds", 60))
             cutoff = time.monotonic() - window
@@ -624,7 +652,7 @@ class Executor:
             logger.error(f"rate_limit_check failed ({type(e).__name__}: {e}) - allowing the order")
             return True, None
 
-    def pre_entry_check(self, qty, price, symbol=None):
+    def pre_entry_check(self, qty, price, symbol=None, is_opening_burst=False):
         """
         Returns (ok: bool, reason: str). Checked BEFORE ever attempting a
         broker order for a new entry - closes the gap where only Alpaca's own
@@ -695,7 +723,7 @@ class Executor:
         # rediscovered by the next one.
         # Rate controls FIRST - the cheapest check, and the one whose whole
         # purpose is to fire before anything else has a chance to run away.
-        ok, why = self.rate_limit_check(qty, price)
+        ok, why = self.rate_limit_check(qty, price, is_opening_burst=is_opening_burst)
         if not ok:
             return False, why
 

@@ -267,9 +267,27 @@ if prev.returncode == 0:
             "breakeven_tiers", "use_resistance_exit",
             "use_breakeven_floor", "reentry_cooldown_minutes",
             "num_stocks_to_trade",
-            "min_stock_price", "max_stock_price", "use_continuation_score"]
+            "max_stock_price", "use_continuation_score"]
+
+    # DELIBERATELY CHANGED THIS RUN, and listed here rather than quietly
+    # removed from `same`. This guard's whole job is to make an entry-setting
+    # change impossible to do by accident, so an intentional one has to be
+    # written down with its reason - and the list being SHORT is the point.
+    # Per CLAUDE.md, one entry variable at a time.
+    deliberate = {
+        # 10 -> 20. Removes 24 of the 31 halt-prone-profile names in the
+        # 92-name pool in one setting rather than by hand-editing
+        # stock_universe, which would have been a second entry change in the
+        # same run. Costs breadth; judge it against next week's edge.
+        "min_stock_price": (10, 20),
+    }
     for k in same:
         check(f"{k} unchanged", old.get(k) == t.get(k), (old.get(k), t.get(k)))
+    for k, (was, now) in deliberate.items():
+        check(f"{k} changed DELIBERATELY {was} -> {now}, and only this one",
+              old.get(k) == was and t.get(k) == now, (old.get(k), t.get(k)))
+    check("exactly one entry variable moved this run - two at once would make "
+          "neither attributable", len(deliberate) == 1, list(deliberate))
     check("stock_universe unchanged",
           sorted(old.get("stock_universe", [])) == sorted(t.get("stock_universe", [])),
           (len(old.get("stock_universe", [])), len(t.get("stock_universe", []))))

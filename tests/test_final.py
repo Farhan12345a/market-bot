@@ -51,7 +51,7 @@ check("analytics section present", "analytics" in CFG and "signal_log_file" in C
 check("notifications section present", "email" in CFG.get("notifications", {}))
 
 print("\n=== B. TODAY'S INTENDED SETTINGS ===")
-expect = {"min_stock_price":10, "momentum_fade_slope_threshold":-0.05, "entry_window_start":"09:33",
+expect = {"min_stock_price":20, "momentum_fade_slope_threshold":-0.05, "entry_window_start":"09:33",
           "max_daily_entries":50, "max_daily_loss_usd":1000, "max_concurrent_positions":10,
           "resistance_min_decline_pct":0.5, "reentry_cooldown_minutes":5,
           "use_burst_throttle":True, "use_websocket_stream":True,

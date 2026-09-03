@@ -121,7 +121,7 @@ ok, why = e.pre_entry_check(10, 100.0, symbol="AAA")
 check("pre_entry_check refuses once the rate is breached", ok is False, why)
 esrc = open(repo_file("src", "executor", "executor.py")).read()
 check("...and it is checked FIRST, before the costlier checks",
-      esrc.index("ok, why = self.rate_limit_check(qty, price)")
+      esrc.index("ok, why = self.rate_limit_check(qty, price, is_opening_burst=")
       < esrc.index('max_attempts = self.config["trading"].get("max_entry_attempts'))
 check("an EXIT is counted but never blocked - an unclosed position is the "
       "larger risk",
