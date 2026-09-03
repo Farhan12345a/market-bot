@@ -1118,6 +1118,13 @@ trading:
   halt_check:
     enabled: true
     cache_seconds: 60
+    # The other half: a position ALREADY OPEN that halts. Deliberately an
+    # ALERT and not an action - whether to wait for the reopen or close into
+    # it depends on why it halted, which the bot cannot see, and guessing
+    # would be worse than saying nothing. Runs on the reconcile cadence
+    # (~5 min), because an asset lookup per open position per 10-second poll
+    # is a lot of calls for a state that changes on the order of minutes.
+    alert_on_held: true
 
   # ---------------------------------------------------------------------
   # Gap exit (added 2026-09-02)

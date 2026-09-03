@@ -86,6 +86,9 @@ class TradeManager:
         # stall_after_minutes elapses - which is correct: it has had its time
         # and done nothing with it.
         self.last_high_at = self.entry_time
+        # Highest milestone band this position has reached, for the dynamic
+        # stop. None means "not yet evaluated"; it only ever moves up.
+        self._last_stop_milestone = None
         self.first_exit_done = False
         # Indices of take-profit tiers already filled for this position. A set
         # rather than a single flag, because each tier fires at most once but
@@ -305,6 +308,49 @@ class TradeManager:
         if loss_pct <= final_exit_trigger:
             return self.qty_remaining
         return 0
+
+    def recalculate_stop(self, engine, current_price):
+        """
+        Recompute this position's stop when it crosses a MILESTONE, e.g. from
+        entry to +0.5% to +1.0%. Returns a note when something changed.
+
+        WHY MILESTONES RATHER THAN CONTINUOUSLY. A stop recomputed every poll
+        chases the price: the level moves under the position on every tick and
+        the trade exits on noise in the STOP rather than noise in the market.
+        Milestones make each recalculation a response to the position having
+        genuinely improved - discrete, and triggered by something real.
+
+        MONOTONIC, and this is the safety property. `last_milestone` only ever
+        moves UP, and the new stop is accepted only if it is TIGHTER than the
+        current one. A position that runs to +1% and falls back does not
+        re-widen its stop, because widening a live stop moves it away from a
+        position that is already going wrong - the single worst thing this
+        could do.
+
+        DynamicStops.should_recalculate has existed since the module was
+        written and nothing called it; stops were set at entry and never moved
+        again. This is that call site.
+        """
+        if engine is None:
+            return None
+        try:
+            gain_pct = (current_price - self.entry_price) / self.entry_price * 100
+            if not engine.should_recalculate(gain_pct, self._last_stop_milestone):
+                return None
+            self._last_stop_milestone = engine._milestone_for(gain_pct)
+            new_stop, why = engine.stop_for(self.symbol, gain_pct)
+            current = self.config["trading"].get("final_exit_loss_pct", -1.0)
+            if new_stop is None or new_stop <= current:
+                return None          # not tighter - leave it exactly as it is
+            import copy as _copy
+            cfg = _copy.deepcopy(self.config)
+            cfg["trading"]["final_exit_loss_pct"] = new_stop
+            self.config = cfg
+            return (f"stop {current}% -> {new_stop}% at +{gain_pct:.2f}% "
+                    f"(milestone {self._last_stop_milestone:g}%; {why})")
+        except Exception as e:
+            logger.debug(f"{self.symbol}: stop recalculation skipped ({e})")
+            return None
 
     def check_gap_exit(self, current_price):
         """

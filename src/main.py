@@ -3035,6 +3035,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     opening_state = {"baseline": {}, "taken": [], "done": False}
     breadth_state = {"open_px": {}}
     reconcile_state = {}
+    halt_state = {}
     regime_state = {}
     # Published so _attempt_entry can read the current label. Same dict object,
     # mutated in place by _regime_multiplier, so it cannot go stale.
@@ -3198,6 +3199,18 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     trade = strategy.trades.get(symbol)
                     mfe_pct, mae_pct = trade.excursions() if trade else (None, None)
 
+                    # MILESTONE STOP RECALCULATION, before the exit rules run
+                    # on this price. A position that has improved earns a
+                    # tighter stop; it can never earn a looser one.
+                    if trade is not None:
+                        try:
+                            _note = trade.recalculate_stop(
+                                _DYNAMIC_STOPS.get("engine"), exit_info["price"])
+                            if _note:
+                                logger.info(f"{symbol}: DYNAMIC STOP tightened - {_note}")
+                        except Exception as e:
+                            logger.debug(f"{symbol}: stop recalculation skipped ({e})")
+
                     order = executor.submit_exit_order(
                         symbol, exit_info["qty"], exit_info["reason"], exit_info["price"],
                         exit_rsi=exit_rsi, mfe_pct=mfe_pct, mae_pct=mae_pct,
@@ -3343,6 +3356,43 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         regime_cfg = config.get("trading", {}).get("regime_sizing") or {}
         regime_active = regime_cfg.get("enabled", False)
         _measure_breadth(config, market_data, symbols, breadth_state, now, et)
+
+        # HELD POSITIONS THAT HALT. The entry check refuses opening into a
+        # halted name; this is the other half, and it is deliberately an ALERT
+        # rather than an action. The right response - wait for the reopen, or
+        # close into it - depends on why it halted, which the bot cannot see.
+        # Guessing would be worse than saying nothing.
+        #
+        # Runs on the reconcile cadence rather than per poll: an asset lookup
+        # per open position per 10 seconds is a lot of calls for a state that
+        # changes on the order of minutes.
+        if (config["trading"].get("halt_check") or {}).get("alert_on_held", True):
+            try:
+                _held_halt = []
+                for _sym in list(strategy.get_open_trades().keys()):
+                    _t, _w = executor.broker.is_symbol_tradable(_sym)
+                    if _t is False:
+                        _held_halt.append((_sym, _w))
+                if _held_halt and tuple(sorted(_held_halt)) != halt_state.get("last"):
+                    halt_state["last"] = tuple(sorted(_held_halt))
+                    from src.notifications import alerts as _AL
+                    _AL.degraded(
+                        config, email_notifier,
+                        what=f"{len(_held_halt)} HELD position(s) are halted",
+                        detail="These are open and not currently tradable:\n\n"
+                               + "\n".join(f"  {s}: {w}" for s, w in _held_halt)
+                               + "\n\nA stop cannot protect a halted position - there "
+                                 "are no trades to fill against. When it reopens it may "
+                                 "gap well past the stop level; gap_exit will close it "
+                                 "outright rather than running rules that assume price "
+                                 "walked there.\n\nNo action has been taken. Whether to "
+                                 "wait for the reopen or close into it depends on why it "
+                                 "halted, which the bot cannot see.",
+                    )
+                elif not _held_halt:
+                    halt_state["last"] = None
+            except Exception as e:
+                logger.debug(f"held-position halt check skipped: {e}")
 
         # PERIODIC RECONCILE. The broker is truth; this reports divergence and
         # alerts, it does not silently repair - see
