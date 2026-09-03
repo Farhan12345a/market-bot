@@ -27,7 +27,7 @@ ENTRY_CONFIRM_GRACE_SECONDS = 120
 # threshold in the string is built from the position's own exit config - a
 # burst trade says "FINAL_EXIT_-0.35%", a session trade "FINAL_EXIT_-1.0%".
 STOP_LOSS_EXIT_PREFIXES = ("FINAL_EXIT_", "FIRST_EXIT_")
-STOP_LOSS_EXIT_REASONS = {"TRAILING_STOP", "FLATTEN_ALL"}
+STOP_LOSS_EXIT_REASONS = {"TRAILING_STOP", "FLATTEN_ALL", "GAP_EXIT"}
 
 
 def is_stop_loss_exit(reason):
@@ -760,7 +760,8 @@ class Executor:
             "price_source": price_source or "unknown",
         }
 
-    def submit_entry_order(self, symbol, qty, price=None, entry_method=None, entry_rsi=None):
+    def submit_entry_order(self, symbol, qty, price=None, entry_method=None,
+                           entry_rsi=None, spread_pct=None):
         """
         Submit a market order to enter a position. Returns the order on
         success, or None on failure (does NOT raise) - callers must check the
@@ -793,12 +794,31 @@ class Executor:
         # NOW at +0.45%. The entries it does miss are the ones where price ran
         # past the band between decision and arrival, which are precisely the
         # ones worth missing: the move already happened.
+        # HOW TIGHT THE BAND CAN BE, and why it is not a free parameter.
+        #
+        # The floor is the SPREAD. `price` here is the last trade, not the ask.
+        # A band narrower than the spread lands the limit below the offer, at
+        # which point it does not cross - and a marketable limit that does not
+        # cross is a PASSIVE limit, which is the thing this deliberately is
+        # not. Tightening past that point does not buy better fills, it
+        # silently converts the order type and starts missing the fastest
+        # movers, exactly the failure the marketable version exists to avoid.
+        #
+        # So the band is the WIDER of a configured floor and a multiple of the
+        # measured spread, capped so an unreadable quote cannot open it up.
+        # On a 0.05% spread that gives the floor; on a 0.4% spread it widens to
+        # clear the offer rather than pretending the book is tighter than it is.
         limit_px = None
         ecfg = (self.config.get("trading") or {}).get("marketable_limit_entries") or {}
         if ecfg.get("enabled") and price:
             try:
-                band = float(ecfg.get("slippage_pct", 0.25)) / 100.0
-                limit_px = round(float(price) * (1 + band), 2)
+                band_pct = float(ecfg.get("slippage_pct", 0.25))
+                if spread_pct is not None:
+                    mult = float(ecfg.get("spread_multiple", 1.5))
+                    band_pct = max(band_pct, float(spread_pct) * mult)
+                band_pct = min(band_pct, float(ecfg.get("max_slippage_pct", 0.6)))
+                limit_px = round(float(price) * (1 + band_pct / 100.0), 2)
+                self._last_entry_band_pct = band_pct
             except (TypeError, ValueError) as e:
                 logger.debug(f"{symbol}: entry limit price unavailable ({e}) - using market")
                 limit_px = None
@@ -810,8 +830,10 @@ class Executor:
                     order = self.broker.submit_limit_order(symbol, qty, limit_px, side="buy")
                     logger.info(
                         f"{symbol}: entry routed as a MARKETABLE LIMIT at {limit_px} "
-                        f"({ecfg.get('slippage_pct', 0.25)}% above {price}) - crosses the "
-                        f"spread like a market order but refuses a fill further away"
+                        f"({getattr(self, '_last_entry_band_pct', 0):.3f}% above {price}"
+                        + (f", spread {spread_pct:.3f}%" if spread_pct is not None else "")
+                        + ") - crosses the spread like a market order but refuses "
+                        f"a fill further away"
                     )
                 except Exception as e:
                     # Unlike an exit, an entry not taken is a missed
@@ -867,6 +889,7 @@ class Executor:
         meta = self.entry_meta.setdefault(symbol, {})
         meta["entry_route"] = "limit" if limit_px else "market"
         meta["entry_limit_price"] = limit_px
+        meta["entry_band_pct"] = getattr(self, "_last_entry_band_pct", None) if limit_px else None
         meta["signal_price"] = meta.get("signal_price", price)
         # A NEW position gets a fresh marketable-limit budget. Deliberately
         # reset here and not on exit: this executor records a position as

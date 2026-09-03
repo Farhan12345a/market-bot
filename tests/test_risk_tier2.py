@@ -304,5 +304,123 @@ check("a missing file exits non-zero with no traceback",
 check("nothing live reads this tool",
       "fill-rate" not in msrc and "fill_rate" not in msrc)
 
+
+# ===================================================================
+print("\n=== SIZING FORMULA: risk parity ===")
+import types as _t
+from src.analytics.dynamic_stops import DynamicStops as _DS
+import logging as _lg
+_lg.disable(_lg.INFO)
+M._DYNAMIC_STOPS["engine"] = _DS(CFG, history={},
+                                 atr_by_symbol={"T": 0.4, "W": 1.5, "X": 3.0})
+_ex = _t.SimpleNamespace(equity=100000.0, regime_size_multiplier=1.0,
+                         loss_tier_multiplier=lambda: 1.0)
+check("shipped in risk_parity mode", CFG["trading"]["sizing_mode"] == "risk_parity")
+
+# risk_per_trade = equity * daily_limit_fraction / concurrent
+_rt = (100000.0 * CFG["trading"]["daily_loss_limit"]["pct_of_equity"] / 100.0
+       / CFG["trading"]["max_concurrent_positions"])
+check(f"the formula risks ${_rt:,.0f} per trade at $100k", abs(_rt - 100.0) < 1, _rt)
+
+_q_wide = M._position_size(CFG, _ex, 100.0, symbol="W")     # stop -1.0%
+check("a -1.0% stop sizes to risk_per_trade / stop",
+      abs(_q_wide * 100.0 - min(_rt / 0.01, CFG["trading"]["max_position_per_stock_usd"])) < 200,
+      _q_wide * 100.0)
+_q_tight = M._position_size(CFG, _ex, 100.0, symbol="T")    # stop -0.4%
+check("a TIGHTER stop earns a position at least as large - dollars at RISK "
+      "are what is held constant, not dollars deployed",
+      _q_tight >= _q_wide, (_q_tight, _q_wide))
+check("...and the hard cap still backstops it",
+      _q_tight * 100.0 <= CFG["trading"]["max_position_per_stock_usd"] + 1, _q_tight * 100.0)
+
+# The coherence property: all concurrent positions stopping out lands near the
+# daily limit rather than through it. That link is the reason for the formula.
+_limit = 100000.0 * CFG["trading"]["daily_loss_limit"]["pct_of_equity"] / 100.0
+_worst = _q_wide * 100.0 * 0.01 * CFG["trading"]["max_concurrent_positions"]
+check("if every slot stops out at once the account lands AT the daily limit, "
+      "not through it", _worst <= _limit * 1.05, (_worst, _limit))
+
+_ceil = copy.deepcopy(CFG); _ceil["trading"]["sizing_mode"] = "ceilings"
+_c_tight = M._position_size(_ceil, _ex, 100.0, symbol="T")
+_c_wide = M._position_size(_ceil, _ex, 100.0, symbol="W")
+check("the OLD mode gives identical notional regardless of stop - which is "
+      "different dollar risk per trade, the thing risk parity fixes",
+      _c_tight == _c_wide, (_c_tight, _c_wide))
+check("...and it is still selectable", _ceil["trading"]["sizing_mode"] == "ceilings")
+check("the slot share is skipped ONLY in risk_parity mode",
+      'trading.get("sizing_mode") != "risk_parity"' in msrc)
+check("...and total exposure is still enforced per order at the book level",
+      "max_total_exposure_fraction" in open(repo_file("src", "executor", "executor.py")).read())
+M._DYNAMIC_STOPS["engine"] = None
+
+# ===================================================================
+print("\n=== SPREAD-AWARE ENTRY BAND ===")
+me2 = CFG["trading"]["marketable_limit_entries"]
+check("a floor, a spread multiple and a cap are all configured",
+      {"slippage_pct", "spread_multiple", "max_slippage_pct"} <= set(me2))
+check("the floor is tighter than the old fixed 0.25%", me2["slippage_pct"] < 0.25)
+
+_bands = []
+
+
+class SB:
+    def get_positions(s): return {}
+    def submit_limit_order(s, sym, q, px, side="buy", extended_hours=False):
+        _bands.append(px); return _t.SimpleNamespace(id="L")
+    def submit_market_order(s, sym, q, side="buy"):
+        _bands.append(None); return _t.SimpleNamespace(id="M")
+
+
+def band_for(spread):
+    e = Executor(SB(), copy.deepcopy(CFG)); e._equity = 1e5; e._buying_power = 1e5
+    e.submit_entry_order("Z", 10, 100.0, entry_method="T", spread_pct=spread)
+    return round(_bands[-1] - 100.0, 4) if _bands[-1] else None
+
+
+check("a tight book uses the floor", band_for(0.05) == me2["slippage_pct"], band_for(0.05))
+check("no spread reading also uses the floor", band_for(None) == me2["slippage_pct"])
+check("a 0.30% spread WIDENS the band to clear the offer",
+      band_for(0.30) > me2["slippage_pct"], band_for(0.30))
+check("...to about spread x spread_multiple",
+      abs(band_for(0.30) - 0.30 * me2["spread_multiple"]) < 0.02, band_for(0.30))
+check("a very wide book is capped, so an unreadable quote cannot open it up",
+      band_for(2.0) == me2["max_slippage_pct"], band_for(2.0))
+check("the band is never tighter than the spread itself - a limit that does "
+      "not cross IS a passive limit, which this deliberately is not",
+      all(band_for(sp) >= sp for sp in (0.05, 0.2, 0.3, 0.4)))
+check("the code says why tightening past the spread is not free",
+      "The floor is the SPREAD" in esrc)
+check("main passes the plausibility-filtered spread, so a bad quote widens "
+      "nothing", "_usable_spread_pct(config, market_data, symbol, price)" in msrc)
+
+# ===================================================================
+print("\n=== GAP EXIT: what a stop cannot promise ===")
+from src.strategy.strategy import TradeManager as _TM
+ge = CFG["trading"]["gap_exit"]
+check("shipped enabled", ge["enabled"] is True)
+check("the multiple is above 1, so it can only fire BEYOND the stop",
+      ge["gap_multiple"] > 1.0, ge["gap_multiple"])
+
+_tm = _TM("G", 100.0, 100, copy.deepcopy(CFG))
+_stop = abs(CFG["trading"]["final_exit_loss_pct"])
+check("a normal move to the stop does NOT trigger it - the ordinary ladder "
+      "owns that", _tm.check_gap_exit(100.0 - _stop) == 0)
+check("...nor does anything short of the multiple",
+      _tm.check_gap_exit(100.0 - _stop * ge["gap_multiple"] + 0.1) == 0)
+check("a gap past multiple x stop sells EVERYTHING remaining",
+      _tm.check_gap_exit(100.0 - _stop * ge["gap_multiple"] - 0.1) == 100)
+check("a 3% reopen after a halt is closed outright", _tm.check_gap_exit(97.0) == 100)
+_off = copy.deepcopy(CFG); _off["trading"]["gap_exit"]["enabled"] = False
+check("disabled -> inert", _TM("G", 100.0, 100, _off).check_gap_exit(90.0) == 0)
+
+sstrat2 = open(repo_file("src", "strategy", "strategy.py")).read()
+check("it is checked FIRST, ahead of rules that assume price walked there",
+      sstrat2.index('("GAP_EXIT", trade.check_gap_exit)')
+      < sstrat2.index("(_final_label, trade.check_final_exit)"))
+check("it counts as a stop-loss exit for the record",
+      "GAP_EXIT" in open(repo_file("src", "executor", "executor.py")).read())
+check("the code is honest that it cannot prevent the gap itself",
+      "does not fill at $99.50" in sstrat2)
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

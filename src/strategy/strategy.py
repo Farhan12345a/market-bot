@@ -306,6 +306,53 @@ class TradeManager:
             return self.qty_remaining
         return 0
 
+    def check_gap_exit(self, current_price):
+        """
+        Exit immediately when price has GAPPED past the stop rather than
+        walking to it.
+
+        WHAT THIS CAN AND CANNOT DO, stated plainly, because the honest answer
+        matters more than the feature. A stop is not a promise about
+        execution. If a symbol halts at $100 and reopens at $97, a -0.5% stop
+        does not fill at $99.50 - there were no trades between those prices.
+        Nothing in software prevents that loss.
+
+        What software CAN do is stop making it worse, and that is a real
+        failure this bot is exposed to. The exit sweep evaluates rules in a
+        fixed order, and several of them - trailing stop, breakeven floor,
+        momentum fade, resistance - are written for a price that MOVED there.
+        After a gap those rules can decline to fire, or fire for a partial,
+        leaving a position open through a reopen that is still moving. The
+        2026-09-01 phantom loop showed what "the exit path did not fire and
+        nothing noticed" costs over 45 minutes.
+
+        So: when price is more than gap_multiple x the configured stop below
+        entry IN A SINGLE OBSERVATION, sell everything remaining and say so.
+        No tiers, no partial, no trailing logic that assumes continuity.
+
+        Deliberately NOT a tighter stop. It only fires BEYOND the stop, where
+        the position was already condemned - so it can never exit something the
+        normal rules would have kept.
+        """
+        cfg = self.config["trading"].get("gap_exit") or {}
+        if not cfg.get("enabled"):
+            return 0
+        try:
+            stop_pct = abs(float(self.config["trading"].get("final_exit_loss_pct", -1.0)))
+            mult = float(cfg.get("gap_multiple", 1.5))
+            move = (current_price - self.entry_price) / self.entry_price * 100
+            if move <= -(stop_pct * mult):
+                logger.warning(
+                    f"{self.symbol}: GAP EXIT - {move:+.2f}% from entry, past "
+                    f"{mult:g}x the {stop_pct:g}% stop in one observation. Selling "
+                    f"everything remaining rather than running rules that assume "
+                    f"price walked here."
+                )
+                return self.qty_remaining
+        except (TypeError, ValueError, ZeroDivisionError):
+            return 0
+        return 0
+
     def effective_trail_pct(self):
         """
         The trailing distance this position should be using RIGHT NOW.
@@ -830,6 +877,14 @@ class Strategy:
         _first_label = f"FIRST_EXIT_{_lbl(_t.get('first_exit_loss_pct', -0.5))}%"
 
         checks = [
+            # FIRST, ahead of everything. A gap is the one case where the other
+            # rules cannot be trusted: they are written for a price that walked
+            # here, and after a halt or a news gap it did not. Firing this
+            # first means the position is closed by the rule that knows that,
+            # rather than by whichever continuity-assuming rule happens to
+            # match. It only ever triggers BEYOND the final stop, so it cannot
+            # take a position the normal ladder would have kept.
+            ("GAP_EXIT", trade.check_gap_exit),
             (_final_label, trade.check_final_exit),
             (_first_label, trade.check_first_exit),
             (tp_reason or "TAKE_PROFIT", (lambda _p: tp_qty)),

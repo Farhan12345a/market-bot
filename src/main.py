@@ -1633,9 +1633,24 @@ def _position_size(config, executor, price, symbol=None, volume_history=None):
     if hard_cap:
         budgets.append(float(hard_cap))
 
+    # EVEN SLOT SHARE - the pre-2026-09-02 primary rule, and deliberately NOT
+    # applied in risk_parity mode.
+    #
+    # It divides deployable capital evenly, which gives every position the same
+    # NOTIONAL and therefore a DIFFERENT dollar risk once stops differ per
+    # symbol. That is precisely what risk parity exists to stop. Leaving both
+    # on would also make the formula decorative: at current settings the slot
+    # share ($9,000) sits just under the risk-parity budget ($10,000 at a 1%
+    # stop), so it would win every time and nothing would change.
+    #
+    # Dropping it does not uncap the book. max_total_exposure_fraction is still
+    # enforced per order in Executor.pre_entry_check, so total exposure is
+    # bounded at the BOOK level rather than by pre-dividing - the difference is
+    # that a tight-stop name can now take a larger share of that budget, which
+    # is the whole point.
     exposure_fraction = trading.get("max_total_exposure_fraction")
     max_positions = trading.get("max_concurrent_positions")
-    if exposure_fraction and max_positions:
+    if exposure_fraction and max_positions and trading.get("sizing_mode") != "risk_parity":
         budgets.append(equity * exposure_fraction / max_positions)
 
     # VOLATILITY-ADJUSTED SIZING.
@@ -1655,8 +1670,49 @@ def _position_size(config, executor, price, symbol=None, volume_history=None):
     # one. Every trade then risks the same amount, which is what makes trades
     # comparable to each other at all - and makes P&L attributable to selection
     # rather than to which volatile name happened to be on the list that day.
-    risk_fraction = trading.get("max_risk_per_trade_fraction")
     stop_pct = abs(_effective_stop_pct(config, symbol, trading)) / 100
+
+    # ---- RISK-PARITY SIZING (the primary rule when enabled) --------------
+    #
+    # The formula, and the reasoning behind each term:
+    #
+    #     risk_per_trade = equity x daily_loss_limit_fraction / concurrent
+    #     position       = risk_per_trade / stop_fraction
+    #
+    # This is fixed-fractional (Van Tharp) sizing with the risk budget tied to
+    # the DAILY LOSS LIMIT rather than to a number typed in separately. That
+    # link is the part that makes it coherent: if every concurrent position
+    # stops out at once - the correlated-open case that actually happened on
+    # 2026-09-02, when three XLK names bought inside 96 seconds all failed
+    # together - the account lands at roughly its daily limit, not through it.
+    # A sizing rule and a loss limit chosen independently have no such
+    # guarantee, and the gap between them is only discovered on the day it
+    # matters.
+    #
+    # The consequence people find surprising is the right one: a TIGHTER stop
+    # earns a LARGER position, because the dollars at risk are what is being
+    # held constant, not the dollars deployed. A 0.4%-ATR name stopped at
+    # -0.4% and a 2%-ATR name stopped at -1.0% then lose the same amount when
+    # they are wrong, which is what makes their outcomes comparable at all.
+    #
+    # The ceilings above still bind. Risk parity says what to risk; they say
+    # what the account and the book can carry, and the smallest wins - which
+    # is why a 0.4% stop does not actually produce a $25,000 position.
+    if trading.get("sizing_mode") == "risk_parity" and stop_pct > 0:
+        try:
+            limit_frac = float(trading.get("daily_loss_limit", {}).get(
+                "pct_of_equity", 1.0)) / 100.0
+            concurrent = int(trading.get("max_concurrent_positions") or 10)
+            if limit_frac > 0 and concurrent > 0:
+                risk_per_trade = equity * limit_frac / concurrent
+                budgets.append(risk_per_trade / stop_pct)
+        except (TypeError, ValueError, ZeroDivisionError) as e:
+            logger.debug(f"risk-parity sizing skipped ({e}) - using the ceilings only")
+
+    # Legacy ceiling, kept as a backstop. Dormant while stops are capped at
+    # final_exit_loss_pct, because a capped stop can only make this budget
+    # larger - see the note on volatility sizing.
+    risk_fraction = trading.get("max_risk_per_trade_fraction")
     if risk_fraction and stop_pct > 0:
         budgets.append(equity * risk_fraction / stop_pct)
 
@@ -2752,7 +2808,18 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
         logger.info(f"{symbol}: entry skipped - {reason}")
         return False
 
-    order = executor.submit_entry_order(symbol, qty, price, entry_method=entry_method, entry_rsi=symbol_rsi)
+    # The spread is passed in so the marketable-limit band can clear the offer
+    # rather than assuming a book tighter than the real one - see
+    # submit_entry_order. Reuses the plausibility-filtered reading, so an
+    # unreadable IEX quote widens nothing.
+    _spread = None
+    if market_data is not None:
+        try:
+            _spread = _usable_spread_pct(config, market_data, symbol, price)
+        except Exception:
+            _spread = None
+    order = executor.submit_entry_order(symbol, qty, price, entry_method=entry_method,
+                                        entry_rsi=symbol_rsi, spread_pct=_spread)
     if order is None:
         return False  # broker rejected/failed - already logged by submit_entry_order, nothing committed
 

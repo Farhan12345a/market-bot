@@ -46,7 +46,8 @@ class Exec:
         self.equity = 100000.0
     def reentry_cooldown_remaining(self, s): return self._cooldown
     def pre_entry_check(self, qty, price, symbol=None): return True, ""
-    def submit_entry_order(self, s, qty, price, entry_method=None, entry_rsi=None):
+    def submit_entry_order(self, s, qty, price, entry_method=None, entry_rsi=None,
+                           spread_pct=None):
         self.orders.append({"symbol": s, "qty": qty, "price": price, "method": entry_method})
         return {"id": len(self.orders)}
     def refresh_account_snapshot(self): pass
@@ -686,7 +687,8 @@ check("...but a recovery inside the window still qualifies", len(e5.orders) == 1
 
 # (f) Broker rejects the order - no phantom position.
 class RejectExec(Exec):
-    def submit_entry_order(self, s, qty, price, entry_method=None, entry_rsi=None):
+    def submit_entry_order(self, s, qty, price, entry_method=None, entry_rsi=None,
+                           spread_pct=None):
         return None
 st6 = {"baseline": {}, "taken": [], "done": False}
 md6 = MD({"AAA": [100.0, 102.0]})

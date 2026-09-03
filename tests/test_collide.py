@@ -42,8 +42,16 @@ r=st.check_exit("Z",{"close":px(-0.6)})
 check("UNARMED position still takes the -0.5% first exit", r["reason"]=="FIRST_EXIT_-0.5%", r)
 st,t=mk(); t.highest_since_entry=px(0.8)
 r=st.check_exit("Z",{"close":px(-1.5)})
-check("a gap straight through still takes the -1.0% stop, not breakeven",
-      r["reason"]=="FINAL_EXIT_-1.0%", r)
+# CHANGED 2026-09-02: a gap this size is now claimed by GAP_EXIT, which is
+# checked ahead of the whole ladder precisely because every other rule is
+# written for a price that WALKED to where it is. Economically identical -
+# both close the entire position at the same price - and the property this
+# test exists for is unchanged: breakeven must not win when price gapped
+# straight through it.
+check("a gap straight through takes a LOSS-side exit, never breakeven",
+      r["reason"] in ("GAP_EXIT", "FINAL_EXIT_-1.0%"), r)
+check("...and closes the whole position rather than a tranche",
+      r["qty"] == t.qty_remaining, r)
 
 print("\n=== 3. TRAIL vs FLOOR vs TIERS - which wins where ===")
 st,t=mk(); t.highest_since_entry=px(0.6); t.highest_price=px(0.6)

@@ -1120,6 +1120,29 @@ trading:
     cache_seconds: 60
 
   # ---------------------------------------------------------------------
+  # Gap exit (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # THE HONEST FRAMING FIRST. A stop is not a promise about execution. If a
+  # symbol halts at $100 and reopens at $97, a -0.5% stop does not fill at
+  # $99.50 - there were no trades between those prices. Nothing here prevents
+  # that loss, and any config that claims to is lying.
+  #
+  # What this DOES prevent is the loss getting worse afterwards. The exit
+  # sweep runs its rules in order, and several of them - trailing stop,
+  # breakeven floor, momentum fade, resistance - are written for a price that
+  # WALKED to where it is. After a gap they can decline to fire, or fire for a
+  # partial, leaving a position open through a reopen that is still moving.
+  #
+  # So when price is past gap_multiple x the stop in a SINGLE observation,
+  # sell everything remaining. No tiers, no partial, no continuity assumptions.
+  #
+  # It only ever fires BEYOND the final stop, where the position was already
+  # condemned, so it can never close something the normal ladder would keep.
+  gap_exit:
+    enabled: true
+    gap_multiple: 1.5    # -1.0% stop -> fires at -1.5% or worse in one look
+
+  # ---------------------------------------------------------------------
   # Periodic broker reconciliation (added 2026-09-02)
   # ---------------------------------------------------------------------
   # The bot's view of what it holds and the broker's have already diverged
@@ -1143,9 +1166,25 @@ trading:
     extra_per_share: 0.0            # for a broker that does charge commission
     extra_per_trade: 0.0
 
+  # HOW TIGHT THE BAND CAN BE is not a free choice: the floor is the SPREAD.
+  # The reference price is the last trade, not the ask, so a band narrower than
+  # the spread puts the limit below the offer - and a marketable limit that
+  # does not cross IS a passive limit. Tightening past that point does not buy
+  # better fills, it silently changes the order type and starts missing the
+  # fastest movers, which is the exact failure this design avoids.
+  #
+  # So the band is the WIDER of slippage_pct and spread x spread_multiple,
+  # capped at max_slippage_pct so an unreadable quote cannot open it up.
+  #   0.05% spread -> 0.15% (the floor)
+  #   0.30% spread -> 0.45%
+  #   0.80% spread -> 0.60% (the cap; a book that wide is a refusal signal,
+  #                          which the burst's own spread gate already handles)
   marketable_limit_entries:
     enabled: true
-    slippage_pct: 0.25
+    slippage_pct: 0.15        # floor, tightened from 0.25 now that it is
+                              # spread-aware and cannot under-cross
+    spread_multiple: 1.5
+    max_slippage_pct: 0.6
 
   marketable_limit_exits:
     enabled: true
@@ -1675,6 +1714,38 @@ trading:
   # before), and on 2026-08-19 numbers it would have ended the session around
   # entry 40, before this cap was ever reached.
   max_daily_entries: 50
+
+  # ---------------------------------------------------------------------
+  # Sizing mode (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # "risk_parity" derives position size from a formula instead of from a typed
+  # dollar cap:
+  #
+  #     risk_per_trade = equity x daily_loss_limit.pct_of_equity / max_concurrent_positions
+  #     position       = risk_per_trade / stop_fraction
+  #
+  # Fixed-fractional (Van Tharp) sizing, with the risk budget tied to the DAILY
+  # LOSS LIMIT rather than chosen separately. That link is what makes it
+  # coherent: if every concurrent position stops out at once - the correlated
+  # case that actually happened on 2026-09-02, when three XLK names bought
+  # inside 96 seconds all failed together - the account lands at roughly its
+  # daily limit rather than through it. A sizing rule and a loss limit picked
+  # independently have no such guarantee, and the gap is discovered on the day
+  # it matters.
+  #
+  # At $100k equity, a 1% limit and 10 slots: $100 risked per trade.
+  #     stop -0.5% -> $20,000 position   (capped to the slot share)
+  #     stop -1.0% -> $10,000 position
+  #     stop -2.0% ->  $5,000 position
+  #
+  # A tighter stop earns a LARGER position because the dollars at RISK are held
+  # constant, not the dollars deployed - which is what makes two trades in
+  # very different names comparable at all.
+  #
+  # Set to "ceilings" for the previous behaviour (slot share / risk fraction /
+  # hard cap only). The ceilings still apply either way: risk parity says what
+  # to risk, they say what the account and the book can carry, smallest wins.
+  sizing_mode: risk_parity
 
   max_total_exposure_fraction: 0.9  # never commit more than this fraction of CURRENT equity, combined,
                                      # across all open positions - a fraction (not a fixed $) so it scales

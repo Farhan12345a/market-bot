@@ -82,12 +82,37 @@ check("time stop before market close", T["time_stop_hour"] <= 16)
 print("\n=== D. SIZING WITH REAL CONFIG ===")
 class Ex:
     equity = 95116.67
+
+
+# 2026-09-02: sizing_mode is risk_parity, which deliberately does NOT apply the
+# even slot share. That rule gives every position the same NOTIONAL and
+# therefore a DIFFERENT dollar risk once stops differ per symbol, which is the
+# thing risk parity exists to fix. Total exposure is still bounded, but at the
+# BOOK level (Executor.pre_entry_check) rather than by pre-dividing - so the
+# ceiling that binds per position is max_position_per_stock_usd.
 slot = Ex.equity * T["max_total_exposure_fraction"] / T["max_concurrent_positions"]
+cap = T["max_position_per_stock_usd"]
+bound = cap if T.get("sizing_mode") == "risk_parity" else slot
 for px, name in [(12.82,"CADL"), (2.19,"PLUG"), (242.61,"MRVL"), (14.38,"NU")]:
     qty = _position_size(CFG, Ex(), px)
-    check(f"{name} @ ${px}: {qty} sh = ${qty*px:,.0f} (<= slot ${slot:,.0f})", qty*px <= slot*1.01, qty*px)
-check("full book <= equity (no leverage by construction)",
-      _position_size(CFG, Ex(), 100.0)*100.0*T["max_concurrent_positions"] <= Ex.equity, "")
+    check(f"{name} @ ${px}: {qty} sh = ${qty*px:,.0f} (<= ${bound:,.0f})",
+          qty*px <= bound*1.01, qty*px)
+
+# The formula's coherence property, which replaces "full book <= equity": if
+# every concurrent position stops out at once, the account lands at roughly its
+# DAILY LIMIT rather than through it. That is the link that makes the sizing
+# rule and the loss limit one decision instead of two.
+if T.get("sizing_mode") == "risk_parity":
+    _stop = abs(T["final_exit_loss_pct"]) / 100.0
+    _one = _position_size(CFG, Ex(), 100.0) * 100.0
+    _all_stopped = _one * _stop * T["max_concurrent_positions"]
+    _limit = Ex.equity * T["daily_loss_limit"]["pct_of_equity"] / 100.0
+    check(f"all {T['max_concurrent_positions']} slots stopping out costs "
+          f"${_all_stopped:,.0f} against a ${_limit:,.0f} daily limit",
+          _all_stopped <= _limit * 1.10, (_all_stopped, _limit))
+else:
+    check("full book <= equity (no leverage by construction)",
+          _position_size(CFG, Ex(), 100.0)*100.0*T["max_concurrent_positions"] <= Ex.equity, "")
 check("zero equity -> zero size (fail closed)", _position_size(CFG, types.SimpleNamespace(equity=0.0), 50.0) == 0)
 
 print("\n=== E. CLOCK FIX (the highest-risk change) ===")
