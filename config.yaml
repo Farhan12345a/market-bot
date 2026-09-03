@@ -1031,6 +1031,122 @@ trading:
   # the next poll, and after max_attempts the exit escalates to a plain market
   # order - a bounded exit beats an unbounded one, but ANY exit beats a
   # position the stop has already condemned.
+  # ---------------------------------------------------------------------
+  # Marketable-limit ENTRIES (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # A limit placed ABOVE the reference price. The distinction that decides
+  # whether this is safe:
+  #
+  #   PASSIVE limit (at or below the ask) - may never fill. This strategy buys
+  #   into a RISING price ("up 0.3% in 3 minutes"), so the orders that failed
+  #   to fill would be exactly the fastest movers - plausibly the best trades.
+  #   Better average fill price, possibly lower total P&L. NOT this. That
+  #   version needs a measured fill rate first; see PENDING_WORK item 0e.
+  #
+  #   MARKETABLE limit (above the ask) - crosses the spread, so it fills
+  #   immediately in any normal book, exactly like the market order it
+  #   replaces. What it cannot do is fill arbitrarily far away.
+  #
+  # So this is not "better price vs. missed trades". It is identical behaviour
+  # except the disaster fills are refused - the 2026-09-02 OLLI entry that
+  # filled +0.91% past its signal price, or NOW at +0.45%. The entries it does
+  # miss are the ones where price ran past the band between decision and
+  # arrival, which are precisely the ones worth missing: the move already
+  # happened, which is what max_extension_from_open_pct also exists to catch.
+  #
+  # 0.25% is deliberately wider than a typical spread on these names and
+  # narrower than the losses it is meant to prevent.
+  # ---------------------------------------------------------------------
+  # Execution costs (added 2026-09-02) - read by ops/replay.py and ops/grid.py
+  # ---------------------------------------------------------------------
+  # Alpaca charges no commission, which is not the same as costing nothing.
+  # These are the pass-through regulatory fees, charged on SELLS only.
+  #
+  # WHY THIS MATTERS MORE THAN ITS SIZE. Per trade this is cents. But replay
+  # and grid compare CONFIGS, and the configs being compared differ mainly in
+  # HOW MANY TRADES THEY TAKE - a wider stop holds longer and trades less, a
+  # tighter take-profit tier cycles more. Modelling zero cost makes every cell
+  # optimistic by an amount proportional to its trade count, which
+  # systematically flatters whichever config trades most. That is a bias in
+  # the comparison, not a rounding error in the total - and the grid's entire
+  # output is a comparison.
+  #
+  # The SEC rate is reset annually; these are the 2025-2026 figures. Update
+  # them here rather than in code.
+  # ---------------------------------------------------------------------
+  # Intraday liquidity cap (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # The screener filters on universe_min_dollar_volume (3M) and min_avg_volume
+  # (1M) - both DAILY averages. Neither says anything about the MINUTE you are
+  # actually buying in, and that is the minute that sets your fill.
+  #
+  # A name averaging $3M a day trades roughly $12k in an average minute and far
+  # less in a quiet one. A $9,000 slot share into a symbol printing $40k that
+  # minute is 22% of it; into one printing $12k it is most of the minute. This
+  # is the mechanism behind the entry slippage now being recorded - OLLI filled
+  # +0.91% past its signal price on 2026-09-02.
+  #
+  # Uses the volume history already kept per symbol for RVOL, so it costs no
+  # API calls. Median rather than mean: one opening-minute spike would
+  # otherwise license a position the next twenty minutes cannot support.
+  #
+  # Applied LAST in _position_size and only ever downward. Every other ceiling
+  # asks how much of the ACCOUNT to risk; this asks what the MARKET can absorb.
+  # Different questions, and the smaller answer wins.
+  liquidity_cap:
+    enabled: true
+    max_fraction_of_minute: 0.02   # at most 2% of a typical minute's dollars
+    min_samples: 3                 # below this, no opinion rather than a guess
+    floor_usd: 1000                # never cap below this - a data gap is not
+                                   # evidence of an illiquid stock
+
+  # ---------------------------------------------------------------------
+  # Halt / not-tradable check (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # A stop is not a promise about execution: if a symbol halts while held and
+  # reopens 3% lower, a -0.5% stop fills at -3%. Nothing prevents that. What
+  # CAN be prevented is OPENING a position into a name that is already halted.
+  #
+  # Alpaca's asset record carries `tradable` and `status`, both of which go
+  # false while a symbol is halted, suspended or delisted. LULD band data is
+  # not on this plan, so a halt is detectable but its price bounds are not.
+  #
+  # Checked at entry, not at selection - a halt happens intraday, minutes after
+  # the watchlist was built. Cached per symbol so it is one API call per name
+  # per TTL rather than one per poll. An UNKNOWN answer never blocks: a network
+  # blip is not evidence of a halt.
+  halt_check:
+    enabled: true
+    cache_seconds: 60
+
+  # ---------------------------------------------------------------------
+  # Periodic broker reconciliation (added 2026-09-02)
+  # ---------------------------------------------------------------------
+  # The bot's view of what it holds and the broker's have already diverged
+  # twice, in two different ways: phantom positions (entry recorded at SUBMIT,
+  # never filled) and partial fills (AI tracked at 400 while the broker held
+  # 152; OLLI 109 vs 14). Each was caught by a guard written afterwards for
+  # that specific case.
+  #
+  # This catches the CLASS rather than the instances, including the next one
+  # nobody has thought of. REPORTS AND ALERTS, never silently repairs - the
+  # right repair differs by cause, and quietly "fixing" a divergence destroys
+  # the evidence of what caused it.
+  reconcile:
+    enabled: true
+    interval_seconds: 300
+
+  execution_costs:
+    sec_fee_per_dollar: 0.0000278   # SEC Section 31, on sale proceeds
+    finra_taf_per_share: 0.000166   # FINRA Trading Activity Fee
+    finra_taf_cap: 8.30             # per trade
+    extra_per_share: 0.0            # for a broker that does charge commission
+    extra_per_trade: 0.0
+
+  marketable_limit_entries:
+    enabled: true
+    slippage_pct: 0.25
+
   marketable_limit_exits:
     enabled: true
     slippage_pct: 0.3

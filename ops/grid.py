@@ -120,6 +120,10 @@ def main():
     ap.add_argument("--by-regime", action="store_true",
                     help="split the whole grid by the regime recorded at entry")
     ap.add_argument("--top", type=int, default=10)
+    ap.add_argument("--no-costs", action="store_true",
+                    help="rank on GROSS P&L, ignoring execution cost. Biased "
+                         "toward cells that trade more often - see replay.py.")
+
     args = ap.parse_args()
 
     R = _load_replay()
@@ -149,6 +153,8 @@ def main():
         if skipped and group_name == "ALL":
             print(f"({skipped} trades skipped - too few path samples to replay)")
 
+        costs = None if args.no_costs else R.costs_from_config()
+        _key = "pnl" if args.no_costs else "net_pnl"
         results = []
         for stop, be, tp in itertools.product(stops, bes, tps):
             trig, floor = R.parse_be(be)
@@ -156,8 +162,15 @@ def main():
                 stop_pct=stop, trail_pct=args.trail,
                 be_trigger=trig, be_floor=floor, tiers=R.parse_tiers(tp),
             )
-            rows = R.replay_all(group_trades, cfg)
-            results.append(((stop, be, tp), R.summarize(rows)))
+            # NET of execution cost, not gross. The cells in this grid differ
+            # mainly in HOW MANY TRADES they take - a wider stop holds longer
+            # and trades less, a tighter take-profit cycles more - so modelling
+            # zero cost flatters every high-frequency cell by an amount
+            # proportional to its trade count. That is a bias in the ranking,
+            # not a rounding error in the totals, and this grid's entire output
+            # is a ranking.
+            rows = R.replay_all(group_trades, cfg, costs=costs)
+            results.append(((stop, be, tp), R.summarize(rows, key=_key)))
 
         n = max((s["n"] for _, s in results), default=0)
 

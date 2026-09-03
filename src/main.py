@@ -464,6 +464,10 @@ _DYNAMIC_STOPS = {"engine": None}
 # run_trading_day; the dict it points at is mutated in place by
 # _regime_multiplier, so this never goes stale.
 _REGIME_STATE = {}
+# symbol -> (monotonic_ts, tradable_or_None, reason). One asset lookup per
+# symbol per TTL rather than one per poll - see the halt check in
+# _attempt_entry.
+_HALT_CACHE = {}
 
 
 def _build_dynamic_stops(config, screener=None, history_path="logs/trade_history.csv"):
@@ -1576,7 +1580,7 @@ def _effective_stop_pct(config, symbol, trading):
         return static
 
 
-def _position_size(config, executor, price, symbol=None):
+def _position_size(config, executor, price, symbol=None, volume_history=None):
     """
     Shares to buy for one entry. Returns 0 when no position should be taken.
 
@@ -1692,7 +1696,66 @@ def _position_size(config, executor, price, symbol=None):
     # deliberately not done: the slot share exists so a full book lands exactly
     # at max_total_exposure_fraction, and exceeding it for one name would break
     # that guarantee for every other position.
-    return int(min(budgets) / price * regime_mult * _volatility_multiplier(config, symbol))
+    shares = int(min(budgets) / price * regime_mult * _volatility_multiplier(config, symbol))
+
+    # LIQUIDITY CAP, applied last and only ever downward. Every ceiling above
+    # is about the ACCOUNT - how much of it to risk here. This one is about the
+    # MARKET - how much it can absorb without the fill reflecting the order.
+    # They are different questions and the smaller answer has to win.
+    cap = _liquidity_cap_shares(config, symbol, price, volume_history)
+    if cap is not None and cap < shares:
+        logger.info(
+            f"{symbol}: liquidity cap {shares} -> {cap} shares "
+            f"(${cap * price:,.0f}) - the account could carry more, this "
+            f"minute's volume could not absorb it"
+        )
+        shares = cap
+    return shares
+
+def _liquidity_cap_shares(config, symbol, price, volume_history):
+    """
+    Max shares this symbol can absorb right now, or None for no opinion.
+
+    THE GAP THIS FILLS. The screener already filters on
+    universe_min_dollar_volume (3M) and min_avg_volume (1M) - both DAILY
+    averages. Neither says anything about the minute you are actually buying
+    in, and that is the minute that sets your fill.
+
+    A name averaging $3M a day trades roughly $12k in an average minute, and
+    far less than that in a quiet one. A $9,000 slot share into a symbol
+    printing $40k that minute is 22% of it; into one printing $12k it is
+    most of the minute's volume, and the fill reflects that. This is the
+    mechanism behind the entry slippage now being recorded - OLLI filled
+    +0.91% past its signal price on 2026-09-02 - so it is a measured cost
+    rather than a theoretical one.
+
+    Uses the volume history already maintained per symbol for RVOL, so it
+    costs no API calls. Returns None (no opinion) rather than 0 whenever the
+    evidence is thin - refusing an entry on a missing measurement would make
+    a data gap look like an illiquid stock.
+    """
+    cfg = (config.get("trading") or {}).get("liquidity_cap") or {}
+    if not cfg.get("enabled") or not price:
+        return None
+    try:
+        vols = [float(v) for v in (volume_history or {}).get(symbol, []) if v and float(v) > 0]
+        if len(vols) < int(cfg.get("min_samples", 3)):
+            return None
+        # MEDIAN, not mean. One opening-minute spike is exactly the kind of
+        # print that would license a position the next twenty minutes cannot
+        # support, and the mean is dominated by it.
+        vols_sorted = sorted(vols)
+        median_vol = vols_sorted[len(vols_sorted) // 2]
+        minute_dollars = median_vol * float(price)
+        if minute_dollars <= 0:
+            return None
+        max_dollars = minute_dollars * float(cfg.get("max_fraction_of_minute", 0.02))
+        floor_dollars = float(cfg.get("floor_usd", 1000))
+        return int(max(floor_dollars, max_dollars) / float(price))
+    except (TypeError, ValueError, ZeroDivisionError) as e:
+        logger.debug(f"liquidity cap skipped for {symbol}: {e}")
+        return None
+
 
 def _volatility_multiplier(config, symbol):
     """
@@ -2453,6 +2516,7 @@ def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_val
                 exit_config=state.get("exit_config"),
                 context=burst_ctx,
                 market_data=market_data,
+                volume_history=volume_history,
             )
             if entered:
                 taken.append(symbol)
@@ -2512,7 +2576,7 @@ def _entry_context(cand, spy_pct, qqq_pct, spy_vs_vwap, qqq_vs_vwap,
 def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi,
                    size_multiplier=1.0, burst_note=None, signal_pct=None,
                    skip_cooldown=False, exit_config=None, context=None,
-                   market_data=None):
+                   market_data=None, volume_history=None):
     """
     Shared entry path for all three entry signals (three-bar momentum, rapid
     increase immediate, pullback resumption). Returns True if a position was
@@ -2531,7 +2595,8 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     was accepted by Alpaca's margin account as opening a real, completely
     untracked short position. 16 of them happened this way in one session.
     """
-    qty = int(_position_size(config, executor, price, symbol=symbol) * size_multiplier)
+    qty = int(_position_size(config, executor, price, symbol=symbol,
+                             volume_history=volume_history) * size_multiplier)
     if qty <= 0:
         # Distinguish "the regime says stand down" from "the arithmetic came
         # out at zero shares". Both refuse the entry, but only one of them is
@@ -2653,6 +2718,34 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
             f"since it was last stopped out"
         )
         return False
+
+    # HALT / NOT-TRADABLE CHECK, immediately before the order.
+    #
+    # A stop is not a promise about execution. If a symbol halts while held and
+    # reopens 3% lower, a -0.5% stop fills at -3% - nothing prevents that. What
+    # CAN be prevented is opening a position into a name that is already
+    # halted or suspended, which is both cheap to check and unambiguous.
+    #
+    # Checked here rather than at selection time because a halt happens
+    # intraday, minutes after the watchlist was built. Cached per symbol per
+    # session with a short TTL so it is one API call per name, not one per
+    # poll. An UNKNOWN answer (lookup failed) never blocks: a network blip is
+    # not evidence of a halt, and treating it as one would stop the whole
+    # watchlist the first time the endpoint hiccups.
+    if (config["trading"].get("halt_check") or {}).get("enabled"):
+        try:
+            _cached = _HALT_CACHE.get(symbol)
+            _ttl = float((config["trading"]["halt_check"]).get("cache_seconds", 60))
+            if _cached is None or (time.monotonic() - _cached[0]) > _ttl:
+                _tradable, _why = executor.broker.is_symbol_tradable(symbol)
+                _HALT_CACHE[symbol] = (time.monotonic(), _tradable, _why)
+            else:
+                _, _tradable, _why = _cached
+            if _tradable is False:
+                logger.warning(f"{symbol}: entry refused - {_why}. Not opening into a halted name.")
+                return False
+        except Exception as e:
+            logger.debug(f"{symbol}: halt check skipped ({e})")
 
     ok, reason = executor.pre_entry_check(qty, price, symbol=symbol)
     if not ok:
@@ -2874,6 +2967,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     # Opening-burst state, persisting across polls within the session.
     opening_state = {"baseline": {}, "taken": [], "done": False}
     breadth_state = {"open_px": {}}
+    reconcile_state = {}
     regime_state = {}
     # Published so _attempt_entry can read the current label. Same dict object,
     # mutated in place by _regime_multiplier, so it cannot go stale.
@@ -3182,6 +3276,41 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         regime_cfg = config.get("trading", {}).get("regime_sizing") or {}
         regime_active = regime_cfg.get("enabled", False)
         _measure_breadth(config, market_data, symbols, breadth_state, now, et)
+
+        # PERIODIC RECONCILE. The broker is truth; this reports divergence and
+        # alerts, it does not silently repair - see
+        # Executor.reconcile_against_broker for why repair belongs at the
+        # specific call sites that know the cause.
+        _rc = config["trading"].get("reconcile") or {}
+        if _rc.get("enabled", True):
+            _iv = float(_rc.get("interval_seconds", 300))
+            if (now - reconcile_state.get("last", now - timedelta(seconds=_iv + 1))
+                    ).total_seconds() >= _iv:
+                reconcile_state["last"] = now
+                try:
+                    _mm, _ = executor.reconcile_against_broker(
+                        list(strategy.get_open_trades().keys()))
+                    # Alert only on a CHANGE. A divergence that persists across
+                    # polls is one problem, not one per five minutes, and a
+                    # channel that repeats itself is one that gets muted.
+                    _sig = tuple(sorted(_mm))
+                    if _mm and _sig != reconcile_state.get("last_signature"):
+                        reconcile_state["last_signature"] = _sig
+                        from src.notifications import alerts as _AL
+                        _AL.degraded(
+                            config, email_notifier,
+                            what=f"{len(_mm)} position mismatch(es) vs the broker",
+                            detail="The bot's view of what it holds disagrees with "
+                                   "the broker:\n\n"
+                                   + "\n".join(f"  {s}: {w}" for s, w in _mm)
+                                   + "\n\nThe broker is authoritative. A SHORT here "
+                                     "means the phantom-entry path fired; close it "
+                                     "by hand if the 16:00 flatten has not.",
+                        )
+                    elif not _mm:
+                        reconcile_state["last_signature"] = None
+                except Exception as e:
+                    logger.debug(f"reconcile skipped: {e}")
         if regime_active:
             _mult, _label = _regime_multiplier(
                 config, regime_state, breadth_state, spy_history, now, et,
@@ -3668,6 +3797,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                             burst_size,
                         ),
                         market_data=market_data,
+                        volume_history=volume_history,
                     )
                     if taken:
                         entries_triggered += 1

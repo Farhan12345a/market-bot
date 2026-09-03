@@ -13,7 +13,7 @@ Tier 1 (rate limits, two-tier loss response, slippage persistence, no-entry-on-
 stale-data) SHIPPED 2026-09-02. What follows is what is left from that review,
 ordered. **Tier 2 is "before real money"; Tier 3 is process, not code.**
 
-## R1. Fee and commission modelling in replay/grid — TIER 2
+## R1. Fee and commission modelling in replay/grid — SHIPPED 2026-09-02
 
 Nothing in this repo models execution cost. Zero references to commission,
 SEC fee or TAF anywhere.
@@ -34,7 +34,7 @@ Shape: a `costs` block in config (per-share, per-dollar, caps), applied in the
 replay/grid P&L computation and reported as a separate line so its size is
 visible rather than buried.
 
-## R2. Intraday liquidity cap — TIER 2
+## R2. Intraday liquidity cap — SHIPPED 2026-09-02
 
 The screener filters on `universe_min_dollar_volume: 3000000` and
 `min_avg_volume: 1000000` - both DAILY averages. Nothing checks position size
@@ -51,7 +51,7 @@ maintained every poll. Shape: cap position notional at some fraction (1-2%) of
 recent 1-minute dollar volume, floored so a thin print does not refuse an
 otherwise good entry outright.
 
-## R3. Halt detection — TIER 2
+## R3. Halt detection — SHIPPED 2026-09-02 (entry refusal only)
 
 No `trading_status` polling anywhere. A stock can halt while held, and a -0.5%
 stop is not a promise about execution: if it reopens at -3% the stop fills
@@ -65,7 +65,7 @@ Alpaca's asset model carries a tradable/status flag; LULD band data is not on
 this plan. Note this interacts with R2 - halts cluster in exactly the thin
 names the liquidity cap would already be sizing down.
 
-## R4. Position/exposure reconciliation — TIER 2
+## R4. Position/exposure reconciliation — SHIPPED 2026-09-02
 
 **Not on the original list; added because the evidence for it is already in.**
 The bot's idea of what it holds and the broker's have diverged twice: phantom
@@ -76,6 +76,27 @@ its own specific case.
 A periodic hard reconcile - broker is truth, bot adjusts, ALERT on any
 mismatch - catches the whole class rather than the instances. It is cheap:
 `get_positions()` is already fetched every poll for the exposure snapshot.
+
+## R3b. Halt detection — WHAT IS STILL MISSING
+
+Entry refusal shipped. Two halves did NOT:
+
+  - **A held position that halts.** No alert fires. The right response (wait
+    for the reopen, or close into it) is a human decision the bot should not
+    guess at, so this wants an alert rather than an automatic action.
+  - **LULD bands.** Not available on this plan. A halt is detectable; the
+    price bounds it will reopen within are not. So position sizing remains the
+    only real defence against a gap, which is what R2 is for.
+
+## R4b. Reconciliation — REPORTS ONLY, BY DESIGN
+
+Shipped as report-and-alert, never repair. The right repair differs by cause:
+a phantom should be dropped, a partial resized, an unexpected short never
+silently adopted. Automatic repair would also destroy the evidence of what
+caused the divergence, which this codebase has needed every time.
+
+Revisit only if the alert fires repeatedly for the same cause - at that point
+the cause is known and a targeted repair is safe.
 
 ## R5. §475(f) mark-to-market election — TIER 3, NOT CODE
 
@@ -123,7 +144,7 @@ session*, not by how interesting the work is.
 | # | Item | Why it ranks here | Blocked on |
 |---|---|---|---|
 | 1 | **Notification keys on the Droplet** | Every alert is built and wired, and none can deliver until Pushover/Resend keys exist. A silent 09:38 loss-limit day happens again otherwise. | Signup + two env vars. No code. |
-| 2 | **Fee modelling in replay/grid (R1)** | Every config comparison those tools produce is currently optimistic in the same direction, and biased toward configs that trade more. | Nothing. |
+| 2 | **Passive-limit entry experiment** | Entries are marketable limits now; the passive version could improve fills and LOWER P&L by missing the fastest movers. `ops/fill-rate.py` measures which. | One week on one config. |
 | 3 | **Chop detection / retire `breadth_halt`** | 2026-08-28's shape (19 of 30 peaked under +0.5%, −$484) is unhandled. Folding it in as a 4th regime label inherits cadence, hysteresis and bearish-exit machinery already built. | Decision on retiring `breadth_halt`. |
 | 4 | **Dead-process watchdog** | The bot not running at 09:25 is still completely silent. A dead process cannot alert about itself. | A cron on the Droplet. |
 | 5 | **Milestone stop recalculation** | `DynamicStops.should_recalculate` exists and nothing calls it — stops are set at entry and never move as a position improves. | Touches `TradeManager`. |

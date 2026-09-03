@@ -208,7 +208,72 @@ def replay_one(path, cfg):
     return realized, reason, used
 
 
-def replay_all(trades, cfg):
+# --------------------------------------------------------------------------
+# execution cost
+# --------------------------------------------------------------------------
+
+# Alpaca charges no commission, which is not the same as costing nothing.
+# These are the pass-through regulatory fees, charged on SELLS only:
+#
+#   SEC Section 31 fee - a rate per DOLLAR of sale proceeds
+#   FINRA TAF          - a rate per SHARE sold, capped per trade
+#
+# Rates change (the SEC rate is reset annually), so they live in config rather
+# than here. Defaults are the 2025-2026 figures.
+#
+# WHY THIS MATTERS MORE THAN ITS SIZE. Per trade this is cents. But replay and
+# grid compare CONFIGS, and the configs being compared differ mainly in HOW
+# MANY TRADES THEY TAKE - a wider stop holds longer and trades less, a tighter
+# take-profit tier cycles more. Modelling zero cost makes every cell optimistic
+# by an amount proportional to its trade count, which systematically flatters
+# the configs that trade most. That is a bias in the comparison, not a rounding
+# error in the total.
+DEFAULT_COSTS = {
+    "sec_fee_per_dollar": 0.0000278,
+    "finra_taf_per_share": 0.000166,
+    "finra_taf_cap": 8.30,
+    "extra_per_share": 0.0,      # for a broker that does charge commission
+    "extra_per_trade": 0.0,
+}
+
+
+def costs_from_config(path="config.yaml"):
+    """The `trading.execution_costs` block, or the defaults."""
+    out = dict(DEFAULT_COSTS)
+    try:
+        import yaml
+        with open(path) as fh:
+            cfg = ((yaml.safe_load(fh) or {}).get("trading") or {}).get("execution_costs") or {}
+        for k in out:
+            if k in cfg:
+                out[k] = float(cfg[k])
+    except Exception:
+        pass
+    return out
+
+
+def round_trip_cost(entry_px, exit_px, qty, costs):
+    """
+    Dollar cost of one complete round trip, or 0.0 when it cannot be computed.
+
+    Charged on the SELL side only, which is where these fees actually land -
+    modelling them on both sides would roughly double a number whose whole
+    purpose is to be accurate about a small quantity.
+    """
+    try:
+        qty = abs(float(qty or 0))
+        exit_px = abs(float(exit_px or 0))
+        if qty <= 0 or exit_px <= 0:
+            return 0.0
+        proceeds = qty * exit_px
+        sec = proceeds * costs["sec_fee_per_dollar"]
+        taf = min(qty * costs["finra_taf_per_share"], costs["finra_taf_cap"])
+        return sec + taf + qty * costs["extra_per_share"] + costs["extra_per_trade"]
+    except (TypeError, ValueError, KeyError):
+        return 0.0
+
+
+def replay_all(trades, cfg, costs=None):
     """Per-trade replayed results plus the aggregate."""
     rows = []
     for t in trades:
@@ -216,7 +281,17 @@ def replay_all(trades, cfg):
         entry_px = num(t["ctx"].get("entry_price"))
         qty = num(t["ctx"].get("position_size"))
         pnl = (entry_px * qty * gain / 100.0) if (entry_px and qty) else None
+        # GROSS is what the exit rule produced; NET is what would have reached
+        # the account. Both are kept, and reported separately, so the size of
+        # the cost is visible rather than silently folded into the result.
+        fees = 0.0
+        if costs and entry_px and qty:
+            exit_px = entry_px * (1 + (gain or 0) / 100.0)
+            fees = round_trip_cost(entry_px, exit_px, qty, costs)
+        net = (pnl - fees) if pnl is not None else None
         rows.append({
+            "fees": fees,
+            "net_pnl": net,
             "trade_id": t["ctx"].get("trade_id"),
             "symbol": t["ctx"].get("symbol"),
             "date": t["ctx"].get("date"),
@@ -324,6 +399,12 @@ def main():
     ap.add_argument("--be", help="trigger/floor, e.g. 0.5/0.15, or 'none'")
     ap.add_argument("--tp", help="gain:fraction pairs, e.g. 0.75:0.4,1.0:0.3,1.25:1.0")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--no-costs", action="store_true",
+                    help="model zero execution cost (the pre-2026-09-02 behaviour). "
+                         "Only useful for reproducing an old result - a comparison "
+                         "between configs of different trade FREQUENCY is biased "
+                         "without costs.")
+
     args = ap.parse_args()
 
     syms = ({s.strip().upper() for s in args.symbols.split(",")} if args.symbols else None)
@@ -345,11 +426,14 @@ def main():
     if args.tp is not None:
         cfg.tiers = parse_tiers(args.tp)
 
-    rows = replay_all(trades, cfg)
+    costs = None if args.no_costs else costs_from_config()
+    rows = replay_all(trades, cfg, costs=costs)
     s = summarize(rows)
+    s_net = summarize(rows, key="net_pnl") if costs else None
 
     if args.json:
-        print(json.dumps({"config": cfg.label(), "summary": s, "trades": rows},
+        print(json.dumps({"config": cfg.label(), "summary": s,
+                          "summary_net": s_net, "trades": rows},
                           indent=2, default=str))
         return
 
@@ -358,6 +442,15 @@ def main():
     if s["total"] is not None:
         print(f"total ${s['total']:+,.2f}   mean ${s['mean']:+,.2f}/trade   "
               f"win rate {100 * s['win_rate']:.0f}%")
+    if s_net and s_net["total"] is not None:
+        fees = sum(r.get("fees") or 0 for r in rows)
+        # Printed as its own line rather than folded into the total, because
+        # the size of the cost relative to the edge is the thing worth seeing.
+        # A $0.30/trade cost against a $2/trade edge is noise; against a
+        # $0.40/trade edge it is most of the strategy.
+        print(f"NET of fees: total ${s_net['total']:+,.2f}   "
+              f"mean ${s_net['mean']:+,.2f}/trade   "
+              f"(execution cost ${fees:,.2f}, ${fees / max(1, s['n']):.3f}/trade)")
     if s["ci_low"] is not None:
         print(f"95% interval on the mean: ${s['ci_low']:+,.2f} to ${s['ci_high']:+,.2f}")
         if s["n"] < 200:

@@ -277,6 +277,39 @@ class AlpacaBroker:
             logger.debug(f"Could not fetch quote for {symbol}: {e}")
             return None
 
+    def is_symbol_tradable(self, symbol):
+        """
+        (tradable, reason). None for tradable means "could not tell".
+
+        Alpaca's asset record carries `tradable` and `status`, and both go
+        false while a symbol is halted, suspended or delisted. This is the
+        cheapest halt signal available on this plan - LULD band data is not
+        included, so a halt is detectable but its price bounds are not.
+
+        Returns None rather than False when the lookup fails. A network blip
+        is not evidence of a halt, and treating it as one would silently stop
+        trading the entire watchlist the first time the endpoint hiccups.
+        """
+        try:
+            from alpaca.trading.requests import GetAssetRequest  # noqa: F401
+            asset = self.trading_client.get_asset(symbol)
+        except Exception as e:
+            logger.debug(f"Could not read asset status for {symbol}: {e}")
+            return None, "asset lookup failed"
+
+        try:
+            tradable = bool(getattr(asset, "tradable", False))
+            status = getattr(asset, "status", None)
+            status_name = getattr(status, "value", status)
+            if not tradable:
+                return False, f"asset is not tradable (status={status_name})"
+            if status_name and str(status_name).lower() != "active":
+                return False, f"asset status is {status_name}, not active"
+            return True, None
+        except Exception as e:
+            logger.debug(f"Could not interpret asset status for {symbol}: {e}")
+            return None, "asset status unreadable"
+
     def get_latest_bars(self, symbols, timeframe="1Min"):
         """Get the latest bar for symbols (useful for real-time checks)"""
         try:

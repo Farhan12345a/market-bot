@@ -492,6 +492,60 @@ class Executor:
         except (TypeError, ValueError):
             self._order_times.append((time.monotonic(), 0.0))
 
+    def reconcile_against_broker(self, tracked_symbols):
+        """
+        (mismatches, detail) - what the bot thinks it holds vs what the broker
+        actually holds. The BROKER IS TRUTH; this reports, it does not repair.
+
+        WHY THIS EXISTS AS ITS OWN THING. The bot's view and the broker's have
+        already diverged twice, in two different ways: phantom positions (the
+        entry recorded at SUBMIT, never filled - 2026-09-01 and 2026-09-02) and
+        partial fills (AI tracked at 400 while the broker held 152; OLLI 109 vs
+        14). Each was caught by a guard written afterwards for that specific
+        case, at the specific moment it happened to matter.
+
+        A periodic reconcile catches the CLASS rather than the instances,
+        including the next one nobody has thought of. It is nearly free -
+        get_positions() is already fetched every poll for the exposure
+        snapshot.
+
+        Reports rather than repairs on purpose. The right repair differs by
+        cause: a phantom should be dropped, a partial should be resized, an
+        unexpected short must never be silently adopted. Silently "fixing" a
+        divergence would also destroy the evidence of what caused it, and this
+        codebase has needed that evidence every time.
+        """
+        out = []
+        try:
+            live = self.broker.get_positions() or {}
+        except Exception as e:
+            logger.debug(f"reconcile skipped - could not fetch positions ({e})")
+            return [], "broker unavailable"
+
+        live_qty = {}
+        for sym, pos in (live.items() if isinstance(live, dict) else []):
+            try:
+                live_qty[sym] = int(float(getattr(pos, "qty", 0) or 0))
+            except (TypeError, ValueError):
+                continue
+
+        tracked = set(tracked_symbols or [])
+        for sym in sorted(tracked | set(live_qty)):
+            held = live_qty.get(sym, 0)
+            if sym in tracked and held == 0:
+                out.append((sym, "tracked but the broker holds NOTHING (phantom)"))
+            elif sym not in tracked and held != 0:
+                out.append((sym, f"broker holds {held} but the bot is not tracking it"))
+            elif held < 0:
+                out.append((sym, f"SHORT position of {held} - this bot never opens shorts"))
+
+        if out:
+            logger.warning(
+                f"RECONCILE: {len(out)} mismatch(es) between tracking and the broker - "
+                + "; ".join(f"{s}: {w}" for s, w in out)
+            )
+        return out, None
+
     def rate_limit_check(self, qty=None, price=None):
         """
         (ok, reason) for PRE-TRADE rate controls. Never raises.
@@ -720,8 +774,56 @@ class Executor:
         rather than an exception that could be caught too late or in the
         wrong place.
         """
+        # MARKETABLE LIMIT ENTRY - a limit placed ABOVE the reference price.
+        #
+        # The distinction that decides whether this is safe: a PASSIVE limit
+        # (at or below the ask) may never fill, and this strategy buys into a
+        # RISING price - "up 0.3% in 3 minutes" - so the orders that failed to
+        # fill would be exactly the fastest movers, plausibly the best trades.
+        # That version needs a measured fill rate first (ops/fill-rate.py).
+        #
+        # This is the other one. A limit placed slippage_pct ABOVE the
+        # reference still crosses the spread, so it fills immediately in any
+        # normal book, exactly like the market order it replaces. What it
+        # cannot do is fill arbitrarily far away.
+        #
+        # So the trade-off is not "better price vs. missed trades". It is
+        # identical behaviour except the disaster fills are refused - the
+        # 2026-09-02 OLLI entry that filled +0.91% past its signal price, or
+        # NOW at +0.45%. The entries it does miss are the ones where price ran
+        # past the band between decision and arrival, which are precisely the
+        # ones worth missing: the move already happened.
+        limit_px = None
+        ecfg = (self.config.get("trading") or {}).get("marketable_limit_entries") or {}
+        if ecfg.get("enabled") and price:
+            try:
+                band = float(ecfg.get("slippage_pct", 0.25)) / 100.0
+                limit_px = round(float(price) * (1 + band), 2)
+            except (TypeError, ValueError) as e:
+                logger.debug(f"{symbol}: entry limit price unavailable ({e}) - using market")
+                limit_px = None
+
         try:
-            order = self.broker.submit_market_order(symbol, qty, side="buy")
+            order = None
+            if limit_px:
+                try:
+                    order = self.broker.submit_limit_order(symbol, qty, limit_px, side="buy")
+                    logger.info(
+                        f"{symbol}: entry routed as a MARKETABLE LIMIT at {limit_px} "
+                        f"({ecfg.get('slippage_pct', 0.25)}% above {price}) - crosses the "
+                        f"spread like a market order but refuses a fill further away"
+                    )
+                except Exception as e:
+                    # Unlike an exit, an entry not taken is a missed
+                    # opportunity rather than an unmanaged risk - so this warns
+                    # and falls back rather than treating it as an alarm.
+                    logger.warning(
+                        f"{symbol}: marketable-limit entry could not be submitted "
+                        f"({type(e).__name__}: {e}) - falling back to a market order"
+                    )
+                    order = None
+            if order is None:
+                order = self.broker.submit_market_order(symbol, qty, side="buy")
         except Exception as e:
             logger.error(f"Failed to submit entry order for {symbol}: {e}")
             return None
@@ -759,6 +861,13 @@ class Executor:
         self._entry_recorded_at[symbol] = time.monotonic()
         self._count_entry_attempt(symbol)
         self._note_order_submitted(qty, price)
+        # Routing and reference price, so "did limit entries fill, and at what
+        # price" is answerable from the record rather than by rerunning the
+        # session. This is the measurement that unblocks the PASSIVE version.
+        meta = self.entry_meta.setdefault(symbol, {})
+        meta["entry_route"] = "limit" if limit_px else "market"
+        meta["entry_limit_price"] = limit_px
+        meta["signal_price"] = meta.get("signal_price", price)
         # A NEW position gets a fresh marketable-limit budget. Deliberately
         # reset here and not on exit: this executor records a position as
         # closed the moment the exit ORDER is submitted, not when it fills, so
