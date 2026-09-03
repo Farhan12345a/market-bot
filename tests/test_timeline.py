@@ -255,6 +255,15 @@ if prev.returncode == 0:
         # at 59 SYMBOLS. Both fit a ~30 unique-symbol limit. The old model
         # spent half the budget on nothing.
         "stream_max_subscriptions": 14,
+        # -0.5 -> -0.7 on 2026-09-03. Exit-side (see CLAUDE.md's "NOT an entry
+        # change" list), so not subject to the one-variable-at-a-time rule
+        # below, but still recorded here rather than silently dropped from
+        # `same`. FIRST_EXIT was the most over-triggered stop-type exit that
+        # day (12 of 44 exits total) and post_exit_note scored 7 of those
+        # "bounced - exit was early" against only 3 "kept falling - exit was
+        # right" - the clearest and largest-sample skew of the three stop-type
+        # exits measured that day.
+        "first_exit_loss_pct": -0.7,
     }
     for k, want in changed.items():
         check(f"{k} deliberately changed to {want}", t.get(k) == want,
@@ -263,11 +272,11 @@ if prev.returncode == 0:
     same = ["entry_window_start", "rapid_increase_pct",
             "rapid_increase_max_pct", "rapid_increase_lookback_minutes",
             "max_concurrent_positions", "max_daily_entries",
-            "first_exit_loss_pct", "final_exit_loss_pct", "trailing_stop_pct",
+            "final_exit_loss_pct", "trailing_stop_pct",
             "breakeven_tiers", "use_resistance_exit",
             "use_breakeven_floor", "reentry_cooldown_minutes",
             "num_stocks_to_trade",
-            "max_stock_price", "use_continuation_score"]
+            "use_continuation_score"]
 
     # DELIBERATELY CHANGED THIS RUN, and listed here rather than quietly
     # removed from `same`. This guard's whole job is to make an entry-setting
@@ -280,14 +289,23 @@ if prev.returncode == 0:
         # stock_universe, which would have been a second entry change in the
         # same run. Costs breadth; judge it against next week's edge.
         "min_stock_price": (10, 20),
+        # 300 -> 400, raised the SAME day as min_stock_price rather than as a
+        # second, separate entry change - 300 was found to be accidentally
+        # excluding META and similar names above that price. Tracked together
+        # with min_stock_price as ONE variable, "universe price band 20-400" -
+        # see PENDING_WORK.md's "Active entry-variable measurement window".
+        "max_stock_price": (300, 400),
     }
     for k in same:
         check(f"{k} unchanged", old.get(k) == t.get(k), (old.get(k), t.get(k)))
     for k, (was, now) in deliberate.items():
         check(f"{k} changed DELIBERATELY {was} -> {now}, and only this one",
               old.get(k) == was and t.get(k) == now, (old.get(k), t.get(k)))
-    check("exactly one entry variable moved this run - two at once would make "
-          "neither attributable", len(deliberate) == 1, list(deliberate))
+    check("exactly one entry variable moved this run - min_stock_price and "
+          "max_stock_price count as ONE (the universe price band), moved "
+          "together on purpose; anything else at once would make neither "
+          "attributable",
+          set(deliberate) == {"min_stock_price", "max_stock_price"}, list(deliberate))
     check("stock_universe unchanged",
           sorted(old.get("stock_universe", [])) == sorted(t.get("stock_universe", [])),
           (len(old.get("stock_universe", [])), len(t.get("stock_universe", []))))

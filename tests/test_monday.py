@@ -41,7 +41,7 @@ check("...that same price was NOT a stop against the signal price",
       (99.40-100.0)/100.0*100 > -1.0)
 st3,t3 = mk(100.0)
 st3.correct_entry_price("Z", 100.42)
-check("first exit measures from the fill", t3.check_first_exit(99.85)>0, t3.check_first_exit(99.85))
+check("first exit measures from the fill", t3.check_first_exit(99.62)>0, t3.check_first_exit(99.62))
 check("first exit does not fire above it", t3.check_first_exit(100.10)==0)
 
 print("\n=== C. REBASE SAFETY ===")

@@ -235,7 +235,7 @@ check("disabled -> static stop, whatever the history says",
 # so it needs no trade history. The cap at final_exit_loss_pct is what makes
 # turning it on bounded: the worst case is exactly the previous behaviour.
 check("it IS now wired into the live entry path",
-      "_dynamic_exit_config(config, symbol, _exit_cfg)" in msrc
+      "_resolved_exit_cfg = _dynamic_exit_config(" in msrc
       and "_DYNAMIC_STOPS[\"engine\"] = _build_dynamic_stops" in msrc)
 check("...and shipped enabled",
       (CFG["trading"].get("dynamic_stops") or {}).get("enabled") is True)

@@ -155,7 +155,10 @@ def mult_at(loss_usd, equity=100000.0, cfg=None):
 
 
 limit = ex().daily_loss_limit_usd()
-check(f"the computed limit at $100k equity is ${limit:,.0f}", limit == 1000, limit)
+_dll = CFG["trading"]["daily_loss_limit"]
+_expected_limit = max(_dll["floor_usd"],
+                      min(_dll["ceiling_usd"], 100000.0 * _dll["pct_of_equity"] / 100.0))
+check(f"the computed limit at $100k equity is ${limit:,.0f}", limit == _expected_limit, limit)
 check("a green day is untouched", mult_at(-50.0) == 1.0)
 check("flat is untouched", mult_at(0.0) == 1.0)
 check("a shallow loss is untouched", mult_at(limit * 0.25) == 1.0)

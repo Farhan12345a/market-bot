@@ -71,7 +71,13 @@ class ResendSender(Sender):
             return False
         return True
 
-    def send(self, subject, text, html=None) -> bool:
+    def send(self, subject, text, html=None, attachments=None) -> bool:
+        """
+        `attachments`, if given, is a list of {"filename": str, "content": bytes}.
+        Base64-encoded here per Resend's API - callers hand over raw bytes so
+        they never have to think about the wire format themselves.
+        """
+        import base64
         import requests
 
         payload = {
@@ -80,6 +86,14 @@ class ResendSender(Sender):
             "subject": subject,
             "html": html or f"<pre>{text}</pre>",
         }
+        if attachments:
+            payload["attachments"] = [
+                {
+                    "filename": a["filename"],
+                    "content": base64.b64encode(a["content"]).decode("ascii"),
+                }
+                for a in attachments
+            ]
         try:
             resp = requests.post(
                 self.ENDPOINT,

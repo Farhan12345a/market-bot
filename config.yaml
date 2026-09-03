@@ -701,7 +701,13 @@ trading:
   # live): final_exit > first_exit > momentum_fade > resistance > trailing_stop
   # > time_stop. The first one that fires wins for that pass.
   final_exit_loss_pct: -1.0    # Hard stop: sell ALL remaining shares if price falls this much from entry (%)
-  first_exit_loss_pct: -0.5    # Scale-out: sell first_exit_pct of the position if price falls this much from entry (%)
+  first_exit_loss_pct: -0.7    # Scale-out: sell first_exit_pct of the position if price falls this much from entry (%)
+                                # Widened from -0.5 on 2026-09-03 - FIRST_EXIT was the most-triggered
+                                # stop-type exit that day (12 of 44) and post_exit_note scored 7 of
+                                # those "bounced - exit was early" vs only 3 "kept falling - exit was
+                                # right". Changed alone (not breakeven_stop_pct/trailing_stop_pct, both
+                                # of which showed a similar but smaller skew on a much thinner sample)
+                                # so any effect is attributable to this one change.
   first_exit_pct: 0.33         # Fraction of the original position sold on the first_exit_loss_pct trigger above
   # Raised 0.75 -> 1.35 on 2026-08-24 at the user's request. NOTE THE
   # COUNTER-EVIDENCE, recorded here so it is easy to revert: a wider trail goes
@@ -1351,14 +1357,19 @@ trading:
   # max_daily_loss_usd rather than to no limit.
   daily_loss_limit:
     mode: percent_of_equity
-    # 1.0% while PAPER TESTING, so the limit lands at $1,000 on the current
-    # ~$100k paper balance and the session is not cut short while features are
-    # still being evaluated. Drop to 0.75 before real money - that is the
-    # number actually intended for live risk, and 1.0% is a testing
-    # convenience, not a considered risk tolerance.
-    pct_of_equity: 1.0
+    # Raised 1.0 -> 1.7% on 2026-09-03 at the user's request: cumulative
+    # notional traded that day was only ~53.5% of equity (risk-parity sizing
+    # ties position size to the RISK budget, not free capital - see
+    # _position_size in main.py), and 1.7% targets roughly 90% instead.
+    # ceiling_usd raised in the SAME change and by the SAME ratio (1.7x) -
+    # sizing reads pct_of_equity raw/uncapped, but this circuit breaker is
+    # clamped to ceiling_usd, so raising one without the other would let
+    # risk_per_trade x concurrent_positions exceed the actual daily loss
+    # limit, breaking the property that "everything stopping out at once
+    # lands the account at roughly its limit, not through it".
+    pct_of_equity: 1.7
     floor_usd: 500
-    ceiling_usd: 1000     # raise DELIBERATELY, never automatically
+    ceiling_usd: 1600     # raise DELIBERATELY, never automatically
 
   # ---------------------------------------------------------------------
   # Correlation limiter (added 2026-09-02) - PENDING_WORK backlog item 1

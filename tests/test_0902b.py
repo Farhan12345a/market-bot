@@ -221,7 +221,7 @@ check("disabled -> static, unchanged",
       DynamicStops(off, atr_by_symbol={"W": 3.0}).stop_for("W", 0.0)[0] == static)
 check("it is ON in the shipped config", CFG["trading"]["dynamic_stops"]["enabled"] is True)
 check("wired at screener completion", "_DYNAMIC_STOPS[\"engine\"] = _build_dynamic_stops" in msrc)
-check("...and applied at entry", "_dynamic_exit_config(config, symbol, _exit_cfg)" in msrc)
+check("...and applied at entry", "_resolved_exit_cfg = _dynamic_exit_config(" in msrc)
 
 # ===================================================================
 print("\n=== 6. VOLATILITY SIZING: equal dollar swing, scaled DOWN only ===")
@@ -455,11 +455,25 @@ dll = CFG["trading"]["daily_loss_limit"]
 def limit_at(equity, cfg=None):
     e = Executor.__new__(Executor)
     e.config = cfg or CFG; e._equity = equity; e._logged_loss_limit = None
+    # daily_loss_limit_usd() also reads these now (the P&L line on its log,
+    # and the once-per-~10min throttle) - a bare __new__() stub must set them
+    # too, or the AttributeError is swallowed by the function's own
+    # fail-safe except and silently returns the WRONG (static fallback)
+    # number instead of raising where the mistake would be obvious.
+    e._realized_pnl_today = 0.0
+    e._unrealized_pl_cached = 0.0
+    e._last_loss_limit_log_at = 0.0
     return e.daily_loss_limit_usd()
 
 
-check("$50k -> the floor", limit_at(50000) == dll["floor_usd"], limit_at(50000))
-check("$100k -> 1.0% = $1,000", abs(limit_at(100000) - 1000) < 1, limit_at(100000))
+_pct = dll["pct_of_equity"] / 100.0
+_below_floor_equity = dll["floor_usd"] / _pct * 0.5      # comfortably under the floor
+_mid_band_equity = (dll["floor_usd"] + dll["ceiling_usd"]) / 2 / _pct  # lands strictly between
+
+check("comfortably under the floor -> the floor",
+      limit_at(_below_floor_equity) == dll["floor_usd"], limit_at(_below_floor_equity))
+check("mid-band equity -> the raw percentage, not clamped",
+      abs(limit_at(_mid_band_equity) - _mid_band_equity * _pct) < 1, limit_at(_mid_band_equity))
 check("$200k -> CAPPED at the ceiling, does not double",
       limit_at(200000) == dll["ceiling_usd"], limit_at(200000))
 check("$500k -> still the ceiling. The account growing never authorises "

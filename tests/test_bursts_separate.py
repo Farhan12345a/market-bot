@@ -85,7 +85,7 @@ class Exec:
     def reentry_cooldown_remaining(s, sym): return 0.0
     def pre_entry_check(s, qty, price, symbol=None, is_opening_burst=False): return True, None
     def submit_entry_order(s, sym, qty, price, entry_method=None, entry_rsi=None,
-                           spread_pct=None):
+                           spread_pct=None, is_opening_burst=False):
         s.orders.append(sym)
         return types.SimpleNamespace(id=f"o{len(s.orders)}")
     def record_entry_meta(s, *a, **k): pass

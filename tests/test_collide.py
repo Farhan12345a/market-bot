@@ -38,8 +38,8 @@ for p in [0.6, 0.02]:
     if r: fired2=(p,r["reason"]); st.confirm_exit("Z",r["qty"],r["reason"],px(p))
 check("armed position exits at BREAKEVEN_STOP, not -0.5%/-1.0%", fired2[1]=="BREAKEVEN_STOP", fired2)
 st,t=mk()
-r=st.check_exit("Z",{"close":px(-0.6)})
-check("UNARMED position still takes the -0.5% first exit", r["reason"]=="FIRST_EXIT_-0.5%", r)
+r=st.check_exit("Z",{"close":px(-0.8)})
+check("UNARMED position still takes the first exit", r["reason"]==f"FIRST_EXIT_{CFG['trading']['first_exit_loss_pct']}%", r)
 st,t=mk(); t.highest_since_entry=px(0.8)
 r=st.check_exit("Z",{"close":px(-1.5)})
 # CHANGED 2026-09-02: a gap this size is now claimed by GAP_EXIT, which is

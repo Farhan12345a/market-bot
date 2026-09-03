@@ -107,11 +107,12 @@ check("position closed at the end", "SIM" not in st.trades)
 st2=Strategy(copy.deepcopy(C)); t2=TradeManager("LOSS",100.0,300,copy.deepcopy(C))
 st2.trades["LOSS"]=t2; t2.price_history=[100.0]*T["momentum_fade_window_samples"]
 fired2=[]
-for pxx in [99.45, 98.90]:   # -0.55% then -1.10%: past each stop, not on it
+for pxx in [99.2, 98.90]:   # past the first exit then past the final exit, not on either
     r=st2.check_exit("LOSS",{"close":pxx})
     if r:
         fired2.append(r["reason"]); st2.confirm_exit("LOSS",r["qty"],r["reason"],pxx)
-check("a loser takes both stops", fired2==["FIRST_EXIT_-0.5%","FINAL_EXIT_-1.0%"], fired2)
+check("a loser takes both stops",
+      fired2==[f"FIRST_EXIT_{T['first_exit_loss_pct']}%", "FINAL_EXIT_-1.0%"], fired2)
 check("loser fully closed", "LOSS" not in st2.trades)
 
 print("\n=== 6. REPORT RENDERS WITH THE REAL CONFIG ===")

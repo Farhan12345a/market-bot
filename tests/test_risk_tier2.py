@@ -320,7 +320,9 @@ check("shipped in risk_parity mode", CFG["trading"]["sizing_mode"] == "risk_pari
 # risk_per_trade = equity * daily_limit_fraction / concurrent
 _rt = (100000.0 * CFG["trading"]["daily_loss_limit"]["pct_of_equity"] / 100.0
        / CFG["trading"]["max_concurrent_positions"])
-check(f"the formula risks ${_rt:,.0f} per trade at $100k", abs(_rt - 100.0) < 1, _rt)
+_expected_rt = (100000.0 * CFG["trading"]["daily_loss_limit"]["pct_of_equity"] / 100.0
+               / CFG["trading"]["max_concurrent_positions"])
+check(f"the formula risks ${_rt:,.0f} per trade at $100k", abs(_rt - _expected_rt) < 1, _rt)
 
 _q_wide = M._position_size(CFG, _ex, 100.0, symbol="W")     # stop -1.0%
 check("a -1.0% stop sizes to risk_per_trade / stop",

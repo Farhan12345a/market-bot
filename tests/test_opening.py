@@ -47,7 +47,7 @@ class Exec:
     def reentry_cooldown_remaining(self, s): return self._cooldown
     def pre_entry_check(self, qty, price, symbol=None, is_opening_burst=False): return True, ""
     def submit_entry_order(self, s, qty, price, entry_method=None, entry_rsi=None,
-                           spread_pct=None):
+                           spread_pct=None, is_opening_burst=False):
         self.orders.append({"symbol": s, "qty": qty, "price": price, "method": entry_method})
         return {"id": len(self.orders)}
     def refresh_account_snapshot(self): pass
@@ -399,7 +399,7 @@ from src.strategy.strategy import Strategy, TradeManager
 oc = M._opening_exit_config(CFG)
 check("an exits block produces an override config", oc is not None)
 n_, o_ = CFG["trading"], oc["trading"]
-check("first exit is tighter", o_["first_exit_loss_pct"] == -0.3 and n_["first_exit_loss_pct"] == -0.5)
+check("first exit is tighter", o_["first_exit_loss_pct"] == -0.3 and n_["first_exit_loss_pct"] == -0.7)
 check("final exit is tighter", o_["final_exit_loss_pct"] == -0.35 and n_["final_exit_loss_pct"] == -1.0)
 check("trailing stop is tighter", o_["trailing_stop_pct"] == 0.40 and n_["trailing_stop_pct"] == 0.75)
 # 0.5/0.75/1.0 -> 0.75/1.0/1.25 for 2026-09-01.
@@ -452,7 +452,7 @@ check("...and it does NOT exit while still above the floor",
 for k in ("use_resistance_exit", "momentum_fade_window_minutes", "use_breakeven_floor",
           "max_stock_price", "min_stock_price", "use_take_profit"):
     check(f"inherits {k} unchanged", o_[k] == n_[k], (o_[k], n_[k]))
-check("the live config is not mutated", CFG["trading"]["first_exit_loss_pct"] == -0.5)
+check("the live config is not mutated", CFG["trading"]["first_exit_loss_pct"] == -0.7)
 check("no exits block -> no override",
       M._opening_exit_config({"trading": {"opening_burst": {"enabled": True}}}) is None)
 
@@ -492,7 +492,7 @@ n2 = EmailNotifier.__new__(EmailNotifier)
 n2.run_context = {"opening_exits": rows}
 html = n2._opening_exit_profile_html()
 check("renders into the report", "-0.3%" in html and "0.4%" in html, html[:200])
-check("shows the normal side for comparison", "-0.5%" in html and "0.75%" in html)
+check("shows the normal side for comparison", "-0.7%" in html and "0.75%" in html)
 n3 = EmailNotifier.__new__(EmailNotifier)
 n3.run_context = {}
 check("no profile -> nothing rendered", n3._opening_exit_profile_html() == "")
@@ -688,7 +688,7 @@ check("...but a recovery inside the window still qualifies", len(e5.orders) == 1
 # (f) Broker rejects the order - no phantom position.
 class RejectExec(Exec):
     def submit_entry_order(self, s, qty, price, entry_method=None, entry_rsi=None,
-                           spread_pct=None):
+                           spread_pct=None, is_opening_burst=False):
         return None
 st6 = {"baseline": {}, "taken": [], "done": False}
 md6 = MD({"AAA": [100.0, 102.0]})
@@ -709,7 +709,7 @@ px = 100.0 * (1 - 0.004)
 check("-0.4% exits a BURST position", tight.check_first_exit(px) > 0)
 check("-0.4% does NOT exit a NORMAL position", loose.check_first_exit(px) == 0)
 check("the session config is not mutated by building the profile",
-      CFG["trading"]["first_exit_loss_pct"] == -0.5)
+      CFG["trading"]["first_exit_loss_pct"] == -0.7)
 
 # (h) Disabled is inert.
 off = copy.deepcopy(CFG); off["trading"]["opening_burst"]["enabled"] = False
