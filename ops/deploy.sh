@@ -193,6 +193,14 @@ else:
     show("regime sizing", "OFF")
     show("breadth_halt", "ENABLED - hard stop" if (t.get("breadth_halt") or {}).get("enabled") else "OFF")
 
+dll = t.get("daily_loss_limit") or {}
+if (dll.get("mode") or "fixed") == "percent_of_equity":
+    show("daily loss limit",
+         f"{dll.get('pct_of_equity')}% of equity, floor ${dll.get('floor_usd'):,.0f} / "
+         f"ceiling ${dll.get('ceiling_usd'):,.0f}")
+else:
+    show("daily loss limit", f"fixed ${t.get('max_daily_loss_usd'):,.0f}")
+
 cl = t.get("correlation_limit") or {}
 show("correlation limiter",
      f"r>={cl.get('threshold')} over {cl.get('min_samples')} samples, "

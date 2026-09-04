@@ -173,7 +173,16 @@ check("push summary omits open line when flat", "still open" not in txt2, txt2)
 
 print("\n=== I. send_report BEHAVIOUR ===")
 tf=os.path.join(tmp,"trades.json"); json.dump(closed, open(tf,"w"))
-en2=EmailNotifier(cfg)
+# "No channels" must hold regardless of the shell's environment, not just
+# because RESEND_API_KEY/PUSHOVER_TOKEN happen to be unset wherever this
+# runs. Explicit > incidental - a real key exported in the CI/deploy shell
+# (exactly what happens when this is run right after sourcing
+# /etc/market-bot.env to test notifications) would otherwise make Resend
+# "available" and break every assertion below that this section is built on.
+cfg_no_channels = copy.deepcopy(cfg)
+for _chan in ("resend", "pushover", "email"):
+    cfg_no_channels.setdefault("notifications", {}).setdefault(_chan, {})["enabled"] = False
+en2=EmailNotifier(cfg_no_channels)
 r=en2.send_report(trades_file=tf, label="Midday Status", open_positions=open_rows)
 check("no channels -> returns False but still saves", r is False)
 saved=[f for f in os.listdir(tmp) if f.startswith("trading-report")]
@@ -217,6 +226,10 @@ check("push combined is realized+unrealized", "+109.00" in t3, t3)
 print("\n=== K. MALFORMED TRADES FILE (2026-08-21 regression) ===")
 import json as _json
 bad_dir=tempfile.mkdtemp(); bcfg=copy.deepcopy(CFG); bcfg["notifications"]["report_dir"]=bad_dir
+# Same reasoning as section I: force no channels explicitly rather than
+# relying on the shell's environment happening to lack real API keys.
+for _chan in ("resend", "pushover", "email"):
+    bcfg.setdefault("notifications", {}).setdefault(_chan, {})["enabled"] = False
 enb=EmailNotifier(bcfg)
 badf=os.path.join(bad_dir,"trades.json")
 open(badf,"w").write('[\n {"symbol":"A",\n  "pl": ,\n }\n]')   # the shape that killed 10:35
