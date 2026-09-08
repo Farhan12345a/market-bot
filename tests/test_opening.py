@@ -85,7 +85,7 @@ def at(hhmm, sec=0):
 
 
 def run(c, md, strat, ex, symbols, state, when, journal=None):
-    return M._run_opening_burst(c, md, strat, ex, symbols, {}, state, when, ET,
+    return M._run_opening_move_exp(c, md, strat, ex, symbols, {}, state, when, ET,
                                 signal_journal=journal)
 
 
@@ -94,10 +94,14 @@ ob = CFG["trading"]["opening_burst"]
 check("enabled for tomorrow", ob["enabled"] is True)
 check("baseline is the bell", ob["baseline_time"] == "09:30")
 check("decides by 09:33", ob["decide_by"] == "09:33")
-check("has its OWN position budget", ob["max_positions"] == 7, ob["max_positions"])
-check("budget leaves room for the normal session",
-      ob["max_positions"] < CFG["trading"]["max_concurrent_positions"], ob["max_positions"])
-check("half size", ob["size_multiplier"] == 0.5)
+check("has its OWN position budget", ob["max_positions"] == 14, ob["max_positions"])
+# 2026-09-08: the budget now EXCEEDS max_concurrent_positions on purpose - it
+# is exempted from that cap in Executor.pre_entry_check, and a full burst can
+# leave the normal session with zero capacity until positions close. See the
+# comment on opening_burst.max_positions in config.yaml.
+check("budget is now allowed to exceed the normal session's concurrent cap",
+      ob["max_positions"] >= CFG["trading"]["max_concurrent_positions"], ob["max_positions"])
+check("size_multiplier nudged up from half size", ob["size_multiplier"] == 0.6)
 check("streamed only", ob["streamed_only"] is True)
 # There is deliberately no skip_continuation_score flag: the mode never
 # consults the score at all, and a flag nothing reads is worse than no flag.
@@ -381,9 +385,11 @@ print("\n=== 16. TOMORROW'S SETTINGS ===")
 check("a threshold is set", _ob["min_move_pct"] > 0, _ob["min_move_pct"])
 check("threshold clears the median spread (0.126% on 2026-08-26) by 2x+",
       _ob["min_move_pct"] > 0.126 * 2, _ob["min_move_pct"])
-check("7 of the 10 concurrent slots", _ob["max_positions"] == 7)
-check("3 slots left for the normal session",
-      CFG["trading"]["max_concurrent_positions"] - _ob["max_positions"] == 3)
+check("14 of the 10 concurrent slots - deliberately over, exempted in "
+      "pre_entry_check", _ob["max_positions"] == 14)
+check("no slots guaranteed left for the normal session anymore - a full "
+      "burst can leave it at zero until positions close",
+      CFG["trading"]["max_concurrent_positions"] - _ob["max_positions"] <= 0)
 check("the ceiling does not apply", _ob["ignore_max_pct"] is True)
 check("the mode reads its OWN threshold, not rapid_increase_pct",
       "min_move_pct" in msrc and "ob.get(\"min_move_pct\"" in msrc)
@@ -660,13 +666,17 @@ check("a late stream still takes a baseline", "AAA" in st2["baseline"])
 run(c2, md2, s2, e2, ["AAA"], st2, at("09:31", 30))
 check("...and can still trade inside the window", len(e2.orders) >= 0)
 
-# (c) Every symbol qualifies - the budget must hold.
-many = {f"S{chr(65+i)}": [100.0, 103.0] for i in range(12)}
+# (c) Every symbol qualifies - the budget must hold. More symbols than
+# max_positions (14) on purpose, so the budget is what binds.
+many = {f"S{chr(65+i) if i < 26 else i}": [100.0, 103.0] for i in range(18)}
 st3, ex3, _ = scenario(many)
 check("a fully qualifying field stops at max_positions",
       len(ex3.orders) == CFG["trading"]["opening_burst"]["max_positions"], len(ex3.orders))
-check("...leaving slots for the normal session",
-      len(ex3.orders) < CFG["trading"]["max_concurrent_positions"])
+# 2026-09-08: the budget is now allowed to exceed max_concurrent_positions
+# (exempted in Executor.pre_entry_check) - a full burst can leave the normal
+# session with zero slots rather than a guaranteed few, which is accepted.
+check("...no longer guaranteed to leave slots for the normal session",
+      len(ex3.orders) >= CFG["trading"]["max_concurrent_positions"])
 
 # (d) Nothing qualifies - a threshold result, not a failure.
 st4, ex4, j4 = scenario({"AAA": [100.0, 100.05], "BBB": [50.0, 50.01]})
@@ -726,8 +736,8 @@ check("burst enabled", _o["enabled"] is True)
 check("window 09:30 -> 09:33",
       (_o["baseline_time"], _o["decide_by"]) == ("09:30", "09:33"))
 check("threshold 0.3%", _o["min_move_pct"] == 0.3, _o["min_move_pct"])
-check("7 positions at half size",
-      (_o["max_positions"], _o["size_multiplier"]) == (7, 0.5))
+check("14 positions at 0.6x size",
+      (_o["max_positions"], _o["size_multiplier"]) == (14, 0.6))
 check("streamed only", _o["streamed_only"] is True)
 check("ceiling does not apply", _o["ignore_max_pct"] is True)
 check("cooldown neither respected nor armed", _o["skip_reentry_cooldown"] is True)
@@ -855,7 +865,7 @@ check("shipped enabled at 2x", CFG["trading"]["opening_burst"]["min_move_to_spre
 
 class MDSpread(MD):
     """Same fake as everywhere else in this file, plus a quote broker so
-    _spread_pct (which _run_opening_burst's gate reads directly, unlike its
+    _spread_pct (which _run_opening_move_exp's gate reads directly, unlike its
     normal journal-only callers) has something to measure."""
     def __init__(self, prices, spreads, streamed=None):
         super().__init__(prices, streamed=streamed)

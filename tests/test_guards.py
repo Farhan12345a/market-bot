@@ -293,10 +293,14 @@ check("sector cap leaves room under the concurrent cap",
 # With a cap of 3 and 10 slots, at least 4 complexes are needed to fill the book.
 check("filling the book needs at least 4 complexes",
       -(-_t["max_concurrent_positions"] // _t["max_positions_per_sector"]) >= 4)
-# The burst has its own budget and must still fit.
+# The burst has its own budget and, since 2026-09-08, is deliberately
+# EXEMPT from the concurrent cap in Executor.pre_entry_check (see its
+# comment) - so it is allowed to exceed max_concurrent_positions on purpose.
 _ob = _t["opening_burst"]
-check("the burst budget still fits under the concurrent cap",
-      _ob["max_positions"] < _t["max_concurrent_positions"])
+check("the burst budget is now allowed to exceed the concurrent cap "
+      "(exempted in pre_entry_check, not fighting it)",
+      _ob["max_positions"] >= _t["max_concurrent_positions"],
+      (_ob["max_positions"], _t["max_concurrent_positions"]))
 check("the burst closes before normal entries open",
       _ob["decide_by"] <= _t["entry_window_start"],
       (_ob["decide_by"], _t["entry_window_start"]))
@@ -310,6 +314,48 @@ check("burst entries pass through pre_entry_check",
 check("...carrying the opening-burst flag so the rate limiter can exempt them",
       "is_opening_burst=is_opening_burst" in _src)
 check("...and the burst call site sets it", "is_opening_burst=True," in _src)
+
+
+print("\n=== 7. OPENING BURST IS EXEMPT FROM max_concurrent_positions (2026-09-08) ===")
+# opening_burst.max_positions went 7->14, above max_concurrent_positions (10).
+# Before this fix, pre_entry_check refused anything past the concurrent cap
+# regardless of is_opening_burst - so raising the burst's own budget past 10
+# would have been silently capped at 10 by this exact check.
+ex7 = executor(max_concurrent_positions=10)
+for i in range(10):
+    ex7._open_symbols.add(f"FULL{i}")
+
+ok_normal, why_normal = ex7.pre_entry_check(10, 100.0, symbol="NEWSYM", is_opening_burst=False)
+check("a FULL book (10/10) still refuses a NORMAL-session entry",
+      ok_normal is False and "max_concurrent_positions" in why_normal, why_normal)
+
+ok_burst, why_burst = ex7.pre_entry_check(10, 100.0, symbol="NEWSYM", is_opening_burst=True)
+check("...but the SAME full book does NOT refuse a BURST entry",
+      ok_burst is True, why_burst)
+
+# Push the book past the concurrent cap the way a filled 14-position burst
+# actually would, and confirm the normal session pays for it afterward - the
+# deliberate, accepted consequence documented on both the code and the config.
+ex8 = executor(max_concurrent_positions=10)
+for i in range(14):
+    ex8._open_symbols.add(f"BURST{i}")
+
+ok_over_normal, why_over_normal = ex8.pre_entry_check(10, 100.0, symbol="LATER", is_opening_burst=False)
+check("a book OVERFULL from the burst (14/10) still refuses the normal session",
+      ok_over_normal is False and "14/10" in why_over_normal, why_over_normal)
+
+ok_over_burst, _ = ex8.pre_entry_check(10, 100.0, symbol="LATER", is_opening_burst=True)
+check("...but a 15th burst entry is only bound by the burst's OWN budget, "
+      "not max_concurrent_positions", ok_over_burst is True)
+
+# The exemption is narrow - only this one check. Every other guard still
+# applies to a burst entry exactly as it does to a normal one.
+ex9 = executor(max_concurrent_positions=10)
+ex9._buying_power = 1.0
+ok_broke_burst, why_broke_burst = ex9.pre_entry_check(10, 100.0, symbol="X", is_opening_burst=True)
+check("a burst entry is still refused for insufficient buying power - the "
+      "exemption does not bypass every other check",
+      ok_broke_burst is False and "buying power" in why_broke_burst, why_broke_burst)
 
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)

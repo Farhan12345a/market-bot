@@ -97,6 +97,13 @@ ANSI_YELLOW = "\033[93m"
 ANSI_BLUE = "\033[94m"
 ANSI_RESET = "\033[0m"
 
+# How long retry_unconfirmed_exits waits after a FAILED forced-exit attempt
+# before trying that symbol again - separate from grace_seconds (which is how
+# long a fresh unconfirmed exit gets before the first attempt at all). Without
+# this, a persistent failure (e.g. a rejection that keeps recurring) retries
+# on every poll - every ~3s during opening_fast_poll - instead of backing off.
+RETRY_COOLDOWN_SECONDS = 10
+
 class Executor:
     """Handles order submission and trade tracking"""
 
@@ -641,6 +648,24 @@ class Executor:
                 f"exit rather than leaving it unmanaged."
             )
             try:
+                # The original marketable-limit order this was submitted
+                # against may STILL be working (a partial fill, or one that
+                # never confirmed at all) - Alpaca reserves shares for a
+                # working order ("held_for_orders"), so submitting a fresh
+                # market order for the FULL qty is rejected with "insufficient
+                # qty available" whenever that reservation is still in place.
+                # submit_exit_order always cancels first for exactly this
+                # reason; this path bypasses submit_exit_order entirely (see
+                # the module note above) and has to do its own cancel. Missing
+                # this looped forever on TSLA in production on 2026-09-04:
+                # every retry re-hit the same rejection because the stale
+                # order was never cleared, only ever re-discovered.
+                cancelled = self.broker.cancel_open_orders(symbol)
+                if cancelled:
+                    logger.info(
+                        f"{symbol}: cancelled {cancelled} working order(s) "
+                        f"before the forced market exit"
+                    )
                 side = info.get("side", "sell")
                 order = self.broker.submit_market_order(symbol, held, side=side)
                 if order is not None:
@@ -650,10 +675,14 @@ class Executor:
                     if alert_fn is not None:
                         alert_fn(symbol, held)
                 else:
-                    # Leave it in the dict - try again next poll.
-                    info["ts"] = time.monotonic() - grace_seconds + 5
+                    # Leave it in the dict - try again after a real cooldown,
+                    # not on the very next poll (every ~3s during the opening
+                    # window), so a failure does not become a tight retry loop
+                    # spamming the same rejection every few seconds.
+                    info["ts"] = time.monotonic() - grace_seconds + RETRY_COOLDOWN_SECONDS
             except Exception as e:
                 logger.error(f"{symbol}: forced market exit failed ({e}) - will retry")
+                info["ts"] = time.monotonic() - grace_seconds + RETRY_COOLDOWN_SECONDS
 
         return forced
 
@@ -861,8 +890,25 @@ class Executor:
         if cost > self._buying_power:
             return False, f"insufficient buying power (need ${cost:.2f}, have ${self._buying_power:.2f})"
 
+        # The opening burst is EXEMPT from this cap, same reasoning as
+        # rate_limits.exempt_opening_burst above: it already has its own
+        # budget (opening_burst.max_positions), so max_concurrent_positions is
+        # a second, redundant cap that collides with it rather than backing
+        # it up. Before this exemption, raising opening_burst.max_positions
+        # past max_concurrent_positions did nothing - entries past the
+        # concurrent cap were silently rejected here, so the burst budget
+        # looked configurable but wasn't. Added 2026-09-08 when
+        # max_positions went 7->14, above the concurrent cap of 10.
+        #
+        # Consequence, deliberately accepted: if the burst fills past
+        # max_concurrent_positions, the NORMAL session (is_opening_burst=False)
+        # still hits this same check below and gets zero new entries until
+        # enough burst positions close to bring the book back under the cap.
+        # One shared book, so that is the correct behaviour, not a bug -
+        # just worth knowing the two modes are not sized independently.
         max_positions = self.config["trading"].get("max_concurrent_positions")
-        if max_positions and self._open_position_count >= max_positions:
+        if (not is_opening_burst and max_positions
+                and self._open_position_count >= max_positions):
             return False, f"at max_concurrent_positions ({self._open_position_count}/{max_positions})"
 
         # Sector concentration.

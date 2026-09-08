@@ -18,7 +18,95 @@ Per CLAUDE.md: one entry variable at a time, held for a week, read via
 second, separate variable, since 300 was found to be accidentally excluding META and
 other names above that price - restarting the window kept this to one attributable
 change instead of stacking two. Compare against the pre-2026-09-03 window once a
-week of trades since this change exists.
+week of trades since this change exists. Only 2026-09-03 and 09-04 have traded
+under it so far (weekend + Labor Day between then and now) - not yet a full week.
+
+**Window started 2026-09-08**: Opening-Move Experiment scale-up, tracked
+together as ONE variable - "opening burst breadth/size":
+  - `opening_burst.max_positions: 7 -> 14` (the practical ceiling - matches
+    `stream_max_subscriptions`, so every slot always has a live baseline price)
+  - `opening_burst.size_multiplier: 0.5 -> 0.6` (a deliberate small step, not
+    the 1.0 originally considered - see the comment in config.yaml)
+  - Code change alongside it: `Executor.pre_entry_check` now exempts
+    `is_opening_burst` entries from `max_concurrent_positions` (10), the same
+    way `rate_limits.exempt_opening_burst` already exempts them from the
+    per-minute caps - otherwise raising `max_positions` past 10 would have
+    been silently capped at 10 by that check. Accepted consequence: a full
+    burst can leave the normal session with ZERO new entries until enough
+    burst positions close.
+  - **Overlaps the still-running 2026-09-03 universe-price-band window**,
+    which only has 2 clean trading days on it. Both are now changing at once
+    from 2026-09-09 - flagged to the user 2026-09-08, proceeding at their
+    explicit direction. Reading either window's `ops/session-metrics.py`
+    result cleanly will need to account for the other one changing
+    mid-stream, not just compare to "before 09-03".
+
+**Same day, 2026-09-08, a THIRD variable added to the same window at the
+user's explicit direction** (originally going to be held out - see prior
+draft of this note - but the user chose to widen the pool now rather than
+wait): `num_stocks_to_trade: 15 -> 20` + `stream_max_subscriptions: 14 -> 20 -> 22 -> 25`
+(walked up twice more the same day at the user's direction), tracked together
+as ONE variable - "traded/streamed pool widening" (Tier 5). Raised together
+deliberately: `num_stocks_to_trade` alone would have added names the
+streamed_only opening burst can never see (they'd just sit on REST), per
+config.yaml's own dynamic-universe warning. Also fixes a latent shortfall
+found while checking this: `stream_reserve_index_slots` takes 2 of the stream
+budget for SPY/QQQ, so the OLD 14-symbol cap only ever streamed 12 tradeable
+names live - already short of the opening burst's new 14-position budget
+before this change. `num_stocks_to_trade` was deliberately NOT walked up
+alongside the later 22 and 25 steps - past 20, `stream_max_subscriptions` is
+now also its own live-boundary experiment (config.yaml's "TO TEST HIGHER"
+plan: 20, then 25, then 29), decoupled from watchlist sizing. 25 - 2 reserved
+= 23, still above num_stocks_to_trade (20) with room - every traded name
+streams live, none fall to REST. Live
+boundary is still unconfirmed above 14 subscribed symbols (see the comment on
+`stream_max_subscriptions` in config.yaml) - watch the log at 09:26 on
+2026-09-09; a bad guess fails loud and is caught by `_reduce_and_retry`
+(tested generically in `tests/test_wsfail.py`, independent of the configured
+cap), not by losing the session.
+
+So as of 2026-09-08, THREE entry variables are moving at once across two
+overlapping windows: universe price band (09-03), opening-burst breadth/size
+(09-08), and pool widening (09-08). This is a deliberate, acknowledged
+departure from "one at a time," made at the user's explicit direction because
+they consider the Opening-Move Experiment the core bet of the project.
+`ops/session-metrics.py` results from 2026-09-09 onward will need to account
+for all three moving together, not be read as isolated single-variable tests.
+
+---
+
+## Idea: some form of concentration control inside the Opening-Move Experiment
+
+Raised 2026-09-08, NOT implemented - a note for later consideration, not a plan.
+
+The opening burst is explicitly BREADTH-first and explicitly exempt from
+throttling (CLAUDE.md: "nothing that throttles simultaneous signals may be
+applied here"). That was a correct call when the budget was 7 names from a
+15-name pool. With the budget now 14 and the pool now 20, and the burst
+ranking "biggest mover first" with no correlation awareness, a single
+correlated sector move (the NOW/CRM/WDAY-on-XLK shape from 2026-09-02, which
+is exactly what the NORMAL-window burst throttle exists to catch) could now
+fill a much larger fraction of the 14-position budget with one bet wearing
+several tickers, inside a three-minute window, before any of them has a
+chance to prove itself out.
+
+Two things already exist that partially cover this without contradicting
+"no throttle": `max_positions_per_sector` already applies to burst entries
+(they go through the same `pre_entry_check` gate - see test_guards.py
+section 6) - so a full sector sweep IS already capped, just not below the
+generic Tier-3 sector limit that also governs the rest of the day.
+
+Worth thinking about, not worth building yet: a burst-specific, TIGHTER
+sector cap (e.g. `opening_burst.max_positions_per_sector`, separate from the
+session-wide one) so the mode keeps its "take everyone that qualifies"
+intent for genuinely independent movers, while still capping how much of the
+14-slot budget one correlated group can claim. This is deliberately NOT the
+same shape as the normal-window `_burst_policy` throttle (which cuts COUNT
+and SIZE together on ANY simultaneous cluster) - it would target only
+sector correlation, which the mode does not yet protect against beyond what
+the session-wide cap already gives it for free. Revisit once there is a week
+of trades under the 14-position budget to see whether this actually happens,
+rather than guessing at a threshold now.
 
 ---
 

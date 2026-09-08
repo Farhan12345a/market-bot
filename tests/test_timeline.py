@@ -176,8 +176,11 @@ check("the burst baseline is the bell",
       t["opening_burst"]["baseline_time"] == "09:30")
 check("the burst closes before normal entries open",
       mins(t["opening_burst"]["decide_by"]) <= mins(t["entry_window_start"]))
-check("the burst leaves slots for the normal session",
-      t["opening_burst"]["max_positions"] < t["max_concurrent_positions"],
+check("the burst is deliberately allowed to exceed max_concurrent_positions "
+      "since 2026-09-08 (exempted in Executor.pre_entry_check) - a full "
+      "burst can leave the normal session with zero slots until positions "
+      "close, which is accepted, not a bug",
+      t["opening_burst"]["max_positions"] >= t["max_concurrent_positions"],
       (t["opening_burst"]["max_positions"], t["max_concurrent_positions"]))
 
 print("\n=== 5b. THE POOL WITH THE DYNAMIC UNIVERSE ON ===")
@@ -254,7 +257,12 @@ if prev.returncode == 0:
         # accepted against a configured cap of 28, and 2026-08-21's 405 came
         # at 59 SYMBOLS. Both fit a ~30 unique-symbol limit. The old model
         # spent half the budget on nothing.
-        "stream_max_subscriptions": 14,
+        # 14 -> 20 -> 22 -> 25 on 2026-09-08, alongside num_stocks_to_trade
+        # and the opening-burst scale-up (see PENDING_WORK.md). Still
+        # comfortably under the documented free-tier boundary of ~30
+        # (ST.DEFAULT_MAX_SUBSCRIPTIONS, test_cap.py) - a live step toward
+        # it, not the limit itself.
+        "stream_max_subscriptions": 25,
         # -0.5 -> -0.7 on 2026-09-03. Exit-side (see CLAUDE.md's "NOT an entry
         # change" list), so not subject to the one-variable-at-a-time rule
         # below, but still recorded here rather than silently dropped from
@@ -275,7 +283,6 @@ if prev.returncode == 0:
             "final_exit_loss_pct", "trailing_stop_pct",
             "breakeven_tiers", "use_resistance_exit",
             "use_breakeven_floor", "reentry_cooldown_minutes",
-            "num_stocks_to_trade",
             "use_continuation_score"]
 
     # DELIBERATELY CHANGED THIS RUN, and listed here rather than quietly
@@ -283,6 +290,18 @@ if prev.returncode == 0:
     # change impossible to do by accident, so an intentional one has to be
     # written down with its reason - and the list being SHORT is the point.
     # Per CLAUDE.md, one entry variable at a time.
+    #
+    # 2026-09-08 is a DELIBERATE EXCEPTION to "one at a time": the user
+    # explicitly chose to run the universe-price-band window (started
+    # 2026-09-03, only 2 clean trading days on it) at the same time as
+    # widening the traded pool below, on top of the opening-burst scale-up
+    # already shipped separately (tracked in test_opening.py /
+    # test_bursts_separate.py, not here - it does not touch any key in
+    # `same`/`deliberate`). See PENDING_WORK.md's "Active entry-variable
+    # measurement window" for the full, explicit account of what is stacked
+    # and why attribution will need to account for more than one variable
+    # moving. This is a conscious tradeoff, not an oversight this guard
+    # failed to catch.
     deliberate = {
         # 10 -> 20. Removes 24 of the 31 halt-prone-profile names in the
         # 92-name pool in one setting rather than by hand-editing
@@ -295,17 +314,28 @@ if prev.returncode == 0:
         # with min_stock_price as ONE variable, "universe price band 20-400" -
         # see PENDING_WORK.md's "Active entry-variable measurement window".
         "max_stock_price": (300, 400),
+        # 15 -> 20 on 2026-09-08, moved from `same` to here. Widens the daily
+        # traded/streamed pool so the Opening-Move Experiment (now budgeted
+        # for up to 14 positions, see opening_burst.max_positions) is choosing
+        # from more than just-barely-enough candidates. Paired with
+        # stream_max_subscriptions 14 -> 20 above (in `changed`) - raising
+        # this alone without the stream cap would only add REST-priced names
+        # the streamed_only burst can never see (config.yaml's own comment on
+        # use_dynamic_universe warned of exactly this failure mode).
+        "num_stocks_to_trade": (15, 20),
     }
     for k in same:
         check(f"{k} unchanged", old.get(k) == t.get(k), (old.get(k), t.get(k)))
     for k, (was, now) in deliberate.items():
         check(f"{k} changed DELIBERATELY {was} -> {now}, and only this one",
               old.get(k) == was and t.get(k) == now, (old.get(k), t.get(k)))
-    check("exactly one entry variable moved this run - min_stock_price and "
-          "max_stock_price count as ONE (the universe price band), moved "
-          "together on purpose; anything else at once would make neither "
-          "attributable",
-          set(deliberate) == {"min_stock_price", "max_stock_price"}, list(deliberate))
+    check("exactly the acknowledged entry variables moved this run - "
+          "min_stock_price and max_stock_price count as ONE (the universe "
+          "price band), and num_stocks_to_trade is a second, separate one "
+          "moving alongside it on purpose (see the comment above); anything "
+          "beyond these would be an UNacknowledged stack",
+          set(deliberate) == {"min_stock_price", "max_stock_price",
+                              "num_stocks_to_trade"}, list(deliberate))
     check("stock_universe unchanged",
           sorted(old.get("stock_universe", [])) == sorted(t.get("stock_universe", [])),
           (len(old.get("stock_universe", [])), len(t.get("stock_universe", []))))

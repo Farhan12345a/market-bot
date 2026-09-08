@@ -309,8 +309,9 @@ check("trade ticks no longer halve the budget",
       ps.symbol_budget() == CFG["trading"]["stream_max_subscriptions"])
 check("main.py's warning uses the SAME rule (it used to divide by 2)",
       "budget = max(1, cap)" in msrc)
-check("the cap is the known-good 14 until the boundary is tested live",
-      CFG["trading"]["stream_max_subscriptions"] == 14)
+check("the cap is the known-good 20 (a step toward the 30 free-tier "
+      "boundary, 2026-09-08 - still under it, not yet at it)",
+      CFG["trading"]["stream_max_subscriptions"] == 25)
 check("a symbol-limit rejection is recoverable, not fatal",
       "_reduce_and_retry" in open(repo_file("src", "data", "stream.py")).read())
 check("...and its retry delay is NOT the 15s connection-limit one",
@@ -346,8 +347,9 @@ check("the burst decides before the normal entry window opens",
 check("the regime check happens inside the entry window, or it can never bind",
       t["entry_window_start"] <= t["regime_sizing"]["check_time"] <= t["entry_window_end"],
       (t["entry_window_start"], t["regime_sizing"]["check_time"], t["entry_window_end"]))
-check("the burst's budget still leaves room for the normal session",
-      t["opening_burst"]["max_positions"] < t["max_concurrent_positions"])
+check("the burst's budget is now allowed to exceed the normal session's "
+      "concurrent cap (exempted in Executor.pre_entry_check, 2026-09-08)",
+      t["opening_burst"]["max_positions"] >= t["max_concurrent_positions"])
 
 print("\n=== 17. BROKER MISBEHAVING: none of the new code may raise into the loop ===")
 class Hostile:

@@ -16,6 +16,7 @@ Strategy.drop_phantom (removes a phantom without running confirm_exit's P&L
 math, which assumes a real fill happened).
 """
 import copy
+import time
 from _repo import REPO, CONFIG, repo_file
 from src.executor.executor import Executor, PHANTOM_EXIT
 from src.strategy.strategy import Strategy, TradeManager
@@ -145,6 +146,58 @@ check("a phantom calls drop_phantom, not confirm_exit",
       "strategy.drop_phantom(symbol)" in src)
 check("a real exit reads the corrected qty rather than trusting exit_info blindly",
       "executor.exit_qty_actually_submitted(symbol, exit_info[\"qty\"])" in src)
+
+print("\n=== 7. retry_unconfirmed_exits CANCELS THE STUCK ORDER FIRST (2026-09-04, TSLA) ===")
+# The real Alpaca failure this reproduces: a marketable-limit exit's order is
+# STILL working at the broker, reserving shares ("held_for_orders"). A fresh
+# market order for the FULL qty is rejected - "insufficient qty available" -
+# until that working order is cancelled. submit_exit_order already cancels
+# first for exactly this reason; retry_unconfirmed_exits bypasses
+# submit_exit_order and, before this fix, never did - it retried forever
+# against the same rejection because nothing ever cleared the stuck order.
+class HeldForOrdersBroker(Broker):
+    def __init__(self, holdings=None):
+        super().__init__(holdings)
+        self.cancelled_before_submit = False
+
+    def cancel_open_orders(self, symbol):
+        self.cancelled_before_submit = True
+        return super().cancel_open_orders(symbol)
+
+    def submit_market_order(self, symbol, qty, side="buy"):
+        if not self.cancelled_before_submit:
+            raise Exception(
+                '{"code":40310000,"message":"insufficient qty available for '
+                'order (requested: 3, available: 1)"}')
+        return super().submit_market_order(symbol, qty, side=side)
+
+b7 = HeldForOrdersBroker(holdings={"TSLA": 3})
+e7 = mk_executor(b7, "TSLA", tracked_qty=3)
+e7._pending_exit_verify["TSLA"] = {"ts": time.monotonic() - 999, "qty": 3, "side": "sell"}
+forced = e7.retry_unconfirmed_exits(grace_seconds=15)
+check("the stuck order is cancelled before the forced market exit is submitted",
+      b7.cancelled_before_submit)
+check("the forced exit succeeds once the reservation is cleared",
+      forced == [("TSLA", 3)], forced)
+check("TSLA is cleared from pending verification", "TSLA" not in e7._pending_exit_verify)
+check("the sell was actually submitted for the full 3 shares",
+      b7.sell_calls == [("TSLA", 3, "sell")], b7.sell_calls)
+
+print("\n=== 8. retry_unconfirmed_exits BACKS OFF AFTER A FAILURE, NOT EVERY POLL ===")
+class AlwaysRejectsBroker(Broker):
+    def submit_market_order(self, symbol, qty, side="buy"):
+        raise Exception("simulated persistent rejection")
+
+b8 = AlwaysRejectsBroker(holdings={"XYZ": 5})
+e8 = mk_executor(b8, "XYZ", tracked_qty=5)
+e8._pending_exit_verify["XYZ"] = {"ts": time.monotonic() - 999, "qty": 5, "side": "sell"}
+e8.retry_unconfirmed_exits(grace_seconds=15)
+first_retry_ts = e8._pending_exit_verify["XYZ"]["ts"]
+check("still pending after a failed attempt", "XYZ" in e8._pending_exit_verify)
+check("immediately retrying again does nothing - still inside the cooldown",
+      e8.retry_unconfirmed_exits(grace_seconds=15) == [])
+check("the retry timestamp did not reset to now - a real cooldown is enforced",
+      first_retry_ts < time.monotonic() - 1, first_retry_ts)
 
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)

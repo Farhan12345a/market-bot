@@ -41,10 +41,10 @@ calls = [m for m in re.finditer(r"_burst_policy\(config", msrc)
          if not msrc[max(0, m.start() - 4):m.start()].endswith("def ")]
 check("_burst_policy has exactly one call site", len(calls) == 1, len(calls))
 
-burst_fn = inspect.getsource(M._run_opening_burst)
+burst_fn = inspect.getsource(M._run_opening_move_exp)
 for name in ("_burst_policy", "use_burst_throttle", "burst_max_entries",
              "burst_size_multiplier", "burst_width_threshold"):
-    check(f"_run_opening_burst never references {name}", name not in burst_fn)
+    check(f"_run_opening_move_exp never references {name}", name not in burst_fn)
 
 day_fn = inspect.getsource(M.run_trading_day)
 check("run_trading_day DOES apply the throttle (that is its job)",
@@ -52,7 +52,7 @@ check("run_trading_day DOES apply the throttle (that is its job)",
 
 print("\n=== 2. THEY READ DIFFERENT CONFIG ===")
 ob = CFG["trading"]["opening_burst"]
-check("the opening burst has its OWN position budget", ob["max_positions"] == 7, ob["max_positions"])
+check("the opening burst has its OWN position budget", ob["max_positions"] == 14, ob["max_positions"])
 check("...and its own size multiplier", "size_multiplier" in ob)
 check("...and its own exit profile", "exits" in ob)
 check("the throttle's budget is separate and smaller",
@@ -93,8 +93,10 @@ class Exec:
 
 
 class MD:
-    """Nine symbols all up hard at the same instant - the exact condition the
-    normal-window throttle exists to cut, and the opening burst must not."""
+    """16 symbols all up hard at the same instant - the exact condition the
+    normal-window throttle exists to cut, and the opening burst must not.
+    More than opening_burst.max_positions (14) on purpose, so the budget is
+    the thing that binds rather than running out of movers first."""
     def __init__(s, syms): s.syms = syms; s.n = 0
     def is_streamed(s, sym): return True
     def get_latest_bar(s, sym, tf="1Min"):
@@ -103,7 +105,7 @@ class MD:
     def get_entry_price(s, sym, bar): return bar["close"]
 
 
-SYMS = [f"S{i}" for i in range(9)]
+SYMS = [f"S{i}" for i in range(16)]
 cfg = copy.deepcopy(CFG)
 cfg["trading"]["use_burst_throttle"] = True
 cfg["trading"]["burst_width_threshold"] = 2
@@ -127,12 +129,12 @@ def at(h, m, s=0):
 md = MD(SYMS)
 st = {"baseline": {}, "taken": [], "done": False}
 strat, ex = Strat(), Exec()
-M._run_opening_burst(cfg, md, strat, ex, SYMS, {}, st, at(9, 30), ET)
+M._run_opening_move_exp(cfg, md, strat, ex, SYMS, {}, st, at(9, 30), ET)
 md.n = 1
-M._run_opening_burst(cfg, md, strat, ex, SYMS, {}, st, at(9, 31), ET)
+M._run_opening_move_exp(cfg, md, strat, ex, SYMS, {}, st, at(9, 31), ET)
 
 taken = len(st.get("taken", []))
-check(f"9 simultaneous movers -> the opening burst took {taken}, not "
+check(f"16 simultaneous movers -> the opening burst took {taken}, not "
       f"burst_max_entries ({cfg['trading']['burst_max_entries']})",
       taken > cfg["trading"]["burst_max_entries"], taken)
 check(f"...and it took its OWN budget of {cfg['trading']['opening_burst']['max_positions']}",

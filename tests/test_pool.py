@@ -77,15 +77,15 @@ class Cap:
     def handle(s,r): s.msgs.append(r.getMessage())
 cap=Cap(); h=logging.Handler(); h.emit=cap.handle
 lg=logging.getLogger("src.main"); lg.addHandler(h); lg.setLevel(logging.INFO)
-cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(CFG, [f"S{i}" for i in range(14)])
-check("14 watched, 14 budget -> 'every tradeable name gets live prices'",
+cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(CFG, [f"S{i}" for i in range(25)])
+check("25 watched, 25 budget -> 'every tradeable name gets live prices'",
       any("every tradeable name" in m for m in cap.msgs), cap.msgs)
 cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(CFG, [f"S{i}" for i in range(59)])
 check("59 watched -> explicit warning", any("exceeds the stream budget" in m for m in cap.msgs), cap.msgs)
-# 29-symbol budget as of 2026-09-02 (unique symbols, not channel-subs), so
-# 59 watched leaves 30 on REST rather than the 45 the old halving implied.
-check("names how many run on REST", any("45 symbol" in m for m in cap.msgs), cap.msgs)
-check("quantifies it as a percentage", any("76% of the" in m for m in cap.msgs), cap.msgs)
+# 25-symbol budget as of 2026-09-08 (unique symbols, not channel-subs), so
+# 59 watched leaves 34 on REST.
+check("names how many run on REST", any("34 symbol" in m for m in cap.msgs), cap.msgs)
+check("quantifies it as a percentage", any("58% of the" in m for m in cap.msgs), cap.msgs)
 noticks=copy.deepcopy(CFG); noticks["trading"]["use_trade_ticks_for_entry"]=False
 cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(noticks, [f"S{i}" for i in range(14)])
 check("ticks off changes NOTHING now - the cap counts symbols, not channels",
@@ -103,7 +103,15 @@ check("merge_default_universe is off", t["merge_default_universe"] is False)
 check("num_stocks_to_trade set", isinstance(t["num_stocks_to_trade"], int) and t["num_stocks_to_trade"]>0, t["num_stocks_to_trade"])
 # unique SYMBOLS, not channel-subscriptions - corrected 2026-09-02
 budget = t["stream_max_subscriptions"]
-check(f"top-N ({t['num_stocks_to_trade']}) close to the stream budget ({budget})",
-      abs(t["num_stocks_to_trade"] - budget) <= 2, (t["num_stocks_to_trade"], budget))
+# Was "close within 2" until 2026-09-08, when the two were deliberately
+# decoupled: stream_max_subscriptions is now being walked up on its own, one
+# step at a time (20 -> 22 -> 25 -> ...), to find the live subscription
+# boundary - a separate experiment from how big the daily watchlist should
+# be. The property that actually matters, and still must hold, is that the
+# budget covers the FULL watchlist plus the 2 reserved index slots, so no
+# traded name is ever pushed to REST as a side effect of this test.
+check(f"stream budget ({budget}) covers the full watchlist "
+      f"({t['num_stocks_to_trade']}) plus the 2 reserved index slots",
+      budget >= t["num_stocks_to_trade"] + 2, (t["num_stocks_to_trade"], budget))
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

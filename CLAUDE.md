@@ -9,11 +9,14 @@ break the thing each one exists to protect.
 
 ### "first few minutes test" — the OPENING BURST, 09:30-09:33
 
-`opening_burst` in config.yaml, `_run_opening_burst` in src/main.py.
+`opening_burst` in config.yaml, `_run_opening_move_exp` in src/main.py.
 
 Its own measurement window, its own exit profile (-0.3% first / -0.35% final /
-0.4% trail / +0.15% breakeven), its own budget of `max_positions: 7` at
-`size_multiplier: 0.5`.
+0.4% trail / +0.15% breakeven), its own budget of `max_positions: 14` at
+`size_multiplier: 0.6` (7 / 0.5 before 2026-09-08). Since 2026-09-08 this
+budget is deliberately allowed to exceed `max_concurrent_positions` (10) -
+exempted in `Executor.pre_entry_check`, same reasoning as the rate-limit
+exemption below.
 
 **The intent is BREADTH.** Take as many qualifying openers as the budget
 allows. The whole premise is that the first three minutes contain the day's
@@ -38,7 +41,7 @@ together. 2026-09-02 is the evidence: NOW, CRM and WDAY all map to XLK, were
 bought inside 96 seconds, and produced $267.94 of a $403.66 loss.
 
 **These two never interact.** `_burst_policy` is called from exactly one place,
-in `run_trading_day`'s normal entry path. `_run_opening_burst` reads only its
+in `run_trading_day`'s normal entry path. `_run_opening_move_exp` reads only its
 own `opening_burst` block.
 
 ## ENTRY changes need a stable measurement window — STOP AND SAY SO

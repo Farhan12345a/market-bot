@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import os
 
 from src.notifications.senders import build_senders, notify
+from src.analytics.performance_timeline import render_performance_timeline_html
 
 logger = logging.getLogger(__name__)
 
@@ -568,6 +569,7 @@ class EmailNotifier:
             'numbers unreadable.</div>'
             + self._opening_exit_profile_html() +
             '</div>'
+            + self._after_exit_ratio_html(ob) +
             '<table class="trades-table"><thead><tr>'
             '<th>Symbol</th><th>Entry</th><th>Exit</th><th>Entry $</th><th>Exit $</th>'
             '<th>Qty</th><th>Move at entry</th><th>P&L</th><th>P&L %</th>'
@@ -739,6 +741,13 @@ class EmailNotifier:
         # Color coding
         pl_color = "#10b981" if total_pl >= 0 else "#ef4444"
 
+        # Only on the end-of-day sends, not "Midday Status" - today's row in
+        # daily_summary.csv is written by finish_day AFTER the report is
+        # built, so a midday send would only ever show yesterday and older,
+        # which is confusing on a report whose whole point is "today."
+        performance_timeline_html = (
+            render_performance_timeline_html() if label != "Midday Status" else ""
+        )
         after_exit_ratio_html = self._after_exit_ratio_html(trades)
         run_context_html = self._run_context_html()
         replay_progress_html = self._replay_progress_html()
@@ -810,6 +819,7 @@ class EmailNotifier:
                         <div class="value">{len(winning_trades)} / {len(losing_trades)}</div>
                     </div>
                 </div>
+                {performance_timeline_html}
                 {after_exit_ratio_html}
                 {run_context_html}
                 {replay_progress_html}

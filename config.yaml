@@ -108,7 +108,7 @@ trading:
     # spread. HOOD's median spread measured 0.593% on 2026-08-26 - wider than
     # min_move_pct itself - so a flat move threshold alone cannot tell "a real
     # +0.3% move" from "one print crossing a 0.3%+ spread". 2.0 means the move
-    # must be double the spread; 0 disables the gate. See _run_opening_burst
+    # must be double the spread; 0 disables the gate. See _run_opening_move_exp
     # for why this is spread-only rather than the full cf_score composite
     # (mostly None this early - opening_range_minutes/vwap/sector all need a
     # window this mode decides within before it exists).
@@ -153,19 +153,30 @@ trading:
     # order stands - the better-evidenced ranking.
     min_scored_fraction: 0.5
 
-    # Its OWN position budget, deliberately small. These do not get to consume
-    # max_concurrent_positions and starve the normal session; they are an
-    # experiment running alongside it.
-    # 7 of the 10 concurrent slots, leaving 3 for the normal session. These
-    # trades are expected to be short-lived, so slots should free up well before
-    # the 09:33 window matters - but if the opening book is still full when the
-    # normal session starts, the constraint that bites is
-    # max_concurrent_positions, NOT the re-entry cooldown (which is 5 minutes
-    # and only applies after a LOSING exit on the same symbol).
-    max_positions: 7
+    # Its OWN position budget. 7->14 on 2026-09-08: this is now the core bet
+    # of the project, so BREADTH takes priority over leaving room for the
+    # normal session. Exempted from max_concurrent_positions in
+    # Executor.pre_entry_check (same reasoning as rate_limits.exempt_
+    # opening_burst) - previously max_positions above 10 (max_concurrent_
+    # positions) would have been silently capped at 10 by that check.
+    #
+    # Deliberate consequence: if the burst fills all 14, the normal session
+    # gets ZERO new entries until enough burst positions close to bring the
+    # book back under max_concurrent_positions (10). These trades are
+    # expected to be short-lived, so slots should free up well before 09:33
+    # matters most days - but a full opening book can genuinely pause the
+    # normal session, not just shrink it the way 7/10 did.
+    max_positions: 14
 
-    # Half size for the same reason - this is a test, not a conviction.
-    size_multiplier: 0.5
+    # 0.5->0.6 on 2026-09-08, alongside max_positions 7->14. A full jump to
+    # 1.0 (normal-session parity) was considered and deliberately deferred -
+    # 14 positions x 1.0x would be a 4x jump in worst-case simultaneous-
+    # stop-out risk for this window (7x0.5=3.5 "risk units" -> 14x1.0=14)
+    # with daily_loss_limit unchanged. 0.6 is a modest step (7x0.5=3.5 ->
+    # 14x0.6=8.4, ~2.4x) so this week's result is not swamped by a sizing
+    # change on top of the breadth change. Revisit toward 1.0 as its own
+    # separate week once 14-at-0.6x has a track record.
+    size_multiplier: 0.6
 
     # Streamed symbols only. A REST symbol's price is ~15 minutes delayed, so
     # its "move since the open" describes a window that has not happened yet.
@@ -361,6 +372,22 @@ trading:
   # 09:31:28; all 14 SUBSCRIBED symbols delivered, the other 12 were never
   # subscribed).
   #
+  # 14 -> 20 -> 22 -> 25, all on 2026-09-08: walking the "TO TEST HIGHER"
+  # plan this comment already called for below, one step at a time in the
+  # same session at the user's direction. Chosen alongside num_stocks_to_trade
+  # 15 -> 20 (see that key) and the opening-burst budget going to 14, which
+  # this cap needs to actually clear: with stream_reserve_index_slots taking 2
+  # of the budget for SPY/QQQ, the OLD 14-symbol cap only ever streamed 12
+  # tradeable names live - already short of a 14-position burst budget before
+  # this change. 25 - 2 reserved = 23, still comfortably above
+  # num_stocks_to_trade (20) - every traded name streams live, none fall to
+  # REST, with headroom to spare. num_stocks_to_trade was deliberately NOT
+  # raised to match this step - the stream cap is now being tested as its own
+  # live boundary, decoupled from watchlist sizing (see test_pool.py's
+  # updated check). If 25 subscribes cleanly (watch the log at 09:26 - a bad
+  # guess fails loud and immediate, see _reduce_and_retry below), the next
+  # step is 29 - one under the documented 30 free-tier limit, not 30 itself.
+  #
   # SET TO 14 FOR 2026-09-02, deliberately conservative.
   #
   # The COUNTING MODEL above is well-evidenced and is not in doubt. What is
@@ -413,28 +440,29 @@ trading:
   # is cheap to remove as a variable.
   #
   # Benchmarks are subscribed LAST, after every tradeable symbol, so they can
-  # never displace a name the bot could actually buy. num_stocks_to_trade is 15
+  # never displace a name the bot could actually buy. num_stocks_to_trade is 20
   # against the budget below, so there is room; if there ever is not, they fall
   # back to REST exactly as they do today.
   stream_benchmarks: true
 
   # Reserve two subscription slots for SPY and QQQ specifically.
   #
-  # Benchmarks are appended LAST, so with a 15-symbol watchlist against a
-  # 14-symbol budget they were never actually streamed - SPY has been on
-  # ~15-minute-delayed REST every session so far. That was tolerable when SPY
-  # only fed a journal column. It is not tolerable now: regime_sizing reads
-  # SPY and QQQ against their own VWAP and can size the entire day to ZERO on
-  # what it sees, and a regime decided from quarter-hour-old index prices is
-  # worse than having no regime rule at all.
+  # Benchmarks are appended LAST, so a watchlist sized at or above the budget
+  # would otherwise never actually stream them - SPY has been on
+  # ~15-minute-delayed REST every session so far when that happened. That was
+  # tolerable when SPY only fed a journal column. It is not tolerable now:
+  # regime_sizing reads SPY and QQQ against their own VWAP and can size the
+  # entire day to ZERO on what it sees, and a regime decided from
+  # quarter-hour-old index prices is worse than having no regime rule at all.
   #
   # The cost is the last two watchlist names dropping to REST. That is the
-  # right trade - the 13th and 14th ranked symbols are the least likely to
-  # produce a signal, and neither can decide the whole session the way the
-  # regime read can. Sector ETFs stay last; they only inform a journal column.
+  # right trade - the lowest-ranked symbols within budget are the least
+  # likely to produce a signal, and neither can decide the whole session the
+  # way the regime read can. Sector ETFs stay last; they only inform a
+  # journal column.
   stream_reserve_index_slots: true
 
-  stream_max_subscriptions: 14
+  stream_max_subscriptions: 25
   websocket_feed: "iex"   # iex = free tier. sip requires a paid subscription.
 
   # Subscribe to live TRADES as well as bars, and use the latest tick as the
@@ -2011,7 +2039,18 @@ trading:
                                  # first, which burned the first ~2.5 min of the entry window.
                                  # Leave enough headroom for screener_timeout_seconds below.
   candidates_file: "candidates.txt"  # File with candidate symbols
-  num_stocks_to_trade: 15  # Number of top stocks to select each day
+  # 15 -> 20 on 2026-09-08, paired with stream_max_subscriptions below.
+  # Widens the daily traded/streamed pool so the Opening-Move Experiment
+  # (budgeted for up to opening_burst.max_positions=14) is choosing from
+  # meaningfully more than 14 candidates, not just-barely-enough. Raising
+  # this WITHOUT the stream cap would only add REST-priced (~15min delayed)
+  # names the streamed_only burst can never measure - see the dynamic-
+  # universe note above ("THIS DOES NOT HELP THE OPENING BURST... a wider
+  # watchlist means a smaller fraction streamed"), which is exactly the
+  # failure this pairing avoids. Tier 5 per CLAUDE.md - tracked as its own
+  # entry variable in PENDING_WORK.md, alongside (not merged into) the
+  # opening-burst and universe-price-band windows already running.
+  num_stocks_to_trade: 20  # Number of top stocks to select each day
   # ---------------------------------------------------------------------
   # Opening-move history (added 2026-08-21)
   # ---------------------------------------------------------------------

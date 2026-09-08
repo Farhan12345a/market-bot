@@ -1920,7 +1920,7 @@ def _spread_pct(market_data, symbol, price):
 
     Fully guarded: returns None on any failure. Journal-only everywhere it is
     called from the normal entry path (after the decision, never gates it) -
-    the one exception is _run_opening_burst's spread gate, which reads this
+    the one exception is _run_opening_move_exp's spread gate, which reads this
     BEFORE deciding, because that mode's own min_move_pct is tight enough for
     a wide spread to fake a real move (see that gate's comment for the
     HOOD example this is built from).
@@ -2182,7 +2182,7 @@ def _burst_rank_multifactor(config, measured, market_data, spy_pct, price_histor
     return ordered, f"burst ranked by continuation score: {shown}"
 
 
-def _run_opening_burst(config, market_data, strategy, executor, symbols, rsi_values,
+def _run_opening_move_exp(config, market_data, strategy, executor, symbols, rsi_values,
                        state, now, et, signal_journal=None, spy_pct=None,
                        spy_history=None,
                        price_history=None, volume_history=None, vwap_acc=None,
@@ -3302,7 +3302,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         # the bell - which is what widening entry_window_start to 09:30 would
         # have done.
         try:
-            opened = _run_opening_burst(
+            opened = _run_opening_move_exp(
                 config, market_data, strategy, executor, symbols, rsi_values,
                 opening_state, now, et, signal_journal=signal_journal,
                 spy_pct=_window_pct_change(spy_history),
@@ -4329,9 +4329,26 @@ def _write_daily_summary_csv(config, executor, symbols, entries_triggered, start
         except Exception as e:
             logger.debug(f"Could not read ending cash for daily summary: {e}")
 
+        # Percent-of-equity, not just the raw dollar figure - what makes days
+        # comparable as the account grows, and what the daily loss limit
+        # itself is measured against. starting_cash is a proxy for equity
+        # (may differ slightly if positions were already open at process
+        # start); None when it could not be read, rather than a misleading 0.
+        total_pl_pct = round(total_pl / starting_cash * 100, 3) if starting_cash else None
+
+        def _tiers(key, field):
+            tiers = config["trading"].get(key) or []
+            if not tiers:
+                return ""
+            return "/".join(str(t.get(field)) for t in tiers) + "%"
+
+        ob = config["trading"].get("opening_burst") or {}
+        dll = config["trading"].get("daily_loss_limit") or {}
+
         row = {
             "date": datetime.now(et).strftime("%Y-%m-%d"),
             "total_pl": round(total_pl, 2),
+            "total_pl_pct": total_pl_pct,
             "starting_cash": starting_cash,
             "ending_cash": ending_cash,
             "trades_count": len(today_trades),
@@ -4350,18 +4367,53 @@ def _write_daily_summary_csv(config, executor, symbols, entries_triggered, start
             "first_scale_out_config": f"{config['trading'].get('first_exit_loss_pct')}% / {config['trading'].get('first_exit_pct', 0) * 100:.0f}%",
             "trailing_stop_pct": config["trading"].get("trailing_stop_pct"),
             "entry_window": f"{config['trading'].get('entry_window_start')}-{config['trading'].get('entry_window_end')}",
+            # Added 2026-09-08 for src/analytics/performance_timeline.py - the
+            # settings with the largest documented dollar swings in this
+            # file's own history that were not already columns above.
+            "take_profit_tiers": _tiers("take_profit_tiers", "gain_pct"),
+            "breakeven_tiers": _tiers("breakeven_tiers", "trigger_pct"),
+            "opening_burst_max_positions": ob.get("max_positions"),
+            "opening_burst_size_multiplier": ob.get("size_multiplier"),
+            "num_stocks_to_trade": config["trading"].get("num_stocks_to_trade"),
+            "stream_max_subscriptions": config["trading"].get("stream_max_subscriptions"),
+            "max_positions_per_sector": config["trading"].get("max_positions_per_sector"),
+            "reentry_cooldown_minutes": config["trading"].get("reentry_cooldown_minutes"),
+            "daily_loss_limit_pct_of_equity": dll.get("pct_of_equity"),
+            "daily_loss_limit_ceiling_usd": dll.get("ceiling_usd"),
         }
 
         fieldnames = list(row.keys())
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not path.exists() or path.stat().st_size == 0
-        with open(path, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if write_header:
-                writer.writeheader()
+
+        existing_rows = []
+        if path.exists() and path.stat().st_size > 0:
+            try:
+                with open(path, newline="") as f:
+                    existing_rows = list(csv.DictReader(f))
+            except Exception as e:
+                logger.error(
+                    f"Could not read existing {filepath} to preserve its history "
+                    f"before rewriting it ({e}) - proceeding with today's row only"
+                )
+
+        # FULL REWRITE rather than append. The column set has grown more than
+        # once as new settings became worth tracking (most recently for the
+        # performance-timeline chart) - appending under a now-stale header
+        # would silently misalign every column after the first mismatch, and
+        # a CSV reader has no way to tell "row is short" from "row is fine."
+        # This file is one row per trading DAY, never more than a few hundred
+        # rows even after a year, so a full rewrite costs nothing and is
+        # always correct. restval/extrasaction handle an old row missing a
+        # newer column, or (if a column is ever removed) carrying one that no
+        # longer exists.
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, restval="", extrasaction="ignore")
+            writer.writeheader()
+            for r in existing_rows:
+                writer.writerow(r)
             writer.writerow(row)
-        logger.info(f"Wrote daily summary row to {filepath}")
+        logger.info(f"Wrote daily summary row to {filepath} ({len(existing_rows) + 1} total rows)")
     except Exception as e:
         logger.error(f"Error writing daily summary CSV: {e}")
 
