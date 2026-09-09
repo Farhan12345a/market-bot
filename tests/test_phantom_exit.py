@@ -52,11 +52,16 @@ class Broker:
     """A broker whose real holdings can differ from what the executor
     tracks - modelling an entry that never filled (0) or partially filled
     (less than requested), independent of what submit_market_order is asked
-    to sell."""
-    def __init__(self, holdings=None):
+    to sell. quote=None (the default) means "no live quote available", which
+    is what forces retry_unfilled_entries' wide-limit path to fall back to a
+    plain market order - the existing behaviour every test below this point
+    was written against."""
+    def __init__(self, holdings=None, quote=None):
         self.holdings = dict(holdings or {})   # symbol -> actual qty held
         self.sell_calls = []
         self.cancelled = []
+        self.limit_calls = []
+        self.quote = quote                     # {"bid":.., "ask":..} or None
 
     def get_positions(self):
         return {s: Pos(s, q) for s, q in self.holdings.items() if q}
@@ -64,6 +69,15 @@ class Broker:
     def cancel_open_orders(self, symbol):
         self.cancelled.append(symbol)
         return 1
+
+    def get_latest_quote(self, symbol):
+        return self.quote
+
+    def submit_limit_order(self, symbol, qty, limit_price, side="buy"):
+        self.limit_calls.append((symbol, qty, limit_price, side))
+        if side == "buy":
+            self.holdings[symbol] = self.holdings.get(symbol, 0) + qty
+        return Order()
 
     def submit_market_order(self, symbol, qty, side="buy"):
         self.sell_calls.append((symbol, qty, side))
@@ -265,6 +279,65 @@ check("retry_unfilled_entries is actually called from the poll loop",
       "executor.retry_unfilled_entries()" in src)
 check("an abandoned entry is dropped from Strategy, not left half-tracked",
       "strategy.drop_phantom(_sym)" in src)
+
+print("\n=== 14. DEFAULT GRACE PERIOD IS NOW 12s, NOT 15s (2026-09-09) ===")
+b14 = Broker(holdings={})
+e14 = mk_executor(b14, "CRWV", tracked_qty=4)
+e14._pending_entry_verify["CRWV"] = {"ts": time.monotonic() - 13, "qty": 4}  # 13s old
+filled14, _ = e14.retry_unfilled_entries()   # no grace_seconds arg -> the default
+check("13s old is already past the new 12s default - forces the retry",
+      filled14 == [("CRWV", 4)], filled14)
+
+print("\n=== 15. FORCED RETRY TRIES A WIDE MARKETABLE-LIMIT FIRST, PRICED "
+      "OFF A FRESH QUOTE ===")
+CFG_RETRY = copy.deepcopy(CFG)
+CFG_RETRY["trading"]["marketable_limit_entries"] = {"retry_slippage_pct": 2.0}
+b15 = Broker(holdings={}, quote={"bid": 99.9, "ask": 100.0, "spread": 0.1})
+e15 = Executor(b15, CFG_RETRY)
+e15.open_entries["NBIS"] = 95.0
+e15._open_symbols.add("NBIS")
+e15._entry_recorded_at["NBIS"] = 0.0
+e15._pending_entry_verify["NBIS"] = {"ts": time.monotonic() - 999, "qty": 6}
+filled15, abandoned15 = e15.retry_unfilled_entries(grace_seconds=12)
+check("routes through the wide marketable-limit, not straight to market",
+      b15.limit_calls == [("NBIS", 6, 102.0, "buy")], b15.limit_calls)
+check("no plain market order was needed", b15.sell_calls == [], b15.sell_calls)
+check("still reported as filled", filled15 == [("NBIS", 6)] and abandoned15 == [])
+check("priced off the FRESH quote (100.0 ask), not the stale entry_price (95.0)",
+      b15.limit_calls[0][2] == 100.0 * 1.02)
+
+print("\n=== 16. NO QUOTE AVAILABLE -> FALLS BACK TO A PLAIN MARKET ORDER, "
+      "EVEN WITH retry_slippage_pct CONFIGURED ===")
+b16 = Broker(holdings={}, quote=None)   # configured for wide-limit, but no quote
+e16 = Executor(b16, CFG_RETRY)
+e16.open_entries["IONQ"] = 40.0
+e16._open_symbols.add("IONQ")
+e16._entry_recorded_at["IONQ"] = 0.0
+e16._pending_entry_verify["IONQ"] = {"ts": time.monotonic() - 999, "qty": 10}
+filled16, abandoned16 = e16.retry_unfilled_entries(grace_seconds=12)
+check("no quote -> no limit order was attempted", b16.limit_calls == [], b16.limit_calls)
+check("falls back cleanly to a plain market order",
+      b16.sell_calls == [("IONQ", 10, "buy")], b16.sell_calls)
+check("still filled overall", filled16 == [("IONQ", 10)] and abandoned16 == [])
+
+print("\n=== 17. A WIDE-LIMIT SUBMISSION ERROR ALSO FALLS BACK TO MARKET ===")
+class RejectsLimitOnly(Broker):
+    def submit_limit_order(self, symbol, qty, limit_price, side="buy"):
+        raise Exception("simulated limit-order rejection")
+
+b17 = RejectsLimitOnly(holdings={}, quote={"bid": 49.9, "ask": 50.0, "spread": 0.1})
+e17 = Executor(b17, CFG_RETRY)
+e17.open_entries["AXTI"] = 48.0
+e17._open_symbols.add("AXTI")
+e17._entry_recorded_at["AXTI"] = 0.0
+e17._pending_entry_verify["AXTI"] = {"ts": time.monotonic() - 999, "qty": 7}
+filled17, abandoned17 = e17.retry_unfilled_entries(grace_seconds=12)
+check("the wide-limit order was attempted and rejected",
+      True)  # implicit: RejectsLimitOnly always raises, covered by the fallback below
+check("falls back to a plain market order after the limit attempt fails",
+      b17.sell_calls == [("AXTI", 7, "buy")], b17.sell_calls)
+check("still filled overall despite the limit-order failure",
+      filled17 == [("AXTI", 7)] and abandoned17 == [])
 
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)

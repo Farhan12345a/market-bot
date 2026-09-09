@@ -1293,6 +1293,18 @@ trading:
       spread_multiple: 2.5
       max_slippage_pct: 1.0
 
+    # RETRY BAND (2026-09-09), for Executor.retry_unfilled_entries only - a
+    # WIDE marketable-limit for the forced second attempt, priced off a
+    # FRESH quote (not the stale original decision price), rather than
+    # jumping straight to an unbounded plain market order. Deliberately
+    # wider than the opening_burst band above: the whole reason this path
+    # exists is that the first, tighter attempt already failed to cross, so
+    # matching that same band would likely just fail again. Still bounded,
+    # unlike a market order, so a true disaster (halt-and-reopen gap) is not
+    # chased all the way. Falls back to a plain market order only if this
+    # itself cannot be submitted (no quote available, or the order errors).
+    retry_slippage_pct: 2.0
+
   marketable_limit_exits:
     enabled: true
     slippage_pct: 0.3

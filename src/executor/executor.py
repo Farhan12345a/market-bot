@@ -687,12 +687,21 @@ class Executor:
 
         return forced
 
-    def retry_unfilled_entries(self, grace_seconds=15):
+    def retry_unfilled_entries(self, grace_seconds=12):
         """
         Verify every marketable-limit ENTRY this executor submitted actually
         got at least one share filled, and force ONE market-order attempt for
         any that did not - the entry-side counterpart to
         retry_unconfirmed_exits, and NOT the same policy.
+
+        grace_seconds is deliberately SHORTER than retry_unconfirmed_exits'
+        15s (2026-09-09: 15 -> 12). An unfilled entry is chasing a moving
+        price, so the cost of waiting is different in kind from an exit's:
+        every second here is a second the signal can run further away before
+        the forced retry even fires. 12s still gives a genuinely-still-
+        filling limit order real room (most fills that are going to happen
+        complete in a second or two) without leaving it sitting through most
+        of a fast opener's whole decision window.
 
         WHY THIS EXISTS. submit_entry_order records the position
         (open_entries, _open_symbols, strategy.trades via the caller) the
@@ -763,8 +772,8 @@ class Executor:
 
             logger.warning(
                 f"{symbol}: marketable-limit entry submitted {age:.0f}s ago "
-                f"still shows 0 shares held - forcing ONE market-order "
-                f"attempt before giving up on this entry."
+                f"still shows 0 shares held - forcing ONE retry attempt "
+                f"before giving up on this entry."
             )
             try:
                 # Same reason submit_exit_order and retry_unconfirmed_exits
@@ -775,27 +784,24 @@ class Executor:
                 if cancelled:
                     logger.info(
                         f"{symbol}: cancelled {cancelled} unfilled entry "
-                        f"order(s) before the forced market buy"
+                        f"order(s) before the forced retry"
                     )
-                order = self.broker.submit_market_order(symbol, info["qty"], side="buy")
             except Exception as e:
-                logger.warning(
-                    f"{symbol}: forced entry retry failed "
-                    f"({type(e).__name__}: {e}) - giving up on this entry"
-                )
-                order = None
+                logger.debug(f"{symbol}: pre-retry cancel failed, retrying anyway: {e}")
+
+            order, route = self._submit_forced_entry_retry(symbol, info["qty"])
 
             self._pending_entry_verify.pop(symbol, None)
             if order is not None:
                 logger.info(
-                    f"{symbol}: forced market buy submitted for the "
+                    f"{symbol}: forced {route} buy submitted for the "
                     f"{info['qty']} share(s) the marketable-limit entry "
                     f"never filled"
                 )
                 filled.append((symbol, info["qty"]))
             else:
                 logger.warning(
-                    f"{symbol}: entry never filled even at market - "
+                    f"{symbol}: forced retry could not be submitted at all - "
                     f"dropping the phantom rather than chasing it further"
                 )
                 self._open_symbols.discard(symbol)
@@ -805,6 +811,52 @@ class Executor:
                 abandoned.append(symbol)
 
         return filled, abandoned
+
+    def _submit_forced_entry_retry(self, symbol, qty):
+        """
+        The forced retry itself, for retry_unfilled_entries: a WIDE
+        marketable-limit priced off a FRESH quote when one is available,
+        falling back to a plain market order only when it is not (or the
+        wide-limit submission itself errors).
+
+        WHY WIDE-LIMIT-FIRST RATHER THAN STRAIGHT TO MARKET (2026-09-09).
+        The original attempt already failed to cross at the normal (or
+        opening-burst) band, so retrying at that SAME band would likely just
+        fail again - but jumping straight to an unbounded market order gives
+        up all price protection for every retry, including the rare true
+        disaster (a halt-and-reopen gap). A band several times wider than the
+        original, priced off what the stock is doing NOW rather than the
+        stale original decision price, catches nearly everything a market
+        order would while still refusing to chase an unbounded move.
+
+        Returns (order_or_None, route) where route is "wide-limit" or
+        "market", so the caller's log line says which one actually happened.
+        """
+        ecfg = (self.config.get("trading") or {}).get("marketable_limit_entries") or {}
+        retry_band_pct = ecfg.get("retry_slippage_pct")
+        if retry_band_pct:
+            try:
+                quote = self.broker.get_latest_quote(symbol)
+            except Exception as e:
+                logger.debug(f"{symbol}: quote fetch for the forced retry failed: {e}")
+                quote = None
+            if quote and quote.get("ask"):
+                try:
+                    limit_px = round(float(quote["ask"]) * (1 + float(retry_band_pct) / 100.0), 2)
+                    order = self.broker.submit_limit_order(symbol, qty, limit_px, side="buy")
+                    if order is not None:
+                        return order, "wide-limit"
+                except Exception as e:
+                    logger.debug(
+                        f"{symbol}: wide-limit forced retry could not be "
+                        f"submitted ({e}) - falling back to a market order"
+                    )
+
+        try:
+            return self.broker.submit_market_order(symbol, qty, side="buy"), "market"
+        except Exception as e:
+            logger.warning(f"{symbol}: forced market retry also failed ({type(e).__name__}: {e})")
+            return None, "market"
 
     def _correct_trade_record_for_forced_exit(self, symbol, qty, order, info):
         """
