@@ -220,6 +220,7 @@ class Executor:
         # after a grace period, forces a market exit rather than leaving a
         # position silently unmanaged.
         self._pending_exit_verify = {}
+        self._pending_entry_verify = {}
         self._logged_loss_limit = None
         self._last_loss_limit_log_at = 0.0  # time.monotonic() of the last "Daily loss limit" log line
         self._logged_loss_tier = 1.0
@@ -686,6 +687,125 @@ class Executor:
 
         return forced
 
+    def retry_unfilled_entries(self, grace_seconds=15):
+        """
+        Verify every marketable-limit ENTRY this executor submitted actually
+        got at least one share filled, and force ONE market-order attempt for
+        any that did not - the entry-side counterpart to
+        retry_unconfirmed_exits, and NOT the same policy.
+
+        WHY THIS EXISTS. submit_entry_order records the position
+        (open_entries, _open_symbols, strategy.trades via the caller) the
+        instant the order is SUBMITTED, not once it fills - fine for a market
+        order, not for a marketable-limit entry, which is a bounded price
+        that can simply sit unfilled. Unlike an exit, an entry signal fires
+        ONCE - there is no rule that re-evaluates "should I still be trying
+        to enter this" on a later poll and resubmits, so a stuck limit order
+        never got a second chance. It was only ever discovered by
+        submit_exit_order's phantom guard, sometimes minutes later, by which
+        point the trade was unrecoverable either way. 2026-09-08: the opening
+        burst took 9 entries and only 1 (ORCL) actually filled - NBIS, MRVL,
+        INTC, IONQ, AXTI, AEHR, IREN and BE all sat as unfilled marketable-
+        limit buys and were quietly dropped as phantoms, never once retried.
+
+        DELIBERATELY gives up after ONE forced attempt, unlike the exit
+        side's unbounded retry-with-cooldown. An exit MUST eventually
+        complete - the position already exists and is a real, unmanaged risk
+        until closed. An entry that still will not fill has no such
+        obligation: the move it was chasing has likely already run, and
+        walking away costs nothing but the trade itself - retrying forever
+        would just keep buying into a name that has moved further from the
+        signal every time.
+
+        Does not correct the tracked entry price itself - the existing
+        periodic reconcile (refresh_account_snapshot) already rebases
+        open_entries/strategy against the broker's real avg_entry_price on
+        its own next pass, the same path any market order's slippage is
+        always corrected through, so duplicating that here would just be a
+        second, unsynced copy of it.
+
+        Returns (filled, abandoned):
+          filled    - [(symbol, qty), ...] forced through at market.
+          abandoned - [symbol, ...] that still would not fill even at
+                      market. This Executor deliberately has no reference to
+                      Strategy (see reconcile_against_broker's docstring for
+                      why blind cross-object repair is avoided) - the CALLER
+                      must call strategy.drop_phantom(symbol) for each of
+                      these, exactly as it would for a phantom the exit side
+                      discovered.
+        """
+        if not self._pending_entry_verify:
+            return [], []
+
+        try:
+            live = self.broker.get_positions() or {}
+        except Exception as e:
+            logger.debug(f"retry_unfilled_entries: could not fetch positions ({e})")
+            return [], []
+
+        filled, abandoned = [], []
+        for symbol, info in list(self._pending_entry_verify.items()):
+            try:
+                held = int(float(getattr(live.get(symbol), "qty", 0) or 0))
+            except (TypeError, ValueError):
+                held = 0
+
+            if held > 0:
+                # At least partially filled - submit_exit_order's own qty
+                # correction already sells only what is genuinely held, so a
+                # partial fill needs nothing further here.
+                self._pending_entry_verify.pop(symbol, None)
+                continue
+
+            age = time.monotonic() - info.get("ts", 0)
+            if age < grace_seconds:
+                continue  # still inside the normal fill window
+
+            logger.warning(
+                f"{symbol}: marketable-limit entry submitted {age:.0f}s ago "
+                f"still shows 0 shares held - forcing ONE market-order "
+                f"attempt before giving up on this entry."
+            )
+            try:
+                # Same reason submit_exit_order and retry_unconfirmed_exits
+                # both cancel first: a still-working limit order reserves
+                # shares/buying power, and a fresh order for the same symbol
+                # can be rejected while that reservation stands.
+                cancelled = self.broker.cancel_open_orders(symbol)
+                if cancelled:
+                    logger.info(
+                        f"{symbol}: cancelled {cancelled} unfilled entry "
+                        f"order(s) before the forced market buy"
+                    )
+                order = self.broker.submit_market_order(symbol, info["qty"], side="buy")
+            except Exception as e:
+                logger.warning(
+                    f"{symbol}: forced entry retry failed "
+                    f"({type(e).__name__}: {e}) - giving up on this entry"
+                )
+                order = None
+
+            self._pending_entry_verify.pop(symbol, None)
+            if order is not None:
+                logger.info(
+                    f"{symbol}: forced market buy submitted for the "
+                    f"{info['qty']} share(s) the marketable-limit entry "
+                    f"never filled"
+                )
+                filled.append((symbol, info["qty"]))
+            else:
+                logger.warning(
+                    f"{symbol}: entry never filled even at market - "
+                    f"dropping the phantom rather than chasing it further"
+                )
+                self._open_symbols.discard(symbol)
+                self._entry_recorded_at.pop(symbol, None)
+                self._pending_cost.pop(symbol, None)
+                self.open_entries.pop(symbol, None)
+                abandoned.append(symbol)
+
+        return filled, abandoned
+
     def _correct_trade_record_for_forced_exit(self, symbol, qty, order, info):
         """
         Fix the trade_history.csv row a stuck marketable-limit exit wrote at
@@ -1146,6 +1266,14 @@ class Executor:
         # the escalation to a market order could never fire. Caught by
         # tests/test_0902b.py section 11.
         self._limit_exit_attempts.pop(symbol, None)
+
+        # Track marketable-limit entries for retry_unfilled_entries below - a
+        # market order fills against the book essentially immediately and
+        # needs no verification; a bounded-price limit can simply sit
+        # unfilled with nothing else ever re-checking it (see that method's
+        # docstring for the 2026-09-08 incident this fixes).
+        if limit_px:
+            self._pending_entry_verify[symbol] = {"ts": time.monotonic(), "qty": qty}
 
         logger.info(f"{ANSI_GREEN}Entry order submitted for {symbol}: {qty} shares at {price}{ANSI_RESET}")
         return order

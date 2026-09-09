@@ -2,6 +2,7 @@ import os
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest, LimitOrderRequest, GetOrdersRequest, GetAssetsRequest,
+    GetCalendarRequest,
 )
 from alpaca.trading.enums import (
     OrderSide, TimeInForce, QueryOrderStatus, AssetClass, AssetStatus,
@@ -36,6 +37,21 @@ class AlpacaBroker:
     def get_account(self):
         """Get account info"""
         return self.trading_client.get_account()
+
+    def get_calendar(self, day):
+        """
+        Alpaca's own trading calendar for one date - the authoritative answer
+        to "is this a market holiday", unlike a weekday-only check which
+        cannot know that. Returns a (possibly empty) list of Calendar
+        entries; empty means the market does not trade that day (weekend or
+        holiday alike). Raises on a real API failure - the caller decides
+        the fallback, since "assume it's a normal trading day" and "assume
+        it's a holiday" are both wrong defaults depending on which side of
+        the check matters more to that caller.
+        """
+        return self.trading_client.get_calendar(
+            GetCalendarRequest(start=day, end=day)
+        )
 
     def get_positions(self):
         """Get all open positions"""

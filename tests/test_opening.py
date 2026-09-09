@@ -317,6 +317,42 @@ check("no opening trades -> no section",
       n._opening_burst_html([{"symbol": "X", "entry_method": "RAPID_INCREASE_IMMEDIATE", "pl": 1}]) == "")
 check("empty input -> no section", n._opening_burst_html([]) == "")
 
+print("\n=== 13b. FILL RATE (2026-09-08: 9 entered, only 1 - ORCL - filled) ===")
+n_fr = EmailNotifier.__new__(EmailNotifier)
+n_fr.run_context = {"opening_burst_summary": {"taken": 9}}
+orcl_trade = [{"symbol": "ORCL", "entry_method": "OPENING_MOVE", "entry_time": "2026-09-08T13:31:05",
+               "exit_time": "2026-09-08T13:34:02", "entry_price": 168.19, "exit_price": 166.27,
+               "qty": 5, "pl": -9.6, "pl_pct": -1.14, "signal_pct": 0.86, "mfe_pct": 0.63,
+               "mae_pct": -1.14, "exit_reason": "GAP_EXIT", "post_exit_note": "kept falling - exit was right"}]
+html_fr = n_fr._opening_burst_html(orcl_trade)
+check("names the attempted, filled and unfilled counts",
+      "9 entered, 1 filled, 8 unfilled" in html_fr, html_fr[:1500])
+check("shows the fill rate as a percentage", "11% fill rate" in html_fr, html_fr[:1500])
+
+n_full = EmailNotifier.__new__(EmailNotifier)
+n_full.run_context = {"opening_burst_summary": {"taken": 1}}
+check("everything filled -> no fill-rate callout needed",
+      "fill rate" not in n_full._opening_burst_html(orcl_trade))
+
+n_nosum = EmailNotifier.__new__(EmailNotifier)
+check("no run_context at all -> still renders, just without the fill-rate line",
+      bool(n_nosum._opening_burst_html(orcl_trade)) and "fill rate" not in n_nosum._opening_burst_html(orcl_trade))
+
+print("\n=== 13c. EMPTY-STATE VERDICT DISTINGUISHES 0 ATTEMPTED FROM 0 FILLED ===")
+n_zero_fill = EmailNotifier.__new__(EmailNotifier)
+summary_attempted = {"measured": 23, "threshold": 0.3, "qualified": 9, "best_move": 2.073,
+                     "taken": 9, "window": "09:30-09:33"}
+h_zero_fill = n_zero_fill._opening_burst_empty_html(summary_attempted)
+check("explicitly names a fill-rate failure, not a vague 'no entry completed'",
+      "9 entry attempt(s) were made but NONE filled" in h_zero_fill, h_zero_fill)
+
+n_zero_attempt = EmailNotifier.__new__(EmailNotifier)
+summary_none_taken = {**summary_attempted, "taken": 0}
+h_zero_attempt = n_zero_attempt._opening_burst_empty_html(summary_none_taken)
+check("...vs genuinely nothing attempted, worded differently",
+      "no entry was attempted" in h_zero_attempt
+      and "NONE filled" not in h_zero_attempt, h_zero_attempt)
+
 print("\n=== 14. THE THREE SILENT FAILURES ===")
 # Each of these would have produced NO error and NO opening trades - the mode
 # would simply have done nothing while the logs looked normal. They are tested

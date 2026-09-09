@@ -525,6 +525,25 @@ class EmailNotifier:
         wr = (len(wins) / len(ob) * 100) if ob else 0
         pl_color = "#10b981" if total >= 0 else "#ef4444"
 
+        # FILL RATE. len(ob) only ever contains entries that actually filled -
+        # a marketable-limit entry that never crosses never produces a
+        # trade_history.csv row at all, so a bad session here looked
+        # identical to a quiet one until this was added. 2026-09-08: the
+        # burst took 9 entries and only 1 (ORCL) filled - the other 8 sat
+        # unfilled and were dropped as phantoms with no visible trace in this
+        # section at all before this line existed. `summary["taken"]` is the
+        # attempted count, set at burst-close time regardless of fill status.
+        fill_rate_html = ""
+        attempted = (summary or {}).get("taken")
+        if isinstance(attempted, int) and attempted > len(ob):
+            unfilled = attempted - len(ob)
+            fill_rate_html = (
+                '<div style="font-size:12px;color:#92400e;margin-top:6px;'
+                'font-weight:600;">'
+                f'{attempted} entered, {len(ob)} filled, {unfilled} unfilled - '
+                f'{len(ob) / attempted * 100:.0f}% fill rate</div>'
+            )
+
         def pct(t):
             v = t.get("pl_pct")
             return f"{v:+.2f}%" if isinstance(v, (int, float)) else "N/A"
@@ -567,6 +586,7 @@ class EmailNotifier:
             'symbols only. Reported separately because these run under different '
             'rules than the rest of the session - mixing them would make both '
             'numbers unreadable.</div>'
+            + fill_rate_html
             + self._opening_exit_profile_html() +
             '</div>'
             + self._after_exit_ratio_html(ob) +
@@ -587,13 +607,24 @@ class EmailNotifier:
         """
         measured, thresh = s.get("measured") or 0, s.get("threshold")
         best = s.get("best_move")
+        attempted = s.get("taken") or 0
         if measured:
+            if best is not None and best < (thresh or 0):
+                outcome = "This is a THRESHOLD result - the mechanism worked."
+            elif attempted:
+                # Distinguished from "no entry completed" - see the 2026-09-08
+                # incident (9 attempted, 1 filled) that motivated tracking
+                # this separately from qualification at all.
+                outcome = (
+                    f"{attempted} entry attempt(s) were made but NONE filled - "
+                    f"a fill-rate problem (see Executor.retry_unfilled_entries), "
+                    f"not a threshold or measurement one."
+                )
+            else:
+                outcome = "Qualifying symbols existed but no entry was attempted."
             verdict = (
                 f"Ran and measured {measured} symbol(s); {s.get('qualified', 0)} cleared "
-                f"the {thresh}% threshold. Best move {best:+.3f}%. "
-                + ("This is a THRESHOLD result - the mechanism worked."
-                   if best is not None and best < (thresh or 0)
-                   else "Qualifying symbols existed but no entry completed.")
+                f"the {thresh}% threshold. Best move {best:+.3f}%. " + outcome
             )
             colour = "#92400e"
         else:

@@ -3462,6 +3462,20 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         except Exception as e:
             logger.debug(f"retry_unconfirmed_exits skipped: {e}")
 
+        # UNFILLED-ENTRY SAFETY NET. The mirror image of the block above, for
+        # the opposite failure: a marketable-limit ENTRY that never crosses,
+        # which nothing re-checks because an entry signal fires once (see
+        # Executor.retry_unfilled_entries). 2026-09-08: the opening burst
+        # took 9 entries and only 1 filled - the other 8 sat unfilled and
+        # were only ever discovered, and dropped, by the exit-side phantom
+        # guard minutes later.
+        try:
+            _filled_entries, _abandoned_entries = executor.retry_unfilled_entries()
+            for _sym in _abandoned_entries:
+                strategy.drop_phantom(_sym)
+        except Exception as e:
+            logger.debug(f"retry_unfilled_entries skipped: {e}")
+
         # PERIODIC RECONCILE. The broker is truth; this reports divergence and
         # alerts, it does not silently repair - see
         # Executor.reconcile_against_broker for why repair belongs at the

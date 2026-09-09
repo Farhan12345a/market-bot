@@ -69,6 +69,8 @@ class Broker:
         self.sell_calls.append((symbol, qty, side))
         if side == "sell":
             self.holdings[symbol] = max(0, self.holdings.get(symbol, 0) - qty)
+        elif side == "buy":
+            self.holdings[symbol] = self.holdings.get(symbol, 0) + qty
         return Order()
 
 
@@ -198,6 +200,71 @@ check("immediately retrying again does nothing - still inside the cooldown",
       e8.retry_unconfirmed_exits(grace_seconds=15) == [])
 check("the retry timestamp did not reset to now - a real cooldown is enforced",
       first_retry_ts < time.monotonic() - 1, first_retry_ts)
+
+print("\n=== 9. retry_unfilled_entries FORCES A MARKET BUY (2026-09-08 opening burst) ===")
+# The real incident: the opening burst took 9 entries, only 1 (ORCL) filled.
+# The other 8 sat as unfilled marketable-limit buys - 0 shares held - and
+# were only ever discovered, and dropped, by the EXIT side's phantom guard
+# minutes later. This is the entry-side fix: verify the fill, force ONE
+# market attempt if it never crossed.
+b9 = Broker(holdings={})   # nothing filled yet
+e9 = mk_executor(b9, "NBIS", tracked_qty=5)
+e9._pending_entry_verify["NBIS"] = {"ts": time.monotonic() - 999, "qty": 5}
+filled9, abandoned9 = e9.retry_unfilled_entries(grace_seconds=15)
+check("the stuck entry order is cancelled before the forced buy",
+      "NBIS" in b9.cancelled, b9.cancelled)
+check("a market BUY is submitted for the full tracked qty",
+      b9.sell_calls == [("NBIS", 5, "buy")], b9.sell_calls)
+check("reported as filled, not abandoned",
+      filled9 == [("NBIS", 5)] and abandoned9 == [], (filled9, abandoned9))
+check("NBIS is cleared from pending verification", "NBIS" not in e9._pending_entry_verify)
+check("executor-side tracking is left INTACT for a successful forced fill "
+      "(no phantom cleanup needed)", "NBIS" in e9._open_symbols)
+
+print("\n=== 10. retry_unfilled_entries GIVES UP AFTER ONE FAILED ATTEMPT ===")
+# Deliberately NOT the same policy as the exit side, which retries forever
+# with a cooldown - an exit must eventually complete, an unfilled entry has
+# no such obligation. One forced try, then drop the phantom.
+b10 = AlwaysRejectsBroker(holdings={})
+e10 = mk_executor(b10, "AXTI", tracked_qty=10)
+e10._pending_entry_verify["AXTI"] = {"ts": time.monotonic() - 999, "qty": 10}
+filled10, abandoned10 = e10.retry_unfilled_entries(grace_seconds=15)
+check("reported as abandoned, not filled",
+      filled10 == [] and abandoned10 == ["AXTI"], (filled10, abandoned10))
+check("AXTI is cleared from pending verification", "AXTI" not in e10._pending_entry_verify)
+check("executor-side bookkeeping is cleaned up like any other phantom",
+      "AXTI" not in e10._open_symbols and "AXTI" not in e10.open_entries
+      and "AXTI" not in e10._entry_recorded_at and "AXTI" not in e10._pending_cost)
+check("does NOT retry again on the very next call - it already gave up",
+      e10.retry_unfilled_entries(grace_seconds=15) == ([], []))
+
+print("\n=== 11. A PARTIAL OR FULL FILL NEEDS NO FORCED RETRY AT ALL ===")
+b11 = Broker(holdings={"IONQ": 3})   # tracked 5, broker already shows 3
+e11 = mk_executor(b11, "IONQ", tracked_qty=5)
+e11._pending_entry_verify["IONQ"] = {"ts": time.monotonic() - 999, "qty": 5}
+filled11, abandoned11 = e11.retry_unfilled_entries(grace_seconds=15)
+check("a partial fill is left alone - the exit side's own qty correction "
+      "handles selling only what is actually held",
+      filled11 == [] and abandoned11 == [], (filled11, abandoned11))
+check("no forced order was ever submitted", b11.sell_calls == [], b11.sell_calls)
+check("cleared from pending anyway - it is resolved, just not by force",
+      "IONQ" not in e11._pending_entry_verify)
+
+print("\n=== 12. STILL INSIDE THE GRACE PERIOD -> LEFT ALONE ===")
+b12 = Broker(holdings={})
+e12 = mk_executor(b12, "MRVL", tracked_qty=8)
+e12._pending_entry_verify["MRVL"] = {"ts": time.monotonic(), "qty": 8}  # just now
+filled12, abandoned12 = e12.retry_unfilled_entries(grace_seconds=15)
+check("nothing forced yet - still well inside the grace window",
+      filled12 == [] and abandoned12 == [], (filled12, abandoned12))
+check("still pending for the next poll", "MRVL" in e12._pending_entry_verify)
+check("no order submitted prematurely", b12.sell_calls == [], b12.sell_calls)
+
+print("\n=== 13. main.py IS WIRED TO THE ENTRY-SIDE SAFETY NET TOO ===")
+check("retry_unfilled_entries is actually called from the poll loop",
+      "executor.retry_unfilled_entries()" in src)
+check("an abandoned entry is dropped from Strategy, not left half-tracked",
+      "strategy.drop_phantom(_sym)" in src)
 
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)

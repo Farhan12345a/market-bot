@@ -22,6 +22,8 @@ class MarketDataManager:
         self._tick_entries = 0
         self._last_entry_source = {}   # entry prices taken from a live trade
         self._bar_entries = 0    # entry prices that fell back to the bar close
+        self._trading_day_cache = {}   # {"date": date, "value": bool} - one
+                                        # calendar lookup per day, not per poll
 
     def get_20day_avg_volume(self, symbol):
         """Get 20-day average volume"""
@@ -223,12 +225,47 @@ class MarketDataManager:
 
     def is_trading_day(self, now=None):
         """
-        True if today is a weekday. Mirrors is_market_open's own weekday-only
-        notion of a trading day - neither consults a holiday calendar, so both
-        will treat a market holiday as a trading day and simply find no data.
+        True if the market actually trades today - a weekday AND not a
+        holiday (2026-09-08: the pre-market pipeline had no way to tell a
+        holiday from a normal Tuesday, so it would screen, subscribe the
+        stream and arm the opening burst on a day the exchange was never
+        going to open).
+
+        Consults Alpaca's own trading calendar, cached once per calendar day
+        - this is called from the pre-market polling loop, potentially many
+        times per iteration (see _try_prestart_stream's own comment on why),
+        so a live API call on every check would be both wasteful and a new
+        way for stream latency to leak into a hot path.
+
+        FAILS OPEN to the plain weekday check if the calendar call itself
+        fails (network hiccup, rate limit) - a wrong "no" here silently
+        cancels a real trading day with nothing else to catch it, which is a
+        worse failure than occasionally running the pipeline on an actual
+        holiday and simply finding no data, exactly as it already did before
+        this method existed.
         """
         now = now or datetime.now(self.et)
-        return now.weekday() < 5
+        today = now.date()
+        weekday = now.weekday() < 5
+
+        cached = self._trading_day_cache
+        if cached.get("date") == today:
+            return cached["value"]
+
+        value = weekday
+        if weekday:
+            try:
+                calendar = self.broker.get_calendar(today)
+                value = bool(calendar)
+            except Exception as e:
+                logger.warning(
+                    f"is_trading_day: holiday calendar check failed ({e}) - "
+                    f"falling back to weekday-only for {today}"
+                )
+                value = True
+
+        self._trading_day_cache = {"date": today, "value": value}
+        return value
 
     def is_market_open(self):
         """Check if the market is currently open"""
@@ -236,8 +273,11 @@ class MarketDataManager:
         market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
         market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
 
-        # Check if it's a weekday
-        if now.weekday() >= 5:  # Saturday or Sunday
+        # Weekday AND not a holiday - see is_trading_day's own docstring for
+        # why this is a calendar check, not just now.weekday() >= 5. Without
+        # it, 9:30-16:00 on a market holiday reads as "open" and the live
+        # trading loop runs against a market that never actually opened.
+        if not self.is_trading_day(now):
             return False
 
         return market_open <= now <= market_close
