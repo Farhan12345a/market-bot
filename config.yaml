@@ -214,31 +214,39 @@ trading:
     # trade that has 20+ minutes to work; this one is not.
     #
     #                        normal      opening      why
-    #   first exit           -0.5%       -0.3%        cut a failed open faster
-    #   final exit           -1.0%       -0.35%       cap the damage sooner
-    #   trailing stop         0.75%       0.40%       give back less of a fast move
+    #   first exit           -0.7%       -0.55%       cut a failed open faster
+    #   final exit           -1.0%       -0.65%       cap the damage sooner
+    #   trailing stop         0.75%       0.75%       give back less of a fast move
     #   take-profit tiers    1.0/1.25/1.5  0.75/1.0/1.25  take what a 3-min move gives
     #   breakeven trigger    0.5 / 0.3    0.15        protect sooner
     #
-    # final exit -0.6% -> -0.35% for 2026-09-02, on request ("Hard stop:
-    # -0.35%, Trailing: 0.40%, BE: +0.15%"). Trailing and BE were already at
-    # those values (set 2026-08-31/09-01) - only the hard stop was still -0.6%.
-    # first_exit_loss_pct stays at -0.3% (unchanged): it is the PARTIAL
-    # scale-out that fires before the hard stop, and -0.3% already sits
-    # tighter than -0.35%, so the ordering (partial, then full) still holds.
+    # WIDENED 2026-09-10, on request: 4 opening trades on 2026-09-09 (MRVL x3
+    # tranches, AEHR) were killed by GAP_EXIT, not by walking down to the
+    # tiered stops. check_gap_exit's threshold is gap_multiple (1.5) x
+    # abs(final_exit_loss_pct) - at the OLD -0.35% that is a 0.525% gap
+    # threshold, and MRVL's -0.86% / AEHR's -0.78% single-observation moves
+    # both cleared it, so the position was sold outright rather than given
+    # the normal tiered rules a chance. Confirmed by the arithmetic, not a
+    # guess: at the new -0.65%, the threshold becomes 0.975% and neither
+    # move would have gap-exited.
     #
-    # THE RISK, stated plainly: the opening minutes are the most volatile of the
-    # day, and a tighter stop in higher volatility is more likely to be hit by
-    # noise rather than by the trade actually failing. -0.3% is roughly 2.4x the
-    # median bid-ask measured on 2026-08-26 (0.126%), which is enough clearance
-    # for most symbols and NOT enough for the widest - HOOD quoted 0.593%, so a
-    # position in a name like that could be stopped out by the spread alone.
-    # Whether that happens is exactly what tomorrow measures; the per-trade exit
-    # reasons in the report are how it will show.
+    # trailing_stop_pct set to the SESSION's own 0.75% exactly, per request.
+    # first_exit/final_exit widened by the SAME multiplicative factor
+    # (0.75/0.40 = 1.875x) to preserve the existing first < final < trailing
+    # ordering: -0.3 -> -0.5625 -> -0.55, -0.35 -> -0.65625 -> -0.65.
+    # take_profit_tiers and breakeven_tiers deliberately UNTOUCHED - neither
+    # is a loss-causing exit, so neither was implicated in "stopped out too
+    # early."
+    #
+    # THE RISK, unchanged in kind from before: this is now much closer to
+    # the normal session's own profile, which trades the "short scalp, cut
+    # fast" premise this mode was built on for more room to be wrong before
+    # it costs anything. Judge it the same way as always - the exit-reason
+    # table and the After-Exit ratios, not a guess about which one is right.
     exits:
-      first_exit_loss_pct: -0.3
-      final_exit_loss_pct: -0.35
-      trailing_stop_pct: 0.40
+      first_exit_loss_pct: -0.55
+      final_exit_loss_pct: -0.65
+      trailing_stop_pct: 0.75
       # Measured from the ENTRY price, not from the 09:30 baseline that
       # min_move_pct uses - different anchors. A position entered at +0.5% from
       # the open needs another +0.5% to reach the first tier, i.e. roughly +1.0%
@@ -380,7 +388,8 @@ trading:
   # of the budget for SPY/QQQ, the OLD 14-symbol cap only ever streamed 12
   # tradeable names live - already short of a 14-position burst budget before
   # this change. 25 - 2 reserved = 23, still comfortably above
-  # num_stocks_to_trade (20) - every traded name streams live, none fall to
+  # num_stocks_to_trade (20 at the time; reverted to 15 on 2026-09-10, see
+  # that key) - every traded name streams live, none fall to
   # REST, with headroom to spare. num_stocks_to_trade was deliberately NOT
   # raised to match this step - the stream cap is now being tested as its own
   # live boundary, decoupled from watchlist sizing (see test_pool.py's
@@ -440,9 +449,9 @@ trading:
   # is cheap to remove as a variable.
   #
   # Benchmarks are subscribed LAST, after every tradeable symbol, so they can
-  # never displace a name the bot could actually buy. num_stocks_to_trade is 20
-  # against the budget below, so there is room; if there ever is not, they fall
-  # back to REST exactly as they do today.
+  # never displace a name the bot could actually buy. num_stocks_to_trade is 15
+  # (reverted 2026-09-10) against the budget below, so there is room; if there
+  # ever is not, they fall back to REST exactly as they do today.
   stream_benchmarks: true
 
   # Reserve two subscription slots for SPY and QQQ specifically.
@@ -2051,18 +2060,21 @@ trading:
                                  # first, which burned the first ~2.5 min of the entry window.
                                  # Leave enough headroom for screener_timeout_seconds below.
   candidates_file: "candidates.txt"  # File with candidate symbols
-  # 15 -> 20 on 2026-09-08, paired with stream_max_subscriptions below.
-  # Widens the daily traded/streamed pool so the Opening-Move Experiment
-  # (budgeted for up to opening_burst.max_positions=14) is choosing from
-  # meaningfully more than 14 candidates, not just-barely-enough. Raising
-  # this WITHOUT the stream cap would only add REST-priced (~15min delayed)
-  # names the streamed_only burst can never measure - see the dynamic-
-  # universe note above ("THIS DOES NOT HELP THE OPENING BURST... a wider
-  # watchlist means a smaller fraction streamed"), which is exactly the
-  # failure this pairing avoids. Tier 5 per CLAUDE.md - tracked as its own
-  # entry variable in PENDING_WORK.md, alongside (not merged into) the
-  # opening-burst and universe-price-band windows already running.
-  num_stocks_to_trade: 20  # Number of top stocks to select each day
+  # 15 -> 20 on 2026-09-08, reverted back to 15 on 2026-09-10. The widening's
+  # own week produced 2026-09-09 - a session full of names the screener had
+  # never or rarely traded before (COHR, CBRS, SMTC, OKLO, FIGR, GFS, DPC),
+  # with a visibly worse selection edge (taken -0.115% vs skipped +0.190% 15
+  # -min forward return - "if skipped beats taken, the selection logic is
+  # actively picking the worse half"). One session cannot prove the wider
+  # pool is worse rather than just a bad day, but the user's call was to
+  # revert rather than wait for more evidence, and reverting is free - this
+  # is an entry setting (Tier 5, replay cannot evaluate it in retrospect),
+  # so the honest read is "we don't know if 20 was actually bad," not "20
+  # was proven bad." stream_max_subscriptions (still 25) was DELIBERATELY
+  # NOT reverted alongside this - it is a separate lever (live vs REST
+  # price coverage, not universe breadth) and now has more headroom than
+  # ever relative to a 15-name watchlist, which is strictly fine.
+  num_stocks_to_trade: 15  # Number of top stocks to select each day
   # ---------------------------------------------------------------------
   # Opening-move history (added 2026-08-21)
   # ---------------------------------------------------------------------

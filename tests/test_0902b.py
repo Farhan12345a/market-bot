@@ -597,8 +597,10 @@ check("flatten_all_positions still reads the position SIGN",
       'side = "buy" if raw_qty < 0 else "sell"' in esrc)
 check("...and still guards each position separately",
       esrc.count("except Exception") >= 5)
-check("the burst still runs its own tighter exit profile",
-      t["opening_burst"]["exits"]["final_exit_loss_pct"] == -0.35)
+check("the burst still runs its own tighter final exit than the session",
+      t["opening_burst"]["exits"]["final_exit_loss_pct"] == -0.65
+      and t["opening_burst"]["exits"]["final_exit_loss_pct"] > t["final_exit_loss_pct"],
+      (t["opening_burst"]["exits"]["final_exit_loss_pct"], t["final_exit_loss_pct"]))
 check("multifactor_rank still OFF (it inverted move order)",
       t["opening_burst"]["multifactor_rank"] is False)
 check("max_daily_entries unchanged", t["max_daily_entries"] == 50)

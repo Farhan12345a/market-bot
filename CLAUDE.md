@@ -11,8 +11,9 @@ break the thing each one exists to protect.
 
 `opening_burst` in config.yaml, `_run_opening_move_exp` in src/main.py.
 
-Its own measurement window, its own exit profile (-0.3% first / -0.35% final /
-0.4% trail / +0.15% breakeven), its own budget of `max_positions: 14` at
+Its own measurement window, its own exit profile (-0.55% first / -0.65%
+final / 0.75% trail (matches the session, widened 2026-09-10 after a
+GAP_EXIT incident) / +0.15% breakeven), its own budget of `max_positions: 14` at
 `size_multiplier: 0.6` (7 / 0.5 before 2026-09-08). Since 2026-09-08 this
 budget is deliberately allowed to exceed `max_concurrent_positions` (10) -
 exempted in `Executor.pre_entry_check`, same reasoning as the rate-limit

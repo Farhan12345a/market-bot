@@ -283,7 +283,15 @@ if prev.returncode == 0:
             "final_exit_loss_pct", "trailing_stop_pct",
             "breakeven_tiers", "use_resistance_exit",
             "use_breakeven_floor", "reentry_cooldown_minutes",
-            "use_continuation_score"]
+            "use_continuation_score",
+            # 15 -> 20 on 2026-09-08 (see `deliberate`'s old comment, still
+            # below for the historical record) -> back to 15 on 2026-09-10:
+            # the universe widening was judged to have made 2026-09-09's
+            # selection edge worse (see PENDING_WORK.md), so this round-tripped
+            # to baseline. stream_max_subscriptions (25) was deliberately NOT
+            # reverted alongside it - it is a data-coverage cap, not a
+            # selection-pool size, and has no downside at a smaller pool.
+            "num_stocks_to_trade"]
 
     # DELIBERATELY CHANGED THIS RUN, and listed here rather than quietly
     # removed from `same`. This guard's whole job is to make an entry-setting
@@ -314,15 +322,6 @@ if prev.returncode == 0:
         # with min_stock_price as ONE variable, "universe price band 20-400" -
         # see PENDING_WORK.md's "Active entry-variable measurement window".
         "max_stock_price": (300, 400),
-        # 15 -> 20 on 2026-09-08, moved from `same` to here. Widens the daily
-        # traded/streamed pool so the Opening-Move Experiment (now budgeted
-        # for up to 14 positions, see opening_burst.max_positions) is choosing
-        # from more than just-barely-enough candidates. Paired with
-        # stream_max_subscriptions 14 -> 20 above (in `changed`) - raising
-        # this alone without the stream cap would only add REST-priced names
-        # the streamed_only burst can never see (config.yaml's own comment on
-        # use_dynamic_universe warned of exactly this failure mode).
-        "num_stocks_to_trade": (15, 20),
     }
     for k in same:
         check(f"{k} unchanged", old.get(k) == t.get(k), (old.get(k), t.get(k)))
@@ -331,11 +330,12 @@ if prev.returncode == 0:
               old.get(k) == was and t.get(k) == now, (old.get(k), t.get(k)))
     check("exactly the acknowledged entry variables moved this run - "
           "min_stock_price and max_stock_price count as ONE (the universe "
-          "price band), and num_stocks_to_trade is a second, separate one "
-          "moving alongside it on purpose (see the comment above); anything "
-          "beyond these would be an UNacknowledged stack",
-          set(deliberate) == {"min_stock_price", "max_stock_price",
-                              "num_stocks_to_trade"}, list(deliberate))
+          "price band); num_stocks_to_trade round-tripped back to baseline "
+          "on 2026-09-10 and moved to `same` above, so it is no longer a "
+          "live deviation. Anything beyond these would be an UNacknowledged "
+          "stack",
+          set(deliberate) == {"min_stock_price", "max_stock_price"},
+          list(deliberate))
     check("stock_universe unchanged",
           sorted(old.get("stock_universe", [])) == sorted(t.get("stock_universe", [])),
           (len(old.get("stock_universe", [])), len(t.get("stock_universe", []))))

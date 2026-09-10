@@ -441,9 +441,13 @@ from src.strategy.strategy import Strategy, TradeManager
 oc = M._opening_exit_config(CFG)
 check("an exits block produces an override config", oc is not None)
 n_, o_ = CFG["trading"], oc["trading"]
-check("first exit is tighter", o_["first_exit_loss_pct"] == -0.3 and n_["first_exit_loss_pct"] == -0.7)
-check("final exit is tighter", o_["final_exit_loss_pct"] == -0.35 and n_["final_exit_loss_pct"] == -1.0)
-check("trailing stop is tighter", o_["trailing_stop_pct"] == 0.40 and n_["trailing_stop_pct"] == 0.75)
+check("first exit is tighter", o_["first_exit_loss_pct"] == -0.55 and n_["first_exit_loss_pct"] == -0.7)
+check("final exit is tighter", o_["final_exit_loss_pct"] == -0.65 and n_["final_exit_loss_pct"] == -1.0)
+# 2026-09-10: widened to MATCH the session's trailing stop exactly (0.4 ->
+# 0.75), not just "tighter" - see the config.yaml comment on why (the
+# 2026-09-09 GAP_EXIT incident).
+check("trailing stop now matches the session's exactly",
+      o_["trailing_stop_pct"] == 0.75 and n_["trailing_stop_pct"] == 0.75)
 # 0.5/0.75/1.0 -> 0.75/1.0/1.25 for 2026-09-01.
 check("take-profit tiers are tighter than the session's",
       [t["gain_pct"] for t in o_["take_profit_tiers"]] == [0.75, 1.0, 1.25],
@@ -514,27 +518,32 @@ run(cfg(), md, rs, ex, ["AAA"], st, at("09:31"))
 tm = rs.trades.get("AAA")
 check("the position exists", tm is not None)
 check("it carries the TIGHT first exit",
-      tm.config["trading"]["first_exit_loss_pct"] == -0.3,
+      tm.config["trading"]["first_exit_loss_pct"] == -0.55,
       tm.config["trading"]["first_exit_loss_pct"])
-check("it carries the TIGHT trailing stop", tm.config["trading"]["trailing_stop_pct"] == 0.40)
-# and the tight stop actually fires earlier than the normal one would
+check("it carries the trailing stop matching the session's",
+      tm.config["trading"]["trailing_stop_pct"] == 0.75)
+# and the tight first exit actually fires earlier than the normal one would
 tight = TradeManager("T", 100.0, 100, oc)
 loose = TradeManager("L", 100.0, 100, CFG)
-px = 100.0 * (1 - 0.004)          # -0.4%: past the tight stop, short of the loose one
-check("-0.4% trips the opening first exit", tight.check_first_exit(px) > 0)
-check("-0.4% does NOT trip the normal one", loose.check_first_exit(px) == 0)
+px = 100.0 * (1 - 0.006)          # -0.6%: past the opening first exit (-0.55%), short of the normal one (-0.7%)
+check("-0.6% trips the opening first exit", tight.check_first_exit(px) > 0)
+check("-0.6% does NOT trip the normal one", loose.check_first_exit(px) == 0)
 
 print("\n=== 19. REPORT SHOWS THE PROFILE ===")
 rows = M._opening_exit_profile_rows(CFG)
-check("rows are produced", len(rows) >= 4, rows)
+check("rows are produced", len(rows) >= 3, rows)
 check("only DIFFERING rows are shown", all(r[1] != r[2] for r in rows), rows)
 labels = {r[0] for r in rows}
-check("covers the stops", {"first exit", "final exit", "trailing stop"} <= labels, labels)
+# 2026-09-10: trailing stop no longer differs (both 0.75%) so it correctly
+# drops OUT of this list - "only differing rows" means exactly that.
+check("covers the two exits that still differ", {"first exit", "final exit"} <= labels, labels)
+check("trailing stop is no longer listed - it matches the session now",
+      "trailing stop" not in labels, labels)
 n2 = EmailNotifier.__new__(EmailNotifier)
 n2.run_context = {"opening_exits": rows}
 html = n2._opening_exit_profile_html()
-check("renders into the report", "-0.3%" in html and "0.4%" in html, html[:200])
-check("shows the normal side for comparison", "-0.7%" in html and "0.75%" in html)
+check("renders into the report", "-0.55%" in html and "-0.65%" in html, html[:200])
+check("shows the normal side for comparison", "-0.7%" in html and "-1.0%" in html)
 n3 = EmailNotifier.__new__(EmailNotifier)
 n3.run_context = {}
 check("no profile -> nothing rendered", n3._opening_exit_profile_html() == "")
@@ -659,7 +668,7 @@ check("only the +0.8% mover is bought", [o["symbol"] for o in ex2.orders] == ["W
       [o["symbol"] for o in ex2.orders])
 check("it carries the opening exit profile",
       rs2.trades["WIN"]["cfg"] is not None and
-      rs2.trades["WIN"]["cfg"]["trading"]["first_exit_loss_pct"] == -0.3)
+      rs2.trades["WIN"]["cfg"]["trading"]["first_exit_loss_pct"] == -0.55)
 j2 = Journal()
 run(c, md, rs2, ex2, ["WIN", "FLAT", "DOWN"], st, at("09:33"), journal=j2)
 check("the window closes", st["done"] is True)
@@ -751,9 +760,9 @@ from src.strategy.strategy import TradeManager
 oc = M._opening_exit_config(CFG)
 tight = TradeManager("T", 100.0, 100, oc)
 loose = TradeManager("L", 100.0, 100, CFG)
-px = 100.0 * (1 - 0.004)
-check("-0.4% exits a BURST position", tight.check_first_exit(px) > 0)
-check("-0.4% does NOT exit a NORMAL position", loose.check_first_exit(px) == 0)
+px = 100.0 * (1 - 0.006)   # -0.6%: past the burst's -0.55%, short of the session's -0.7%
+check("-0.6% exits a BURST position", tight.check_first_exit(px) > 0)
+check("-0.6% does NOT exit a NORMAL position", loose.check_first_exit(px) == 0)
 check("the session config is not mutated by building the profile",
       CFG["trading"]["first_exit_loss_pct"] == -0.7)
 

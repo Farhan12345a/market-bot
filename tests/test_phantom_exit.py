@@ -339,5 +339,59 @@ check("falls back to a plain market order after the limit attempt fails",
 check("still filled overall despite the limit-order failure",
       filled17 == [("AXTI", 7)] and abandoned17 == [])
 
+print("\n=== 18. THE 2026-09-09 ORPHAN BUG: an early exit-side phantom drop "
+      "must prevent a LATER forced entry retry ===")
+# The real incident, in order: the opening burst submits a marketable-limit
+# BUY for BE. Within the same minute a GAP_EXIT condition fires against it;
+# submit_exit_order checks the broker, finds 0 shares held (the buy has not
+# crossed yet), and correctly drops BE as a phantom - _open_symbols,
+# open_entries, _pending_cost all cleared. But _pending_entry_verify was
+# NEVER told about this drop, so minutes later retry_unfilled_entries saw
+# BE still pending, forced a market buy, and created a REAL position
+# Strategy had already forgotten about. It sat with no exit rule watching
+# it until the 16:00 FLATTEN_ALL closed it at -2.10% - outside the -1.0%
+# final-exit cap that would have bounded it had it still been tracked.
+# ASTS (-4.83%), COHR (-1.59%) and HUT (-5.89%) hit the identical shape the
+# same morning.
+b18 = Broker(holdings={})   # BE's buy has not filled yet
+e18 = mk_executor(b18, "BE", tracked_qty=7, price=276.63)
+# submit_entry_order would have set this when the burst order went out;
+# reproduced by hand since this test starts from "entry already submitted".
+e18._pending_entry_verify["BE"] = {"ts": time.monotonic() - 999, "qty": 7}
+
+exit_result = e18.submit_exit_order("BE", 7, "GAP_EXIT", price=270.83)
+check("the exit correctly reads it as a phantom (0 shares held)",
+      exit_result is PHANTOM_EXIT, exit_result)
+check("...and now ALSO clears _pending_entry_verify, not just the other four dicts",
+      "BE" not in e18._pending_entry_verify, e18._pending_entry_verify)
+
+filled18, abandoned18 = e18.retry_unfilled_entries(grace_seconds=12)
+check("retry_unfilled_entries finds nothing left to act on",
+      filled18 == [] and abandoned18 == [], (filled18, abandoned18))
+check("NO buy of any kind was ever submitted for the abandoned phantom",
+      b18.sell_calls == [] and b18.limit_calls == [], (b18.sell_calls, b18.limit_calls))
+
+print("\n=== 19. DEFENSE IN DEPTH: retry_unfilled_entries refuses to revive "
+      "ANY symbol no longer in _open_symbols, regardless of how it got "
+      "there ===")
+# Not relying solely on every cleanup site remembering to pop
+# _pending_entry_verify (section 18 covers the one that mattered on
+# 2026-09-09) - this is the general backstop, tested directly: even a
+# symbol that is STILL sitting in _pending_entry_verify (as if some other,
+# future code path forgot to clean it up) must never get a forced buy once
+# it is not in _open_symbols.
+b19 = Broker(holdings={})
+e19 = Executor(b19, copy.deepcopy(CFG))
+e19._pending_entry_verify["COHR"] = {"ts": time.monotonic() - 999, "qty": 6}
+check("COHR is deliberately NOT in _open_symbols for this test",
+      "COHR" not in e19._open_symbols)
+filled19, abandoned19 = e19.retry_unfilled_entries(grace_seconds=12)
+check("refuses to force a retry for an untracked symbol",
+      filled19 == [] and abandoned19 == [], (filled19, abandoned19))
+check("no order of any kind was submitted",
+      b19.sell_calls == [] and b19.limit_calls == [], (b19.sell_calls, b19.limit_calls))
+check("the stale pending-verify entry is cleaned up anyway",
+      "COHR" not in e19._pending_entry_verify)
+
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)

@@ -766,6 +766,31 @@ class Executor:
                 self._pending_entry_verify.pop(symbol, None)
                 continue
 
+            if symbol not in self._open_symbols:
+                # 2026-09-09: the exact bug this guards against. An exit
+                # condition (GAP_EXIT) fired within the SAME minute as the
+                # entry, found 0 shares held (order still working), and
+                # submit_exit_order's phantom guard correctly dropped
+                # _open_symbols/open_entries/strategy.trades - but had no way
+                # to know this dict existed, so _pending_entry_verify kept
+                # the symbol. Without this check, this method would later
+                # force a market/wide-limit BUY anyway, creating a REAL
+                # position that Strategy had already forgotten about -
+                # untracked, unprotected by any exit rule, discovered only
+                # by the 16:00 FLATTEN_ALL. ASTS, BE, COHR and HUT did
+                # exactly this and lost -4.83%/-2.10%/-1.59%/-5.89%, all far
+                # outside the -1.0% final-exit cap that would have bounded
+                # them had they still been tracked. Once ANYTHING has
+                # decided this symbol is no longer an open position, this
+                # method must never revive it.
+                logger.info(
+                    f"{symbol}: no longer tracked as an open position "
+                    f"(dropped elsewhere, e.g. the exit-side phantom guard) "
+                    f"- NOT forcing a retry buy for it"
+                )
+                self._pending_entry_verify.pop(symbol, None)
+                continue
+
             age = time.monotonic() - info.get("ts", 0)
             if age < grace_seconds:
                 continue  # still inside the normal fill window
@@ -1439,6 +1464,12 @@ class Executor:
                 self._pending_cost.pop(symbol, None)
                 self.open_entries.pop(symbol, None)
                 self._phantom_dropped_at[symbol] = time.monotonic()
+                # 2026-09-09: without this, retry_unfilled_entries had no
+                # way to know this symbol was just abandoned here and would
+                # later force a fresh buy for it anyway - see that method's
+                # own _open_symbols check, which is the real backstop; this
+                # is just not leaving a stale entry sitting for no reason.
+                self._pending_entry_verify.pop(symbol, None)
                 return PHANTOM_EXIT
 
             if live_qty is not None and live_qty < qty:
@@ -1561,6 +1592,13 @@ class Executor:
             self._open_symbols.discard(symbol)
             self._entry_recorded_at.pop(symbol, None)
             self._pending_cost.pop(symbol, None)
+            # A genuinely closed position stops being "pending fill
+            # verification" too - see the same note on the phantom-drop
+            # above. Without this a stale entry could sit here until
+            # retry_unfilled_entries' own _open_symbols check (the real
+            # backstop) catches it, harmless but pointless to leave lying
+            # around for the life of the session.
+            self._pending_entry_verify.pop(symbol, None)
             # Computed here rather than from trade_record below, because the
             # record-keeping block is wrapped in its own try/except and must
             # never be what decides whether a cooldown gets applied.
