@@ -3199,6 +3199,23 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         # one file open per poll instead of one per open position.
         _path_buffer = []
         for symbol in list(strategy.get_open_trades().keys()):
+            if symbol in executor._pending_entry_verify:
+                # 2026-09-10: this loop's own docstring says "from the moment
+                # it opens" - literally true, since a position is tracked at
+                # ORDER-SUBMIT time, not fill time. During opening_fast_poll
+                # (every ~3s) that meant an exit condition could fire on a
+                # marketable-limit entry that hadn't even crossed the spread
+                # yet, discover 0 shares held, and phantom-drop it - all
+                # before retry_unfilled_entries' own 12s grace period ever
+                # got a chance to force a retry, because this loop runs BEFORE
+                # that safety net in the same poll (see main.py's poll order).
+                # Confirmed the actual mechanism behind the 09-03/09-04/09-10
+                # phantom clusters: every one of them was dropped by THIS
+                # loop's exit check, never by retry_unfilled_entries giving up.
+                # Skipping a symbol here costs nothing but deferring its exit
+                # check until it fills, force-retries, or is abandoned - all
+                # three already clear _pending_entry_verify on their own.
+                continue
             try:
                 current_bar = market_data.get_latest_bar(symbol, "1Min")
                 if not current_bar:

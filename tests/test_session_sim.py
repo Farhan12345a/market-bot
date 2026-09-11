@@ -778,5 +778,118 @@ if True:
     check("the reset is explicit at session start, not a side effect",
           "executor.regime_size_multiplier = 1.0" in open(repo_file("src", "main.py")).read())
 
+print("\n=== 10. THE 2026-09-10 EXIT-CHECK RACE: an entry still filling must "
+      "not be phantom-dropped before its own grace period elapses ===")
+# The exit-check loop evaluates every symbol in strategy.get_open_trades()
+# "from the moment it opens" - literally true, since a position is tracked
+# at ORDER-SUBMIT time, not fill time. Before this fix, an exit condition
+# firing on the very next poll (opening_fast_poll runs every ~3s) could hit
+# a marketable-limit entry that had not crossed the spread yet, find 0
+# shares held, and phantom-drop it - before retry_unfilled_entries' own
+# grace period ever got a chance to force it through, because that safety
+# net runs AFTER the exit-check loop in the same poll. Confirmed as the
+# actual mechanism behind the 2026-09-03/09-04/09-10 phantom clusters (see
+# PENDING_WORK.md). This scenario reproduces it: ZZZ's limit BUY never
+# fills through the normal route, and its price crashes hard one poll
+# later - hard enough to trip an exit rule instantly if one were allowed to
+# evaluate it while still unconfirmed.
+cfg10 = base_config()
+cfg10["trading"]["entry_check_interval_seconds"] = 3   # mirrors opening_fast_poll's cadence
+scripts10 = {
+    # Held flat until minute 20 - well past the opening-burst window (closes
+    # 09:33) and its normal-window suppression (until 09:45), so this is a
+    # plain RAPID_INCREASE entry, not entangled with burst mechanics. Then
+    # rises enough to trigger entry, and crashes hard 12s later - if an exit
+    # rule were evaluated against this before the entry is confirmed filled,
+    # it would trigger instantly.
+    "ZZZ": Script(100.0, [(0, 0.0), (20, 0.5), (22, 0.9), (22.2, -3.5)]),
+    "SPY": Script(500.0, [(0, 0.0), (5, 0.2), (15, 0.35), (60, 0.5)]),
+    "QQQ": Script(400.0, [(0, 0.0), (5, 0.25), (15, 0.4), (60, 0.6)]),
+}
+
+
+class SlowEntryBroker(FakeBroker):
+    """ZZZ's marketable-limit BUY never fills through this route - models a
+    limit order still sitting on the book, unfilled, exactly the scenario
+    retry_unfilled_entries and the exit-check skip both exist for. Any
+    OTHER order (sells, market buys, any other symbol, including ZZZ's own
+    later forced-retry market buy) behaves exactly like FakeBroker."""
+    def submit_limit_order(self, symbol, qty, limit_price, side="buy",
+                           extended_hours=False):
+        if symbol == "ZZZ" and side == "buy":
+            self.limit_orders.append((symbol, qty, limit_price, side))
+            self.n += 1
+            return FakeOrder(f"stuck{self.n}", symbol, qty, side)
+        return super().submit_limit_order(symbol, qty, limit_price, side, extended_hours)
+
+
+today10 = datetime.now(ET).replace(second=0, microsecond=0)
+clock10 = FakeClock(today10.replace(hour=9, minute=26))
+mkt10 = FakeMarketData(scripts10, clock10, today10.replace(hour=9, minute=30))
+brk10 = SlowEntryBroker(mkt10)
+from src.executor.executor import Executor as Ex10
+from src.strategy.strategy import Strategy as St10
+import src.main as M10
+ex10, st10 = Ex10(brk10, cfg10), St10(cfg10)
+errors10 = []
+all_msgs10 = []
+
+
+class C10(logging.Handler):
+    def emit(self, rec):
+        msg = rec.getMessage()
+        all_msgs10.append(msg)
+        if rec.levelno >= logging.ERROR:
+            errors10.append(msg)
+
+
+h10 = C10(); logging.getLogger().addHandler(h10)
+rdt10, rsl10 = M10.datetime, M10.time.sleep
+stop10 = today10.replace(hour=10, minute=10)
+
+
+def gs10(s):
+    clock10.sleep(s)
+    if clock10.t > stop10:
+        raise KeyboardInterrupt
+M10.datetime = ClockDatetime(clock10); M10.time.sleep = gs10
+try:
+    M10.run_trading_day(cfg10, mkt10, st10, ex10, list(mkt10.scripts),
+                       {s: 55.0 for s in mkt10.scripts}, FakeNotifier(), ET,
+                       signal_journal=M10.SignalJournal(cfg10))
+    out10 = "completed"
+except KeyboardInterrupt:
+    out10 = "TIMEBOX"
+except Exception as e:
+    out10 = e
+finally:
+    M10.datetime, M10.time.sleep = rdt10, rsl10
+    logging.getLogger().removeHandler(h10)
+
+check("the session runs without crashing", not isinstance(out10, Exception), out10)
+check("no unexpected error types", not unexpected(errors10), unexpected(errors10)[:4])
+check("ZZZ's slow limit entry was actually attempted",
+      any(o[0] == "ZZZ" for o in brk10.limit_orders), brk10.limit_orders)
+# retry_unfilled_entries' own grace period is measured against time.monotonic()
+# (real wall-clock time), which this harness does not fake - only
+# datetime.now() and time.sleep() are - so a whole simulated session
+# completes in a fraction of a real second and that grace period never
+# actually elapses here. That mechanism's own behaviour is covered directly
+# in tests/test_phantom_exit.py; what THIS scenario can and does prove is
+# the guarantee this fix adds - that ZZZ's crash one poll after entry never
+# gets evaluated as an exit while its fill is still unconfirmed, instead of
+# being phantom-dropped the instant its price would otherwise trip a stop.
+check("ZZZ's price crash never triggered a phantom-drop while its entry "
+      "was still unconfirmed - the exit-check loop skipped it as designed",
+      not any("ZZZ" in m and "the entry never filled" in m for m in all_msgs10),
+      [m for m in all_msgs10 if "ZZZ" in m and "exit" in m.lower()])
+check("ZZZ is still a real, tracked position at the end - not silently "
+      "erased by the race this fix closes",
+      "ZZZ" in st10.get_open_trades(), list(st10.get_open_trades()))
+check("...and still genuinely pending fill verification, confirming this "
+      "scenario actually exercised the race window rather than resolving "
+      "it some other way",
+      "ZZZ" in ex10._pending_entry_verify, ex10._pending_entry_verify)
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

@@ -393,5 +393,69 @@ check("no order of any kind was submitted",
 check("the stale pending-verify entry is cleaned up anyway",
       "COHR" not in e19._pending_entry_verify)
 
+print("\n=== 20. STALE PENDING-EXIT ROW: a re-triggered exit must not "
+      "double-log the same unfilled sale ===")
+# 2026-09-10: BE's marketable-limit FINAL_EXIT sell sat unfilled (the mock
+# broker below never reduces holdings on a SELL limit order, exactly like a
+# real order still sitting on the book). The exit condition re-fired on the
+# next poll, cancelled the stale order, and resubmitted - and
+# submit_exit_order wrote a SECOND trade_history row for what was, at that
+# point, still the exact same un-sold share. Only the row from whichever
+# attempt actually clears the position should survive; the first attempt's
+# row must be removed, not left sitting alongside the second.
+CFG_EXIT_RETRY = copy.deepcopy(CFG)
+CFG_EXIT_RETRY["trading"]["marketable_limit_exits"] = {
+    "enabled": True, "slippage_pct": 0.3, "max_attempts": 5,
+}
+b20 = Broker(holdings={"BE": 1})
+e20 = Executor(b20, CFG_EXIT_RETRY)
+e20.open_entries["BE"] = 269.80
+e20._open_symbols.add("BE")
+e20._entry_recorded_at["BE"] = 0.0
+e20._pending_cost["BE"] = 1 * 269.80
+
+r1 = e20.submit_exit_order("BE", 1, "GAP_EXIT", price=263.87)
+check("first attempt returns a real order, not a sentinel",
+      r1 is not None and r1 is not PHANTOM_EXIT, r1)
+check("first attempt is tracked as a pending (unconfirmed) exit",
+      "BE" in e20._pending_exit_verify, e20._pending_exit_verify)
+check("exactly one row exists after the first attempt",
+      len(e20.trades_log) == 1, e20.trades_log)
+
+r2 = e20.submit_exit_order("BE", 1, "FINAL_EXIT_-0.65%", price=267.73)
+check("second attempt (the re-trigger) also returns a real order",
+      r2 is not None and r2 is not PHANTOM_EXIT, r2)
+check("STILL exactly one row - the stale first-attempt row was removed "
+      "rather than left sitting alongside the new one",
+      len(e20.trades_log) == 1, e20.trades_log)
+check("the surviving row is the SECOND attempt's, not the first",
+      e20.trades_log and e20.trades_log[0]["exit_reason"] == "FINAL_EXIT_-0.65%",
+      e20.trades_log)
+
+print("\n=== 21. A GENUINE PARTIAL FILL is left alone, not removed ===")
+# The other half of the same fix: if the previous pending exit's shares
+# actually left the account (fewer shares held now than that attempt was
+# selling), it filled for real - correcting or removing that row would
+# erase a real trade. This must be flagged for a human, never auto-deleted.
+b21 = Broker(holdings={"CRWD": 2})
+e21 = Executor(b21, CFG_EXIT_RETRY)
+e21.open_entries["CRWD"] = 200.0
+e21._open_symbols.add("CRWD")
+e21._entry_recorded_at["CRWD"] = 0.0
+e21._pending_cost["CRWD"] = 4 * 200.0
+# Simulate a prior pending exit for MORE shares than are now held (i.e. some
+# of it already sold for real) without going through a first live call.
+_prior_record = {"symbol": "CRWD", "exit_reason": "FIRST_EXIT_-0.7%", "pl": -10.0}
+e21.trades_log.append(_prior_record)
+e21._pending_exit_verify["CRWD"] = {
+    "ts": time.monotonic(), "qty": 4, "side": "sell", "record": _prior_record,
+}
+r_partial = e21.submit_exit_order("CRWD", 2, "TRAILING_STOP", price=198.0)
+check("the new attempt still goes through", r_partial is not None and r_partial is not PHANTOM_EXIT)
+check("the prior row (a genuine partial fill) was NOT removed",
+      _prior_record in e21.trades_log, e21.trades_log)
+check("both rows now exist - nothing was silently deleted",
+      len(e21.trades_log) == 2, e21.trades_log)
+
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)

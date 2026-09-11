@@ -1437,6 +1437,7 @@ class Executor:
         # One extra get_positions() call per exit attempt, not per poll - exits
         # are far rarer than polls, so this is not the cost entry-side
         # per-symbol checks would be.
+        live_qty = None
         try:
             live_positions = self.broker.get_positions()
         except Exception as e:
@@ -1565,6 +1566,52 @@ class Executor:
         except Exception as e:
             logger.error(f"Failed to submit exit order for {symbol}: {e}")
             return None
+
+        # STALE PENDING-EXIT ROW CORRECTION (2026-09-10).
+        #
+        # This function writes a trade_history row on every call that
+        # successfully SUBMITS an order, with no idea whether that order will
+        # actually fill. If the same exit condition re-triggers on the NEXT
+        # poll (a marketable-limit order sitting unfilled, then cancelled and
+        # resubmitted or escalated to market - both normal, expected paths),
+        # this method gets called again for the same symbol before the prior
+        # attempt ever confirmed a fill, and writes a SECOND row on top of the
+        # first. Nothing here previously corrected or removed the first one.
+        #
+        # BE hit this exactly on 2026-09-10: a marketable-limit FINAL_EXIT sell
+        # was submitted, logged (267.73, -$2.07), then still showed 0/1 filled
+        # 3 seconds later when the same condition re-fired, cancelled it, and
+        # fell back to a market order for the SAME share - which filled and
+        # logged its OWN row, identical to the first. One real $2.07 loss was
+        # counted twice in trade_history.csv.
+        #
+        # live_qty above is a FRESH broker read taken at the top of THIS call,
+        # i.e. before anything this call does. If it still shows at least as
+        # many shares as the previous pending exit intended to sell, nothing
+        # left the account since that order was submitted - it filled zero
+        # shares, and its row is pure phantom. Safe to remove outright. If
+        # fewer shares are held than that, some of it filled for real; do not
+        # guess at which fraction, just flag it for a human to check.
+        _stale_exit = self._pending_exit_verify.get(symbol)
+        if _stale_exit is not None and _stale_exit.get("record") is not None:
+            if live_qty is not None and live_qty >= _stale_exit.get("qty", 0):
+                try:
+                    self.trades_log.remove(_stale_exit["record"])
+                    logger.info(
+                        f"{symbol}: removed a stale trade_history row from a "
+                        f"previous exit attempt "
+                        f"({_stale_exit['record'].get('exit_reason')}) that "
+                        f"never filled before this retry superseded it"
+                    )
+                except ValueError:
+                    pass  # already flushed to CSV or otherwise gone
+            else:
+                logger.warning(
+                    f"{symbol}: a previous exit attempt may have partially "
+                    f"filled before this retry superseded it - its "
+                    f"trade_history row was left as-is. Verify by hand "
+                    f"against the broker if the numbers look off."
+                )
 
         # Record this for retry_unconfirmed_exits() to verify. Only a
         # marketable-limit route needs the safety net - a plain market order
