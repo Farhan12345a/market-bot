@@ -905,7 +905,8 @@ check("the last tier closes the position", _fracs[-1] == 1.0, _fracs)
 check("the first tier clears the measured bid-ask", _tiers[0] > 0.126, _tiers[0])
 
 print("\n=== 20. MULTI-FACTOR GATE: move must clear its OWN spread, not just min_move_pct ===")
-check("shipped enabled at 2x", CFG["trading"]["opening_burst"]["min_move_to_spread_ratio"] == 2.0)
+check("shipped enabled at 1.5x (2.0 -> 1.5 on 2026-09-14, see config.yaml's comment)",
+      CFG["trading"]["opening_burst"]["min_move_to_spread_ratio"] == 1.5)
 
 
 class MDSpread(MD):

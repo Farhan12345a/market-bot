@@ -107,12 +107,22 @@ trading:
     # candidate whose move is not at least this many times its OWN bid-ask
     # spread. HOOD's median spread measured 0.593% on 2026-08-26 - wider than
     # min_move_pct itself - so a flat move threshold alone cannot tell "a real
-    # +0.3% move" from "one print crossing a 0.3%+ spread". 2.0 means the move
-    # must be double the spread; 0 disables the gate. See _run_opening_move_exp
-    # for why this is spread-only rather than the full cf_score composite
-    # (mostly None this early - opening_range_minutes/vwap/sector all need a
-    # window this mode decides within before it exists).
-    min_move_to_spread_ratio: 2.0
+    # +0.3% move" from "one print crossing a 0.3%+ spread". 0 disables the
+    # gate. See _run_opening_move_exp for why this is spread-only rather than
+    # the full cf_score composite (mostly None this early -
+    # opening_range_minutes/vwap/sector all need a window this mode decides
+    # within before it exists).
+    #
+    # 2.0 -> 1.5 on 2026-09-14. 2026-09-11's opening burst: AAPL's move
+    # (peaked at +0.469%) never cleared its own required threshold
+    # (2x a spread that fluctuated 0.24%-0.70%, needing 0.48%-1.40%) despite
+    # continuing to +2% after the window closed - missed by as little as
+    # 0.011pp at the closest check. Several other names that day were also
+    # spread-gate refused. This is the ONE variable moving this week -
+    # min_move_pct stays at 0.3% deliberately, so any change in fill/edge can
+    # be attributed to this alone. See PENDING_WORK.md's active measurement
+    # window for the full account.
+    min_move_to_spread_ratio: 1.5
 
     # Multi-factor ranking (added 2026-09-02) - PENDING_WORK backlog item 4.
     # %move stays the CANDIDATE FILTER (min_move_pct above); this decides

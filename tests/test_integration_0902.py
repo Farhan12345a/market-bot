@@ -292,7 +292,7 @@ check("empty sample list is a no-op", TR.record_path_samples([]) is None)
 
 print("\n=== 13. OPENING BURST: spread gate x multifactor rank, both live ===")
 ob = CFG["trading"]["opening_burst"]
-check("the spread gate is on", ob["min_move_to_spread_ratio"] == 2.0)
+check("the spread gate is on", ob["min_move_to_spread_ratio"] == 1.5)
 check("multifactor rank ships OFF - it inverted move-order on its own first test",
       ob["multifactor_rank"] is False)
 check("...with a scored-fraction guard for when it is turned on",

@@ -73,6 +73,23 @@ they consider the Opening-Move Experiment the core bet of the project.
 `ops/session-metrics.py` results from 2026-09-09 onward will need to account
 for all three moving together, not be read as isolated single-variable tests.
 
+**`num_stocks_to_trade` reverted 20 -> 15 on 2026-09-10**, closing that leg of
+the "pool widening" window - the 2026-09-09 session's selection edge was
+judged worse under the wider pool (skipped signals outperformed taken ones).
+`stream_max_subscriptions` stayed at 25 (a data-coverage cap, not a selection
+variable). See config.yaml's comment on `num_stocks_to_trade` for the full
+account.
+
+**Window started 2026-09-14**: `opening_burst.min_move_to_spread_ratio: 2.0 -> 1.5`,
+run ALONE this time - `min_move_pct` deliberately held at 0.3% so any change in
+opening-burst fill rate/edge can be attributed to the spread gate alone.
+Motivated by 2026-09-11: AAPL's move peaked at +0.469% against a required
+2x-spread threshold that fluctuated 0.48%-1.40%, missing by as little as
+0.011pp at the closest check, while continuing to +2% after the window
+closed. User's explicit direction: hold `min_move_pct` for now, revisit it
+as a SEPARATE second variable once this window's results are in - reminder
+scheduled for the day after the first live session under this change.
+
 ---
 
 ## Idea: some form of concentration control inside the Opening-Move Experiment
@@ -418,8 +435,9 @@ scoped below rather than rushed.
    11.2% spread). `_usable_spread_pct` now discards implausible readings and
    treats unknown as no-information rather than as a refusal. The full cf_score
    composite is still not wired - original note follows. Shipped a spread
-   gate (`opening_burst.min_move_to_spread_ratio`, default 2.0): refuses a
-   move that isn't at least 2x its own bid-ask spread, operationalizing the
+   gate (`opening_burst.min_move_to_spread_ratio`, 2.0 -> 1.5 on 2026-09-14
+   after costing AAPL and others real fills on 2026-09-11): refuses a
+   move that isn't at least 1.5x its own bid-ask spread, operationalizing the
    HOOD example already documented in this mode's own config comments (a
    0.593% median spread wider than the move thresholds tried here). Did
    NOT wire in the full cf_score composite as originally proposed - by
