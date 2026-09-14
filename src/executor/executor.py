@@ -616,6 +616,27 @@ class Executor:
         ever acts on a symbol THIS executor just tried to exit itself, never
         on an arbitrary broker/tracking mismatch (see reconcile_against_broker
         for why blind repair of the general case is not safe).
+
+        PARTIAL EXITS (2026-09-11 fix). The original version of this method
+        judged an order by whether the broker held ANYTHING for the symbol -
+        correct for a FULL exit (holding anything afterward means the sell
+        failed) but wrong for a PARTIAL one, where holding shares afterward
+        is the intended, correct outcome. A take-profit tier that sells 1 of
+        6 shares leaves 5 behind ON PURPOSE - "held > 0" is permanently true
+        for that case, so the old logic eventually force-sold the ENTIRE
+        remainder at market on every tiered exit, whether the tier's own
+        order had filled fine or not. GOOG and GOOGL both hit this on
+        2026-09-11: each sold 1 of 6 shares via TAKE_PROFIT_0.75% (recorded
+        correctly), then had the other 5 dumped at market ~17s later with no
+        fill price ever captured - a real, silent gap in that day's P&L.
+
+        Fixed by tracking `qty_before` (shares held the instant THIS order
+        was submitted, captured in submit_exit_order) alongside the order's
+        own intended qty. `qty_before - held` is how many shares have
+        actually left the account since - compare THAT to what the order was
+        FOR, not to zero. If it already covers the order, the order did its
+        job; nothing to force. If not, force only the shortfall, never the
+        whole remaining position.
         """
         if not self._pending_exit_verify:
             return []
@@ -638,15 +659,35 @@ class Executor:
                 self._pending_exit_verify.pop(symbol, None)
                 continue
 
+            intended_qty = int(info.get("qty", 0) or 0)
+            # Missing qty_before (should not happen for anything set after
+            # this fix) falls back to "assume nothing has filled yet" -
+            # the same, safe behavior this method always had.
+            qty_before = info.get("qty_before")
+            filled_so_far = max(0, qty_before - held) if qty_before is not None else 0
+
+            if filled_so_far >= intended_qty:
+                # This order already sold everything it was FOR. Any shares
+                # still held past that are a different, later position of
+                # the same symbol's business, not this order's problem -
+                # confirmed, nothing to force.
+                self._pending_exit_verify.pop(symbol, None)
+                continue
+
             age = time.monotonic() - info.get("ts", 0)
             if age < grace_seconds:
                 continue  # still inside the normal fill window
 
+            shortfall = min(held, intended_qty - filled_so_far)
+            if shortfall <= 0:
+                self._pending_exit_verify.pop(symbol, None)
+                continue
+
             logger.warning(
-                f"{symbol}: marketable-limit exit submitted {age:.0f}s ago "
-                f"still shows {held} share(s) held at the broker - the bot's "
-                f"tracking already dropped this position. Forcing a MARKET "
-                f"exit rather than leaving it unmanaged."
+                f"{symbol}: marketable-limit exit for {intended_qty} "
+                f"share(s) submitted {age:.0f}s ago has only accounted for "
+                f"{filled_so_far} of them - forcing a MARKET exit for the "
+                f"remaining {shortfall} rather than leaving them unmanaged."
             )
             try:
                 # The original marketable-limit order this was submitted
@@ -668,13 +709,13 @@ class Executor:
                         f"before the forced market exit"
                     )
                 side = info.get("side", "sell")
-                order = self.broker.submit_market_order(symbol, held, side=side)
+                order = self.broker.submit_market_order(symbol, shortfall, side=side)
                 if order is not None:
-                    forced.append((symbol, held))
+                    forced.append((symbol, shortfall))
                     self._pending_exit_verify.pop(symbol, None)
-                    self._correct_trade_record_for_forced_exit(symbol, held, order, info)
+                    self._correct_trade_record_for_forced_exit(symbol, shortfall, order, info)
                     if alert_fn is not None:
-                        alert_fn(symbol, held)
+                        alert_fn(symbol, shortfall)
                 else:
                     # Leave it in the dict - try again after a real cooldown,
                     # not on the very next poll (every ~3s during the opening
@@ -795,6 +836,31 @@ class Executor:
             if age < grace_seconds:
                 continue  # still inside the normal fill window
 
+            if info.get("retried"):
+                # 2026-09-11 fix. The FORCED retry below is itself just
+                # another order that can sit unfilled - HPE's GAP_EXIT
+                # phantom-dropped this exact symbol 3 seconds after its
+                # forced retry was submitted, before the retry had any real
+                # chance to fill, because the old code popped tracking the
+                # instant the retry was SUBMITTED rather than once it was
+                # actually confirmed - handing the exit-check skip nothing
+                # left to protect. This is that retry's own grace window
+                # expiring with STILL 0 shares held: give up for real. A
+                # second forced attempt would just keep chasing a name that
+                # has moved further from the signal every time it fails.
+                logger.warning(
+                    f"{symbol}: the forced retry buy also did not fill "
+                    f"within {grace_seconds}s - giving up on this entry "
+                    f"rather than trying a third time."
+                )
+                self._pending_entry_verify.pop(symbol, None)
+                self._open_symbols.discard(symbol)
+                self._entry_recorded_at.pop(symbol, None)
+                self._pending_cost.pop(symbol, None)
+                self.open_entries.pop(symbol, None)
+                abandoned.append(symbol)
+                continue
+
             logger.warning(
                 f"{symbol}: marketable-limit entry submitted {age:.0f}s ago "
                 f"still shows 0 shares held - forcing ONE retry attempt "
@@ -816,15 +882,24 @@ class Executor:
 
             order, route = self._submit_forced_entry_retry(symbol, info["qty"])
 
-            self._pending_entry_verify.pop(symbol, None)
             if order is not None:
+                # Do NOT pop here - re-arm instead, with a fresh timestamp
+                # and retried=True, so THIS order gets its own grace window
+                # under the same exit-check skip before anything can act on
+                # it. The next pass through this loop (the held > 0 branch,
+                # above) picks it up the moment it actually fills; the
+                # `info.get("retried")` branch above is where it gives up for
+                # real if it does not.
+                info["ts"] = time.monotonic()
+                info["retried"] = True
                 logger.info(
                     f"{symbol}: forced {route} buy submitted for the "
                     f"{info['qty']} share(s) the marketable-limit entry "
-                    f"never filled"
+                    f"never filled - verifying it fills before giving up"
                 )
                 filled.append((symbol, info["qty"]))
             else:
+                self._pending_entry_verify.pop(symbol, None)
                 logger.warning(
                     f"{symbol}: forced retry could not be submitted at all - "
                     f"dropping the phantom rather than chasing it further"
@@ -1620,6 +1695,11 @@ class Executor:
         if limit_px:
             self._pending_exit_verify[symbol] = {
                 "ts": time.monotonic(), "qty": qty, "side": side,
+                # Shares held the instant THIS order was submitted - lets
+                # retry_unconfirmed_exits tell "this order did its job" from
+                # "this order never filled" for a PARTIAL exit, where held
+                # staying above zero is the correct, intended outcome.
+                "qty_before": live_qty if live_qty is not None else qty,
             }
         else:
             self._pending_exit_verify.pop(symbol, None)

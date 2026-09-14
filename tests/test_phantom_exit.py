@@ -231,9 +231,25 @@ check("a market BUY is submitted for the full tracked qty",
       b9.sell_calls == [("NBIS", 5, "buy")], b9.sell_calls)
 check("reported as filled, not abandoned",
       filled9 == [("NBIS", 5)] and abandoned9 == [], (filled9, abandoned9))
-check("NBIS is cleared from pending verification", "NBIS" not in e9._pending_entry_verify)
+# 2026-09-11: NOT cleared yet - the forced retry is itself just another
+# order that can sit unfilled (HPE, 2026-09-11), so it is re-armed with a
+# fresh grace window instead of trusted the instant it is SUBMITTED.
+check("NBIS is RE-ARMED, not cleared - the forced retry itself still "
+      "needs to be verified before this gives up on it",
+      "NBIS" in e9._pending_entry_verify and e9._pending_entry_verify["NBIS"].get("retried") is True,
+      e9._pending_entry_verify.get("NBIS"))
 check("executor-side tracking is left INTACT for a successful forced fill "
       "(no phantom cleanup needed)", "NBIS" in e9._open_symbols)
+
+# The mock broker's submit_market_order already updated holdings (this is a
+# real fill in the test's world), so the NEXT poll's call should pick that
+# up via the ordinary held > 0 path and clear it for good - proving the
+# re-arm actually gets resolved rather than sitting forever.
+filled9b, abandoned9b = e9.retry_unfilled_entries(grace_seconds=15)
+check("a later poll confirms the forced retry's fill and clears it normally",
+      "NBIS" not in e9._pending_entry_verify, e9._pending_entry_verify)
+check("...without treating it as a second forced attempt",
+      filled9b == [] and abandoned9b == [], (filled9b, abandoned9b))
 
 print("\n=== 10. retry_unfilled_entries GIVES UP AFTER ONE FAILED ATTEMPT ===")
 # Deliberately NOT the same policy as the exit side, which retries forever
@@ -456,6 +472,114 @@ check("the prior row (a genuine partial fill) was NOT removed",
       _prior_record in e21.trades_log, e21.trades_log)
 check("both rows now exist - nothing was silently deleted",
       len(e21.trades_log) == 2, e21.trades_log)
+
+print("\n=== 22. THE 2026-09-11 HPE BUG: a forced entry retry that ALSO "
+      "does not fill must not be trusted the instant it is submitted ===")
+# HPE's real shape: the original marketable-limit entry sat unfilled, the
+# forced retry was submitted (accepted, NOT yet filled), and 3 seconds
+# later GAP_EXIT phantom-dropped it - because the old code cleared
+# _pending_entry_verify the moment the retry order was ACCEPTED, leaving
+# nothing for the exit-check skip to protect while that second order was
+# still working. This models the forced retry itself remaining unfilled:
+# the mock's submit_market_order still updates holdings immediately (a
+# "real" fill in the test world), so to model a retry that does NOT fill,
+# use a broker whose forced-retry route is a no-op.
+class StuckForcedRetryBroker(Broker):
+    def submit_market_order(self, symbol, qty, side="buy"):
+        self.sell_calls.append((symbol, qty, side))
+        return Order()  # accepted, but holdings never move - still unfilled
+
+
+b22 = StuckForcedRetryBroker(holdings={})
+e22 = mk_executor(b22, "HPE", tracked_qty=18)
+e22._pending_entry_verify["HPE"] = {"ts": time.monotonic() - 999, "qty": 18}
+filled22a, abandoned22a = e22.retry_unfilled_entries(grace_seconds=12)
+check("first pass forces the retry and reports it as filled (submitted)",
+      filled22a == [("HPE", 18)] and abandoned22a == [], (filled22a, abandoned22a))
+check("HPE is RE-ARMED, not cleared, after the forced retry",
+      "HPE" in e22._pending_entry_verify and e22._pending_entry_verify["HPE"].get("retried") is True)
+
+# Simulate GAP_EXIT firing 3 seconds later - well inside a fresh 12s grace
+# window, so a second immediate poll must NOT give up on it yet.
+filled22b, abandoned22b = e22.retry_unfilled_entries(grace_seconds=12)
+check("still within its OWN grace window - not abandoned prematurely",
+      filled22b == [] and abandoned22b == [] and "HPE" in e22._pending_entry_verify,
+      (filled22b, abandoned22b))
+
+# Now age it past the retry's own grace window - the forced retry never
+# actually filled, so this must give up for real, WITHOUT a third attempt.
+e22._pending_entry_verify["HPE"]["ts"] = time.monotonic() - 999
+filled22c, abandoned22c = e22.retry_unfilled_entries(grace_seconds=12)
+check("gives up for real once the RETRY's own grace period also expires",
+      filled22c == [] and abandoned22c == ["HPE"], (filled22c, abandoned22c))
+check("only ONE forced retry order was ever submitted - never a third attempt",
+      b22.sell_calls == [("HPE", 18, "buy")], b22.sell_calls)
+check("cleared from pending verification for good", "HPE" not in e22._pending_entry_verify)
+check("executor-side tracking cleaned up like any other abandoned phantom",
+      "HPE" not in e22._open_symbols)
+
+print("\n=== 23. THE 2026-09-11 GOOG/GOOGL BUG: a partial exit that DID "
+      "fill must not have its untouched remainder force-sold ===")
+# GOOG's real shape: 6 shares held, TAKE_PROFIT_0.75% sold 1 (intended,
+# recorded correctly), leaving 5 behind ON PURPOSE. The broker still shows
+# 5 held well past the grace period - the OLD code read that as "the sale
+# never happened" and force-dumped all 5 at market with no fill price ever
+# captured. It must instead recognize the order already did its job.
+b23 = Broker(holdings={"GOOG": 5})   # 1 of 6 already sold successfully
+e23 = Executor(b23, copy.deepcopy(CFG))
+_goog_record = {"symbol": "GOOG", "exit_reason": "TAKE_PROFIT_0.75%", "pl": 2.57}
+e23.trades_log.append(_goog_record)
+e23._pending_exit_verify["GOOG"] = {
+    "ts": time.monotonic() - 999, "qty": 1, "side": "sell",
+    "qty_before": 6, "record": _goog_record,
+}
+forced23 = e23.retry_unconfirmed_exits(grace_seconds=15)
+check("nothing was forced - the 1-share order already accounted for itself",
+      forced23 == [], forced23)
+check("no market order was ever submitted for the untouched 5 shares",
+      b23.sell_calls == [], b23.sell_calls)
+check("the take-profit row was left exactly as recorded",
+      _goog_record["pl"] == 2.57 and _goog_record["exit_reason"] == "TAKE_PROFIT_0.75%")
+check("cleared from pending - correctly resolved, not forced",
+      "GOOG" not in e23._pending_exit_verify)
+
+print("\n=== 24. THE SAME PARTIAL EXIT, BUT GENUINELY STUCK - forces ONLY "
+      "the shortfall, never the whole remaining position ===")
+# Same 6-share position and the same 1-share TAKE_PROFIT order, but this
+# time it genuinely never filled at all - the broker still shows all 6.
+# The fix must force a market sale for the 1 share the order was actually
+# FOR, never for the full 6 still held.
+b24 = Broker(holdings={"GOOGL": 6})   # nothing has left the account
+e24 = Executor(b24, copy.deepcopy(CFG))
+_googl_record = {"symbol": "GOOGL", "exit_reason": "TAKE_PROFIT_0.75%", "pl": 2.65}
+e24.trades_log.append(_googl_record)
+e24._pending_exit_verify["GOOGL"] = {
+    "ts": time.monotonic() - 999, "qty": 1, "side": "sell",
+    "qty_before": 6, "record": _googl_record,
+}
+forced24 = e24.retry_unconfirmed_exits(grace_seconds=15)
+check("forces exactly the 1-share shortfall, not the whole 6-share position",
+      forced24 == [("GOOGL", 1)], forced24)
+check("the market order itself was for 1 share, not 6",
+      b24.sell_calls == [("GOOGL", 1, "sell")], b24.sell_calls)
+
+print("\n=== 25. A GENUINE FULL EXIT STILL FORCES THE WHOLE POSITION "
+      "(2026-09-03 WLY regression) ===")
+# The ORIGINAL bug this method was built for must still work: a FULL exit
+# (qty_before == qty, i.e. selling everything) that never filled at all
+# still gets the entire position forced out, unchanged from before this fix.
+b25 = Broker(holdings={"WLY": 18})
+e25 = Executor(b25, copy.deepcopy(CFG))
+_wly_record = {"symbol": "WLY", "exit_reason": "GAP_EXIT", "pl": 0}
+e25.trades_log.append(_wly_record)
+e25._pending_exit_verify["WLY"] = {
+    "ts": time.monotonic() - 999, "qty": 18, "side": "sell",
+    "qty_before": 18, "record": _wly_record,
+}
+forced25 = e25.retry_unconfirmed_exits(grace_seconds=15)
+check("the full 18-share position is forced out, exactly as before this fix",
+      forced25 == [("WLY", 18)], forced25)
+check("the market order was for all 18 shares", b25.sell_calls == [("WLY", 18, "sell")])
 
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)
