@@ -561,6 +561,48 @@ check("cleared from pending verification - resolved, not forced again",
 check("the broker really does hold the shares now (sanity check on the mock)",
       b26.holdings.get("FOUR") == 45, b26.holdings)
 
+print("\n=== 27. THE FINAL RE-CHECK ITSELF FAILING MUST DEFER, NOT ABANDON ===")
+# "Uncertain" is not "zero". If the last-chance get_positions() call before
+# giving up itself raises (a broker hiccup), defaulting to "assume 0 held"
+# would recreate the exact bug this re-check exists to close - just moved
+# one line earlier. It must defer to the next poll instead of guessing.
+class FailsOnceThenWorksBroker(Broker):
+    """Fails on its SECOND get_positions() call, not its first - the first
+    is the ordinary top-level snapshot retry_unfilled_entries takes for
+    every symbol; the second is the final re-check right before giving up.
+    Failing the first would just make the whole method bail out early
+    (a different, already-covered path) rather than exercising the re-check
+    this test is actually about."""
+    def __init__(self, holdings=None, quote=None):
+        super().__init__(holdings=holdings, quote=quote)
+        self._get_positions_calls = 0
+
+    def get_positions(self):
+        self._get_positions_calls += 1
+        if self._get_positions_calls == 2:
+            raise Exception("simulated broker timeout")
+        return super().get_positions()
+
+
+b27 = FailsOnceThenWorksBroker(holdings={})
+e27 = mk_executor(b27, "NBIS", tracked_qty=9)
+e27._pending_entry_verify["NBIS"] = {
+    "ts": time.monotonic() - 999, "qty": 9, "retried": True,
+}
+filled27a, abandoned27a = e27.retry_unfilled_entries(grace_seconds=12)
+check("NOT abandoned on an uncertain read - deferred instead of guessing",
+      abandoned27a == [] and filled27a == [], (filled27a, abandoned27a))
+check("still tracked, still pending - nothing was erased on a guess",
+      "NBIS" in e27._open_symbols and "NBIS" in e27._pending_entry_verify)
+
+# Next poll: get_positions works this time, and it turns out NBIS never
+# actually filled - NOW it is safe to give up for real.
+filled27b, abandoned27b = e27.retry_unfilled_entries(grace_seconds=12)
+check("resolves cleanly once a real read is available",
+      abandoned27b == ["NBIS"], abandoned27b)
+check("cleaned up like any other abandoned phantom, once actually confirmed",
+      "NBIS" not in e27._open_symbols)
+
 print("\n=== 23. THE 2026-09-11 GOOG/GOOGL BUG: a partial exit that DID "
       "fill must not have its untouched remainder force-sold ===")
 # GOOG's real shape: 6 shares held, TAKE_PROFIT_0.75% sold 1 (intended,

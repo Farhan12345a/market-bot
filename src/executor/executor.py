@@ -890,9 +890,25 @@ class Executor:
                 # other late-but-real fill (the held > 0 branch, above),
                 # never wiped.
                 try:
-                    _final = self.broker.get_positions() or {}
-                    _final_held = int(float(getattr(_final.get(symbol), "qty", 0) or 0))
-                except Exception:
+                    _final = self.broker.get_positions()
+                except Exception as e:
+                    # Uncertain is not the same as zero. Defaulting to "not
+                    # held" here would make a broker hiccup the trigger for
+                    # abandoning a position we genuinely cannot see - the
+                    # exact failure mode this whole re-check exists to catch,
+                    # just moved one line earlier. Leave it exactly as it was
+                    # (still retried=True, ts unchanged) so the very next
+                    # poll gets a clean second attempt at this same check,
+                    # rather than acting on a guess.
+                    logger.debug(
+                        f"{symbol}: final re-check before giving up failed "
+                        f"({e}) - deferring the decision to the next poll "
+                        f"rather than guessing"
+                    )
+                    continue
+                try:
+                    _final_held = int(float(getattr((_final or {}).get(symbol), "qty", 0) or 0))
+                except (TypeError, ValueError):
                     _final_held = 0
                 if _final_held > 0:
                     logger.info(
