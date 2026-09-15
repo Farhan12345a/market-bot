@@ -517,6 +517,49 @@ check("only ONE forced retry order was ever submitted - never a third attempt",
 check("cleared from pending verification for good", "HPE" not in e22._pending_entry_verify)
 check("executor-side tracking cleaned up like any other abandoned phantom",
       "HPE" not in e22._open_symbols)
+check("the still-working forced-retry order was cancelled while giving up "
+      "(2026-09-14 fix - see section 26 for why this matters)",
+      b22.cancelled.count("HPE") == 2, b22.cancelled)
+
+print("\n=== 26. THE 2026-09-14 BUG: giving up on a forced retry left its "
+      "order alive, and it filled anyway - FOUR, NBIS, VRT, AAOI, CIEN "
+      "and AXTI all did this the same morning ===")
+# The real shape: retry_unfilled_entries gives up on the forced retry (still
+# 0 held after its own grace period) and wipes tracking - but the forced
+# retry's wide-limit order was never cancelled, so it kept working. Every
+# one of the six symbols above filled AFTER the bot gave up on them, and sat
+# as real, completely untracked positions for over 5 hours until the 16:00
+# flatten. This models the order crossing at the exact instant the cancel
+# call reaches the broker - cancel_open_orders arrives too late, the fill
+# already landed, and RETURNS 0 (nothing left to cancel) while the position
+# appears.
+class FillsRightAsCancelledBroker(Broker):
+    def __init__(self, holdings=None, quote=None, fills_on_cancel=None):
+        super().__init__(holdings=holdings, quote=quote)
+        self.fills_on_cancel = fills_on_cancel or {}
+
+    def cancel_open_orders(self, symbol):
+        self.cancelled.append(symbol)
+        qty = self.fills_on_cancel.pop(symbol, None)
+        if qty:
+            self.holdings[symbol] = self.holdings.get(symbol, 0) + qty
+            return 0   # nothing left working - it already filled
+        return 1
+
+
+b26 = FillsRightAsCancelledBroker(holdings={}, fills_on_cancel={"FOUR": 45})
+e26 = mk_executor(b26, "FOUR", tracked_qty=45)
+e26._pending_entry_verify["FOUR"] = {
+    "ts": time.monotonic() - 999, "qty": 45, "retried": True,
+}
+filled26, abandoned26 = e26.retry_unfilled_entries(grace_seconds=12)
+check("NOT abandoned - the final re-check caught the late fill before "
+      "erasing tracking", abandoned26 == [], abandoned26)
+check("still tracked as a real open position", "FOUR" in e26._open_symbols)
+check("cleared from pending verification - resolved, not forced again",
+      "FOUR" not in e26._pending_entry_verify)
+check("the broker really does hold the shares now (sanity check on the mock)",
+      b26.holdings.get("FOUR") == 45, b26.holdings)
 
 print("\n=== 23. THE 2026-09-11 GOOG/GOOGL BUG: a partial exit that DID "
       "fill must not have its untouched remainder force-sold ===")

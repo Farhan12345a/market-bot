@@ -848,11 +848,61 @@ class Executor:
                 # expiring with STILL 0 shares held: give up for real. A
                 # second forced attempt would just keep chasing a name that
                 # has moved further from the signal every time it fails.
+                #
+                # 2026-09-14 fix, closing the gap THIS fix left open. Giving
+                # up must CANCEL the still-working forced-retry order before
+                # erasing tracking - without this, the order was still live
+                # at the broker and could fill seconds later into a REAL
+                # position with nothing watching it, the exact 2026-09-09
+                # orphan shape, self-inflicted this time. FOUR, NBIS, VRT,
+                # AAOI, CIEN and AXTI all did exactly this on 2026-09-14: six
+                # "gave up on" entries, six identical RECONCILE mismatches
+                # minutes later, six positions that sat unmanaged for over 5
+                # hours until the 16:00 flatten. Confirmed against the log:
+                # every abandoned qty matched a RECONCILE "broker holds N"
+                # exactly.
                 logger.warning(
                     f"{symbol}: the forced retry buy also did not fill "
                     f"within {grace_seconds}s - giving up on this entry "
                     f"rather than trying a third time."
                 )
+                try:
+                    cancelled = self.broker.cancel_open_orders(symbol)
+                    if cancelled:
+                        logger.info(
+                            f"{symbol}: cancelled {cancelled} working "
+                            f"order(s) while giving up - it can no longer "
+                            f"fill into an untracked position"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"{symbol}: could not cancel the forced-retry order "
+                        f"while giving up ({e}) - it may still be working "
+                        f"at the broker. Check for an untracked position by "
+                        f"hand."
+                    )
+
+                # Belt and suspenders: the order could theoretically have
+                # filled in the instant between our last check and the
+                # cancel call above. Re-verify once more before erasing
+                # tracking - if shares are there now, this is a real fill,
+                # not an abandoned phantom, and must be treated like any
+                # other late-but-real fill (the held > 0 branch, above),
+                # never wiped.
+                try:
+                    _final = self.broker.get_positions() or {}
+                    _final_held = int(float(getattr(_final.get(symbol), "qty", 0) or 0))
+                except Exception:
+                    _final_held = 0
+                if _final_held > 0:
+                    logger.info(
+                        f"{symbol}: filled after all, right as this was "
+                        f"about to give up on it - keeping it tracked "
+                        f"instead of abandoning a real position"
+                    )
+                    self._pending_entry_verify.pop(symbol, None)
+                    continue
+
                 self._pending_entry_verify.pop(symbol, None)
                 self._open_symbols.discard(symbol)
                 self._entry_recorded_at.pop(symbol, None)
