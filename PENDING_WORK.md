@@ -80,15 +80,28 @@ judged worse under the wider pool (skipped signals outperformed taken ones).
 variable). See config.yaml's comment on `num_stocks_to_trade` for the full
 account.
 
-**Window started 2026-09-14**: `opening_burst.min_move_to_spread_ratio: 2.0 -> 1.5`,
-run ALONE this time - `min_move_pct` deliberately held at 0.3% so any change in
-opening-burst fill rate/edge can be attributed to the spread gate alone.
-Motivated by 2026-09-11: AAPL's move peaked at +0.469% against a required
-2x-spread threshold that fluctuated 0.48%-1.40%, missing by as little as
-0.011pp at the closest check, while continuing to +2% after the window
-closed. User's explicit direction: hold `min_move_pct` for now, revisit it
-as a SEPARATE second variable once this window's results are in - reminder
-scheduled for the day after the first live session under this change.
+**Window RESTARTED 2026-09-17** (originally started 2026-09-14):
+`opening_burst.min_move_to_spread_ratio: 2.0 -> 1.5`, run ALONE -
+`min_move_pct` deliberately held at 0.3% so any change in opening-burst fill
+rate/edge can be attributed to the spread gate alone. Motivated by
+2026-09-11: AAPL's move peaked at +0.469% against a required 2x-spread
+threshold that fluctuated 0.48%-1.40%, missing by as little as 0.011pp at
+the closest check, while continuing to +2% after the window closed.
+
+**Why restarted rather than left to finish on schedule (would have been
+2026-09-21):** the account moved from the free IEX feed to Algo Trader Plus
+(SIP, all US exchanges) on 2026-09-17, mid-window. The spread readings this
+gate acts on come from a materially different, denser data source from that
+date forward - 09-14 through 09-16 measured spreads on IEX, everything from
+09-17 on measures them on SIP. Letting the original window run to 09-21 would
+have compared a ratio's effect across two different quote qualities inside
+one supposedly single-variable test. This setting itself did NOT change on
+09-17 - still 1.5 - only the tracked start date did, so the days already
+banked under 1.5 are not lost, just not counted toward this specific
+comparison. `min_move_pct` is still held for now; user's explicit direction:
+revisit it as a SEPARATE second variable once THIS window's results are in
+(now ~2026-09-24), and hold `multifactor_rank` (item 11b) until this window
+closes too, so nothing stacks.
 
 ---
 
