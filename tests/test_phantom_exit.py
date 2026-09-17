@@ -666,5 +666,61 @@ check("the full 18-share position is forced out, exactly as before this fix",
       forced25 == [("WLY", 18)], forced25)
 check("the market order was for all 18 shares", b25.sell_calls == [("WLY", 18, "sell")])
 
+print("\n=== 28. THE 2026-09-17 TXG BUG: a forced retry must not chase a "
+      "quote that has implausibly run away from the decision price ===")
+# TXG's real shape: decision price $76.56, and ~12s later the "fresh" ask the
+# retry priced off had apparently moved to ~$87.85 - a 14.7%+ move that a
+# 2%-through-the-ask marketable limit (retry_slippage_pct) still did not
+# fill, which is itself evidence the quote was unreliable, not that the
+# stock genuinely repriced that fast. retry_max_deviation_pct catches it.
+CFG_DEV = copy.deepcopy(CFG)
+CFG_DEV["trading"]["marketable_limit_entries"] = {
+    "retry_slippage_pct": 2.0, "retry_max_deviation_pct": 6.0,
+}
+b28 = Broker(holdings={}, quote={"bid": 87.70, "ask": 87.85, "spread": 0.15})
+e28 = Executor(b28, CFG_DEV)
+e28.open_entries["TXG"] = 76.56
+e28._open_symbols.add("TXG")
+e28._entry_recorded_at["TXG"] = 0.0
+e28._pending_entry_verify["TXG"] = {
+    "ts": time.monotonic() - 999, "qty": 6, "decision_price": 76.56,
+}
+filled28, abandoned28 = e28.retry_unfilled_entries(grace_seconds=12)
+check("no limit order was submitted off the runaway quote",
+      b28.limit_calls == [], b28.limit_calls)
+check("did NOT fall back to an unprotected market order either",
+      b28.sell_calls == [], b28.sell_calls)
+check("abandoned cleanly rather than chasing it",
+      abandoned28 == ["TXG"] and filled28 == [], (filled28, abandoned28))
+check("fully untracked afterward", "TXG" not in e28._open_symbols
+      and "TXG" not in e28._pending_entry_verify)
+
+print("\n=== 29. ...BUT A DEVIATION INSIDE THE BAND STILL RETRIES NORMALLY ===")
+b29 = Broker(holdings={}, quote={"bid": 79.9, "ask": 80.0, "spread": 0.1})  # +4.5% from decision
+e29 = Executor(b29, CFG_DEV)
+e29.open_entries["ORCL"] = 76.56
+e29._open_symbols.add("ORCL")
+e29._entry_recorded_at["ORCL"] = 0.0
+e29._pending_entry_verify["ORCL"] = {
+    "ts": time.monotonic() - 999, "qty": 6, "decision_price": 76.56,
+}
+filled29, abandoned29 = e29.retry_unfilled_entries(grace_seconds=12)
+check("a plausible move still routes through the wide marketable-limit",
+      b29.limit_calls == [("ORCL", 6, 81.6, "buy")], b29.limit_calls)
+check("filled, not abandoned", filled29 == [("ORCL", 6)] and abandoned29 == [])
+
+print("\n=== 30. NO decision_price ON RECORD -> GUARD SKIPPED, OLD BEHAVIOUR "
+      "UNCHANGED (backward compatibility for pre-existing pending entries) ===")
+b30 = Broker(holdings={}, quote={"bid": 99.9, "ask": 100.0, "spread": 0.1})
+e30 = Executor(b30, CFG_DEV)
+e30.open_entries["NVDA"] = 40.0
+e30._open_symbols.add("NVDA")
+e30._entry_recorded_at["NVDA"] = 0.0
+e30._pending_entry_verify["NVDA"] = {"ts": time.monotonic() - 999, "qty": 3}  # no decision_price key
+filled30, abandoned30 = e30.retry_unfilled_entries(grace_seconds=12)
+check("missing decision_price -> guard is a no-op, retries as before",
+      b30.limit_calls == [("NVDA", 3, 102.0, "buy")], b30.limit_calls)
+check("filled, not abandoned", filled30 == [("NVDA", 3)] and abandoned30 == [])
+
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)

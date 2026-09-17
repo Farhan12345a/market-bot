@@ -1351,6 +1351,30 @@ trading:
     # itself cannot be submitted (no quote available, or the order errors).
     retry_slippage_pct: 2.0
 
+    # QUOTE SANITY GUARD (2026-09-17), for the same forced retry. TXG's
+    # opening-burst retry today priced off a "fresh" ask that had moved from
+    # a $76.56 decision price to $89.61 (retry_slippage_pct already applied)
+    # in the ~12s since the original order - a 14.7%+ move in the raw ask
+    # that a 2%-through-the-ask marketable limit STILL did not fill. A real,
+    # currently-executable NBBO ask that far through a marketable limit would
+    # have crossed real liquidity almost immediately; the fact that it did not
+    # fill is itself evidence the fresh quote was not trustworthy (stale,
+    # corrupted, or an unexecutable print during the opening cross), not that
+    # the stock genuinely repriced 14.7% in 12 seconds. If the fresh ask is
+    # more than this many percent from the ORIGINAL decision price, treat it
+    # as unreliable and abandon the retry instead of pricing a real order off
+    # it - same principle already documented in retry_unfilled_entries'
+    # docstring ("walking away costs nothing but the trade itself"), just
+    # applied to a bad-quote edge case that guard didn't cover yet. Does NOT
+    # fall back to an unprotected market order on failure - that would defeat
+    # the whole reason this path prices a bounded limit instead of chasing
+    # with a market order in the first place (see the comment above). No
+    # deviation data exists yet to tune this precisely; 6% is a provisional,
+    # deliberately generous floor - comfortably above ordinary first-30-second
+    # noise on a high-ATR opener, comfortably below TXG's actual 14.7%. Revisit
+    # once a few sessions of retry-quote deviation data exist.
+    retry_max_deviation_pct: 6.0
+
   marketable_limit_exits:
     enabled: true
     slippage_pct: 0.3

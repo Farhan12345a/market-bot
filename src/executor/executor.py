@@ -946,7 +946,9 @@ class Executor:
             except Exception as e:
                 logger.debug(f"{symbol}: pre-retry cancel failed, retrying anyway: {e}")
 
-            order, route = self._submit_forced_entry_retry(symbol, info["qty"])
+            order, route = self._submit_forced_entry_retry(
+                symbol, info["qty"], decision_price=info.get("decision_price")
+            )
 
             if order is not None:
                 # Do NOT pop here - re-arm instead, with a fresh timestamp
@@ -978,7 +980,7 @@ class Executor:
 
         return filled, abandoned
 
-    def _submit_forced_entry_retry(self, symbol, qty):
+    def _submit_forced_entry_retry(self, symbol, qty, decision_price=None):
         """
         The forced retry itself, for retry_unfilled_entries: a WIDE
         marketable-limit priced off a FRESH quote when one is available,
@@ -995,11 +997,27 @@ class Executor:
         stale original decision price, catches nearly everything a market
         order would while still refusing to chase an unbounded move.
 
-        Returns (order_or_None, route) where route is "wide-limit" or
-        "market", so the caller's log line says which one actually happened.
+        QUOTE SANITY GUARD (2026-09-17). The "fresh" quote is trusted blindly
+        above - fine when it is real, but TXG's opening-burst retry that day
+        priced off an ask that had apparently moved 14.7%+ from the decision
+        price in ~12s, and even a 2%-through-the-ask marketable limit off
+        that price still did not fill. A real, currently-executable ask that
+        far through a marketable limit would have crossed real liquidity
+        almost immediately - the non-fill is itself evidence the quote was
+        stale/corrupted, not that the stock genuinely moved that much that
+        fast. `decision_price` plus `retry_max_deviation_pct` catches this:
+        past that deviation, abandon the retry rather than price a real order
+        off data that looks unreliable. Deliberately does NOT fall through to
+        the market-order fallback below - that would throw away exactly the
+        price protection this whole wide-limit-first design exists for.
+
+        Returns (order_or_None, route) where route is "wide-limit", "market"
+        or "bad-quote" (deviation guard tripped, nothing submitted), so the
+        caller's log line says what actually happened.
         """
         ecfg = (self.config.get("trading") or {}).get("marketable_limit_entries") or {}
         retry_band_pct = ecfg.get("retry_slippage_pct")
+        max_dev_pct = ecfg.get("retry_max_deviation_pct")
         if retry_band_pct:
             try:
                 quote = self.broker.get_latest_quote(symbol)
@@ -1008,15 +1026,32 @@ class Executor:
                 quote = None
             if quote and quote.get("ask"):
                 try:
-                    limit_px = round(float(quote["ask"]) * (1 + float(retry_band_pct) / 100.0), 2)
-                    order = self.broker.submit_limit_order(symbol, qty, limit_px, side="buy")
-                    if order is not None:
-                        return order, "wide-limit"
-                except Exception as e:
-                    logger.debug(
-                        f"{symbol}: wide-limit forced retry could not be "
-                        f"submitted ({e}) - falling back to a market order"
-                    )
+                    fresh_ask = float(quote["ask"])
+                except (TypeError, ValueError):
+                    fresh_ask = None
+                if fresh_ask and max_dev_pct and decision_price:
+                    dev_pct = abs(fresh_ask - float(decision_price)) / float(decision_price) * 100.0
+                    if dev_pct > float(max_dev_pct):
+                        logger.warning(
+                            f"{symbol}: fresh retry quote (ask {fresh_ask}) is "
+                            f"{dev_pct:.1f}% from the decision price "
+                            f"({decision_price}), past retry_max_deviation_pct "
+                            f"({max_dev_pct}%) - treating this quote as "
+                            f"unreliable and abandoning the retry rather than "
+                            f"pricing a real order off it."
+                        )
+                        return None, "bad-quote"
+                if fresh_ask:
+                    try:
+                        limit_px = round(fresh_ask * (1 + float(retry_band_pct) / 100.0), 2)
+                        order = self.broker.submit_limit_order(symbol, qty, limit_px, side="buy")
+                        if order is not None:
+                            return order, "wide-limit"
+                    except Exception as e:
+                        logger.debug(
+                            f"{symbol}: wide-limit forced retry could not be "
+                            f"submitted ({e}) - falling back to a market order"
+                        )
 
         try:
             return self.broker.submit_market_order(symbol, qty, side="buy"), "market"
@@ -1491,7 +1526,9 @@ class Executor:
         # unfilled with nothing else ever re-checking it (see that method's
         # docstring for the 2026-09-08 incident this fixes).
         if limit_px:
-            self._pending_entry_verify[symbol] = {"ts": time.monotonic(), "qty": qty}
+            self._pending_entry_verify[symbol] = {
+                "ts": time.monotonic(), "qty": qty, "decision_price": price,
+            }
 
         logger.info(f"{ANSI_GREEN}Entry order submitted for {symbol}: {qty} shares at {price}{ANSI_RESET}")
         return order
