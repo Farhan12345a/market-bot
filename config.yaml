@@ -497,8 +497,19 @@ trading:
   # journal column.
   stream_reserve_index_slots: true
 
-  stream_max_subscriptions: 25
-  websocket_feed: "iex"   # iex = free tier. sip requires a paid subscription.
+  # 25 -> 30 on 2026-09-17, alongside the SIP upgrade below. 25 was
+  # deliberately 5 under the free tier's hard cap of 30 websocket symbols
+  # (confirmed from Alpaca's own pricing page); Algo Trader Plus lifts that
+  # cap entirely ("unlimited symbols"), so 30 is no longer sitting at a
+  # ceiling with zero margin - still matched to num_stocks_to_trade (15) +
+  # benchmarks, not raised further without a reason to.
+  stream_max_subscriptions: 30
+  # iex -> sip on 2026-09-17, Algo Trader Plus ($99/mo) now active. IEX
+  # carries ~2% of US volume - see the opening_burst.decide_by comment above
+  # and the two-day-running FROG/IOT/OKTA/ZS/S/CRWD/FSLY/HPE fill-failure
+  # pattern (09-15, 09-16: 4 of 5 opening-burst submissions never filled,
+  # both days) that motivated paying for the full consolidated tape.
+  websocket_feed: "sip"
 
   # Subscribe to live TRADES as well as bars, and use the latest tick as the
   # price for ENTRY DETECTION. Exits keep reading 1-minute bar closes.

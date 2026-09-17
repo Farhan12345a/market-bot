@@ -145,12 +145,11 @@ check("...and the sector benchmarks too", {"XLK", "SMH", "ARKK"} <= BASKET_ETFS)
 print("\n=== 11. STREAM COVERAGE: UNIQUE-SYMBOL CAP, TICKS FREE ===")
 # 2026-09-01 served 14/26 - all 14 SUBSCRIBED symbols delivered a baseline
 # within ~70s, so the gap to 26 was the counting model, not IEX sparsity.
-# 29, not 30: one under the free-tier limit on purpose. Sitting exactly AT a
-# vendor bound costs the whole session if the bound is exclusive; 29 of 30 is
-# still more than double the 14 the old counting model allowed.
-check("the cap moved 14 -> 20 on 2026-09-08 - still conservative, well "
-      "under the 30 free-tier boundary, first step of testing it live",
-      CFG["trading"]["stream_max_subscriptions"] == 25,
+# 2026-09-17: Algo Trader Plus removed the free-tier 30-symbol boundary this
+# margin used to sit under, so there's no vendor bound left to stay clear of.
+check("the cap moved to 30 on 2026-09-17 - Algo Trader Plus, no free-tier "
+      "boundary left to sit under",
+      CFG["trading"]["stream_max_subscriptions"] == 30,
       CFG["trading"]["stream_max_subscriptions"])
 check("ticks stay ON - free under the corrected model, not a coverage trade",
       CFG["trading"]["use_trade_ticks_for_entry"] is True)

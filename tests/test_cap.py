@@ -67,11 +67,15 @@ check("priority longer than budget -> truncated, no crash", len(ps9._symbols)==3
 print("\n=== E. CONFIG ===")
 t=CFG["trading"]
 check("stream_max_subscriptions present", "stream_max_subscriptions" in t)
-# 28, not 30: deliberately one symbol under the free-tier limit. Being exactly
-# AT a limit costs the whole session's stream if the vendor's bound turns out to
-# be exclusive, and costs one symbol if it does not.
-check("cap sits at or under the free-tier limit", 0 < t["stream_max_subscriptions"] <= 30, t.get("stream_max_subscriptions"))
-check("cap leaves headroom under the limit", t["stream_max_subscriptions"] < 30, t.get("stream_max_subscriptions"))
+# 2026-09-17: Algo Trader Plus removed the free tier's 30-symbol hard cap
+# entirely ("unlimited symbols" per Alpaca's own pricing page), so there is
+# no longer a vendor-imposed ceiling to stay under. The only invariant left
+# to check is sanity - positive, and not wildly disconnected from the
+# current watchlist size (num_stocks_to_trade + benchmarks).
+check("cap is a sane positive number", t["stream_max_subscriptions"] > 0, t.get("stream_max_subscriptions"))
+check("cap covers at least the current watchlist",
+      t["stream_max_subscriptions"] >= t.get("num_stocks_to_trade", 0),
+      (t.get("stream_max_subscriptions"), t.get("num_stocks_to_trade")))
 check("trade ticks still on", t["use_trade_ticks_for_entry"] is True)
 budget = t["stream_max_subscriptions"]   # unique symbols; ticks are free
 check(f"live config yields {budget} streamed symbols", budget >= 1, budget)

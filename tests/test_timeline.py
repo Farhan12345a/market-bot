@@ -258,11 +258,11 @@ if prev.returncode == 0:
         # at 59 SYMBOLS. Both fit a ~30 unique-symbol limit. The old model
         # spent half the budget on nothing.
         # 14 -> 20 -> 22 -> 25 on 2026-09-08, alongside num_stocks_to_trade
-        # and the opening-burst scale-up (see PENDING_WORK.md). Still
+        # and the opening-burst scale-up (see PENDING_WORK.md) - each step
         # comfortably under the documented free-tier boundary of ~30
-        # (ST.DEFAULT_MAX_SUBSCRIPTIONS, test_cap.py) - a live step toward
-        # it, not the limit itself.
-        "stream_max_subscriptions": 25,
+        # (ST.DEFAULT_MAX_SUBSCRIPTIONS, test_cap.py). 25 -> 30 on
+        # 2026-09-17: Algo Trader Plus removed that boundary entirely.
+        "stream_max_subscriptions": 30,
         # -0.5 -> -0.7 on 2026-09-03. Exit-side (see CLAUDE.md's "NOT an entry
         # change" list), so not subject to the one-variable-at-a-time rule
         # below, but still recorded here rather than silently dropped from
@@ -288,8 +288,8 @@ if prev.returncode == 0:
             # below for the historical record) -> back to 15 on 2026-09-10:
             # the universe widening was judged to have made 2026-09-09's
             # selection edge worse (see PENDING_WORK.md), so this round-tripped
-            # to baseline. stream_max_subscriptions (25) was deliberately NOT
-            # reverted alongside it - it is a data-coverage cap, not a
+            # to baseline. stream_max_subscriptions (now 30) was deliberately
+            # NOT reverted alongside it - it is a data-coverage cap, not a
             # selection-pool size, and has no downside at a smaller pool.
             "num_stocks_to_trade"]
 
