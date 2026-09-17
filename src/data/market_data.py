@@ -22,6 +22,8 @@ class MarketDataManager:
         self._tick_entries = 0
         self._last_entry_source = {}   # entry prices taken from a live trade
         self._bar_entries = 0    # entry prices that fell back to the bar close
+        self._gap_check_ticks = 0    # GAP_EXIT checks that used a live trade
+        self._gap_check_bars = 0     # GAP_EXIT checks that fell back to the bar close
         self._trading_day_cache = {}   # {"date": date, "value": bool} - one
                                         # calendar lookup per day, not per poll
 
@@ -206,6 +208,40 @@ class MarketDataManager:
             except Exception:
                 streamed = False
         self._last_entry_source[symbol] = "stream bar" if streamed else "REST"
+        return (bar or {}).get("close", 0)
+
+    def get_gap_check_price(self, symbol, bar):
+        """
+        Price for the GAP_EXIT check specifically: the freshest live trade if
+        the stream has one, otherwise the bar's close.
+
+        2026-09-17: the one deliberate exception to get_entry_price's own
+        rule that exits stay on bar closes. That rule exists because
+        RESISTANCE fired 14 times on moves as small as 0.08% when ticks fed
+        the exit path - normal tick noise is comparable in size to that
+        threshold. GAP_EXIT is different in kind: its trigger is
+        final_exit_loss_pct x gap_multiple, routinely past -1% - orders of
+        magnitude larger than a bid/ask bounce - so the noise that broke
+        RESISTANCE cannot spuriously fire this one. What it CAN miss on a
+        bar close is the thing it exists to catch: a violent move inside the
+        current, still-forming minute, invisible until the bar closes and
+        then indistinguishable from an instantaneous gap. Every other exit
+        rule (trailing, breakeven, resistance, take-profit) stays on
+        get_latest_bar/current_bar exactly as before - this price is used by
+        check_exit for the GAP_EXIT comparison only.
+
+        Tracked in its own counters (_gap_check_ticks/_gap_check_bars)
+        rather than folded into get_entry_price's _tick_entries/_bar_entries -
+        those describe ENTRY price sourcing for the daily report's "bar reads
+        by source" stat, and mixing exit-side reads into it would corrupt
+        that number for no benefit.
+        """
+        if self.stream is not None:
+            tick = self.stream.get_last_trade_price(symbol)
+            if tick:
+                self._gap_check_ticks += 1
+                return tick
+        self._gap_check_bars += 1
         return (bar or {}).get("close", 0)
 
     def entry_price_source(self, symbol):

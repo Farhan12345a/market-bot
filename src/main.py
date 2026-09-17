@@ -3246,7 +3246,11 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 except Exception as _pe:
                     logger.debug(f"path sample skipped for {symbol}: {_pe}")
 
-                exit_info = strategy.check_exit(symbol, current_bar)
+                try:
+                    _gap_price = market_data.get_gap_check_price(symbol, current_bar)
+                except Exception:
+                    _gap_price = None
+                exit_info = strategy.check_exit(symbol, current_bar, gap_check_price=_gap_price)
                 if exit_info:
                     # RSI is purely for the daily report - a failure here (API
                     # hiccup, insufficient history) must never block the
@@ -3492,6 +3496,40 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 strategy.drop_phantom(_sym)
         except Exception as e:
             logger.debug(f"retry_unfilled_entries skipped: {e}")
+
+        # OPENING BURST FILL CHECK. 2026-09-17: "N entered" at burst close (see
+        # _run_opening_move_exp) counts SUBMISSIONS, not fills -
+        # submit_entry_order records the position the instant the order goes
+        # out. 09-15 and 09-16 both submitted 5 and only 1 actually filled
+        # (FIG, then OKTA) - FROG/IOT/OKTA/ZS and S/CRWD/FSLY/HPE were
+        # abandoned as phantoms and only ever discoverable by manually
+        # cross-referencing journalctl against trade_history.csv, which is
+        # exactly how those two days got diagnosed. Logging the real number
+        # once, as soon as every symbol the burst took has actually resolved
+        # (filled or abandoned - checked via _pending_entry_verify rather
+        # than a fixed delay, since a resolution can straddle the window
+        # close), makes that visible every day without the forensic work.
+        try:
+            if (opening_state.get("done") and opening_state.get("taken")
+                    and not opening_state.get("opener_fill_check_done")):
+                _still_pending = [s for s in opening_state["taken"]
+                                  if s in executor._pending_entry_verify]
+                if not _still_pending:
+                    opening_state["opener_fill_check_done"] = True
+                    _ob_total = len(opening_state["taken"])
+                    _ob_filled = [s for s in opening_state["taken"]
+                                  if s in executor._open_symbols]
+                    logger.info(
+                        f"OPENING BURST FILL CHECK: {len(_ob_filled)}/{_ob_total} "
+                        f"submitted openers actually filled "
+                        f"({len(_ob_filled) / _ob_total * 100:.0f}%)"
+                        + (f" - filled: {', '.join(sorted(_ob_filled))}" if _ob_filled else "")
+                        + (f" - never filled: "
+                           f"{', '.join(sorted(set(opening_state['taken']) - set(_ob_filled)))}"
+                           if len(_ob_filled) < _ob_total else "")
+                    )
+        except Exception as e:
+            logger.debug(f"opening burst fill check skipped: {e}")
 
         # PERIODIC RECONCILE. The broker is truth; this reports divergence and
         # alerts, it does not silently repair - see

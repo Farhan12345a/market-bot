@@ -417,7 +417,7 @@ check("disabled -> inert", _TM("G", 100.0, 100, _off).check_gap_exit(90.0) == 0)
 
 sstrat2 = open(repo_file("src", "strategy", "strategy.py")).read()
 check("it is checked FIRST, ahead of rules that assume price walked there",
-      sstrat2.index('("GAP_EXIT", trade.check_gap_exit)')
+      sstrat2.index('("GAP_EXIT", lambda _p: trade.check_gap_exit(')
       < sstrat2.index("(_final_label, trade.check_final_exit)"))
 check("it counts as a stop-loss exit for the record",
       "GAP_EXIT" in open(repo_file("src", "executor", "executor.py")).read())

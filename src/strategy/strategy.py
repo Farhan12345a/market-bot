@@ -869,13 +869,22 @@ class Strategy:
         )
         return True
 
-    def check_exit(self, symbol, current_bar):
+    def check_exit(self, symbol, current_bar, gap_check_price=None):
         """
         Check whether `symbol`'s open position should exit, in priority order.
         Updates lightweight tracking bookkeeping (price_history, highest_since_entry)
         inline since that's harmless observation, not a commitment - but does
         NOT decrement qty_remaining or remove the trade from self.trades. That
         only happens in confirm_exit, after the broker confirms the sell filled.
+
+        gap_check_price, optional: the price to evaluate GAP_EXIT against
+        specifically, from MarketData.get_gap_check_price (a live tick when
+        the stream has one, else the same bar close everything else uses).
+        Every other exit rule keeps reading current_bar's close regardless -
+        see get_gap_check_price's docstring for why GAP_EXIT alone is safe to
+        move off the bar-close cadence and none of the others are. Omit it
+        (or pass None) to check GAP_EXIT against the bar close too, unchanged
+        from before this parameter existed.
 
         Returns an exit_info dict ({"qty", "reason", "price"}) or None.
         """
@@ -930,7 +939,8 @@ class Strategy:
             # rather than by whichever continuity-assuming rule happens to
             # match. It only ever triggers BEYOND the final stop, so it cannot
             # take a position the normal ladder would have kept.
-            ("GAP_EXIT", trade.check_gap_exit),
+            ("GAP_EXIT", lambda _p: trade.check_gap_exit(
+                gap_check_price if gap_check_price is not None else _p)),
             (_final_label, trade.check_final_exit),
             (_first_label, trade.check_first_exit),
             (tp_reason or "TAKE_PROFIT", (lambda _p: tp_qty)),
@@ -943,7 +953,13 @@ class Strategy:
         for reason, check_fn in checks:
             qty = check_fn(current_price)
             if qty > 0:
-                return {"qty": qty, "reason": reason, "price": current_price}
+                # GAP_EXIT alone may have fired against gap_check_price
+                # (a live tick) rather than current_price (the bar close) -
+                # report whichever one it actually used, so the recorded
+                # exit reflects the observation that triggered it.
+                fired_price = (gap_check_price if (reason == "GAP_EXIT"
+                               and gap_check_price is not None) else current_price)
+                return {"qty": qty, "reason": reason, "price": fired_price}
 
         return None
 
