@@ -733,6 +733,34 @@ real session - do not trust the pricing page alone, this project measures),
 and (2) if confirmed, `streamed_only` is an entry-signal change and needs the
 standing go-ahead plus its own held week, not a quick flip.
 
+**d. The SIP upgrade's own first session (09-17) DISCONFIRMS the coverage
+theory - 0/5 opening-burst fills again, same as the 09-15/09-16 pattern the
+upgrade was bought to fix.** Feed coverage itself checked out fine (22-25/25
+symbols had baselines vs. IEX's 0/15 that week), so thin quoting was ruled
+out. What actually happened, traced through `Executor._submit_forced_entry_retry`
+(executor.py:981): the forced retry reprices off a FRESH quote at the moment
+of retry rather than the original decision price, and on TXG the fresh ask
+~12s later had already moved so far that the resulting 2.0%-widened limit
+(`retry_slippage_pct`, config.yaml:1352) landed nowhere near the decision
+price (e.g. $76.56 decision -> $89.61 retry limit). The retry band itself
+priced correctly off what it was quoted; the quote it was quoted had already
+run away. This points at the first 15-30s of the session specifically - the
+opening auction has resolved but continuous two-sided quoting from market
+makers has not yet stabilized, so displayed asks can swing hard tick to tick
+independent of feed quality. SIP fixes coverage, not this.
+
+The untested lever, previously tabled pending SIP data and now looking like
+the actual candidate: whether `retry_unfilled_entries`' `grace_seconds`
+(currently 12, executor.py:731) is too short specifically for the opening
+burst - giving the quote more time to settle before the forced retry fires,
+rather than forcing a retry into a still-unsettled price 12s after the
+original order. Not yet touched: `grace_seconds` isn't a signal-selection
+knob (not in any of the Tier 1-5 lists above) but it changes fill/abandon
+outcomes on trades already decided, so treat it with the same discipline -
+one variable, held for a week, compared via `ops/session-metrics.py` - rather
+than tuning it off one day's TXG print. Needs the standing go-ahead before
+touching it (see this file's entry-change rule at the top / CLAUDE.md).
+
 ## Test suites
 
 **1,066 cases across 26 suites as of 2026-08-26.** Run them with:
