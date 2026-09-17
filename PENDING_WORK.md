@@ -615,9 +615,22 @@ Recorded 2026-08-26 after a proposed opening-volatility model leaned on two
 inputs the account cannot get. Both are genuinely strong predictors; neither is
 available, and finding that out after building around them would be expensive.
 
+**UPDATE 2026-09-17: the options-IV line below is stale.** The account moved
+from the free tier to Algo Trader Plus ($99/mo) this date specifically for the
+SIP equity feed - but Alpaca's own pricing page also lists real-time OPRA
+options data on that same plan (indicative-only on free). So the door this
+item closed is now open. Not pursuing it today - wiring options IV into the
+screener is a new predictive input, i.e. a Tier-1-adjacent entry change in its
+own right, and belongs behind the same "stop and say so" / one-variable
+discipline as everything else in this list, on top of needing its own design
+work (which options, which expiry, how staff/API cost scales). Recorded here
+so "not available" doesn't keep getting treated as still true.
+
 **Options implied volatility / expected move.** The `S x IV x sqrt(T/365)`
 expected-move calculation needs an options chain with ATM IV, ideally 0DTE/1DTE.
-Alpaca sells options market data on paid tiers only. Not available.
+~~Alpaca sells options market data on paid tiers only. Not available.~~ NOW
+AVAILABLE (real-time OPRA, Algo Trader Plus) - see the 2026-09-17 update above.
+Not yet designed or built.
 
 **Opening auction imbalance.** Imbalance side, imbalance quantity, paired
 shares, indicative clearing price. These come from NYSE/Nasdaq proprietary
@@ -638,11 +651,17 @@ not exposed by Alpaca at any tier. Not available at a realistic price.
 | options IV | **PAID — not available** |
 | auction imbalance | **NOT AVAILABLE at any realistic price** |
 
-**Caveat on pre-market data specifically.** This account is on the IEX feed,
-roughly 2% of consolidated volume. Pre-market liquidity is thin to begin with
-and thinner still on one venue's share of it, so pre-market RVOL and range here
-are weak, noisy signals rather than the strong ones the literature describes for
-consolidated data. Worth collecting; not worth weighting heavily.
+**Caveat on pre-market data specifically — PARTLY STALE as of 2026-09-17.**
+Written when this account was on the IEX feed, roughly 2% of consolidated
+volume, which made pre-market RVOL and range weak, noisy signals rather than
+the strong ones the literature describes for consolidated data. The account is
+now on SIP (all US exchanges, Algo Trader Plus) - the thin-venue half of this
+caveat no longer applies. Pre-market liquidity itself is still genuinely
+thinner than the regular session regardless of feed, so "weak relative to the
+regular session" still holds; "weak because one venue" does not. Worth
+revisiting whether pre-market RVOL/range deserve more weight now that they are
+measured against the real market rather than ~2% of it - with real SIP
+pre-market data, not a guess.
 
 **The larger point, which matters more than the missing inputs.** A model that
 predicts |move| predicts VOLATILITY, not direction, and `score_stock`'s own
@@ -653,6 +672,53 @@ moving. Volatility is therefore already selected for twice. On 2026-08-26, 12 of
 to move, they were stocks moving against a long-only book. **The gap is
 direction, and direction is the hard half.** More volatility modelling buys more
 of what the bot already has.
+
+---
+
+## 11. Follow-ups from the 2026-09-17 SIP upgrade — waiting on real data, not code
+
+The account moved from the free (IEX) tier to Algo Trader Plus (SIP, all US
+exchanges, $99/mo) on 2026-09-17, specifically to fix the opening burst's
+chronic fill-failure pattern (09-15 and 09-16 both submitted 5 openers and
+filled only 1 - see git log around that date). `websocket_feed` and
+`stream_max_subscriptions` are already switched (commit ee81c1d). These three
+are NOT done alongside it, and deliberately not code changes today - each
+needs real SIP session data that does not exist yet, or is a Tier-1 entry
+change (or both), so per this file's own "one entry variable at a time, held
+for a week" rule they wait.
+
+**a. Remeasure the spread-gate math.** `min_move_to_spread_ratio` (currently
+1.5, itself an active measurement window - see the top of this file) and the
+"median bid-ask ~0.126%" figure baked into several opening_burst comments were
+both measured against IEX's own (thinner, likely wider) quotes. Once a few
+SIP sessions have run, recompute the real median spread (spread_pct is already
+recorded per signal in the journal - no new instrumentation needed, just
+data) and compare against the number the current ratio assumes. Do not change
+the ratio's value until that comparison exists.
+
+**b. Re-test `multifactor_rank`.** Shipped off (still `false`) after its first
+live test, on sparse IEX data, ranked a +0.2% mover above a +3.0% one -
+`continuation_score` renormalises over missing factors, and at 09:31 on thin
+IEX data most factors WERE missing. cf_score is recorded per signal regardless
+of the flag, so the evidence has kept accumulating. Denser SIP data may reduce
+how often factors are missing at decision time, which would reduce the
+renormalization problem that got it turned off - worth checking whether that's
+actually true from real SIP cf_score data before considering turning it on,
+and turning it on is its own single-variable week when that happens, not
+bundled with anything else.
+
+**c. `opening_burst.streamed_only: true` and the "REST is ~15min delayed"
+assumption, generally.** New finding, not previously tracked: Alpaca's Algo
+Trader Plus pricing page lists real-time latency with no delay caveat, versus
+the free tier's explicit "15 minute delay via API." If REST calls are no
+longer stale on this plan, several assumptions built around that staleness -
+`streamed_only` refusing non-streamed opening-burst candidates chief among
+them, since it changes WHICH candidates qualify - may be more conservative
+than necessary. Two steps before touching anything: (1) verify this empirically
+(compare a REST-sourced price against a simultaneous stream/tick price over a
+real session - do not trust the pricing page alone, this project measures),
+and (2) if confirmed, `streamed_only` is an entry-signal change and needs the
+standing go-ahead plus its own held week, not a quick flip.
 
 ## Test suites
 
