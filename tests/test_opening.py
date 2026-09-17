@@ -442,7 +442,7 @@ oc = M._opening_exit_config(CFG)
 check("an exits block produces an override config", oc is not None)
 n_, o_ = CFG["trading"], oc["trading"]
 check("first exit is tighter", o_["first_exit_loss_pct"] == -0.55 and n_["first_exit_loss_pct"] == -0.7)
-check("final exit is tighter", o_["final_exit_loss_pct"] == -0.65 and n_["final_exit_loss_pct"] == -1.0)
+check("final exit is tighter", o_["final_exit_loss_pct"] == -0.85 and n_["final_exit_loss_pct"] == -1.0)
 # 2026-09-10: widened to MATCH the session's trailing stop exactly (0.4 ->
 # 0.75), not just "tighter" - see the config.yaml comment on why (the
 # 2026-09-09 GAP_EXIT incident).
@@ -542,7 +542,7 @@ check("trailing stop is no longer listed - it matches the session now",
 n2 = EmailNotifier.__new__(EmailNotifier)
 n2.run_context = {"opening_exits": rows}
 html = n2._opening_exit_profile_html()
-check("renders into the report", "-0.55%" in html and "-0.65%" in html, html[:200])
+check("renders into the report", "-0.55%" in html and "-0.85%" in html, html[:200])
 check("shows the normal side for comparison", "-0.7%" in html and "-1.0%" in html)
 n3 = EmailNotifier.__new__(EmailNotifier)
 n3.run_context = {}

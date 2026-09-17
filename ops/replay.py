@@ -94,10 +94,14 @@ class ExitConfig:
       be_floor       where the stop sits once armed (usually a small positive)
       tiers          [(gain_pct, sell_fraction), ...] of the ORIGINAL size;
                      a fraction >= 1.0 closes whatever remains
+      gap_multiple   GAP_EXIT trigger as a multiple of stop_pct, or None to
+                     disable it (see check_gap_exit in strategy.py for the
+                     live rule this mirrors)
     """
 
     def __init__(self, stop_pct=-1.0, first_exit=None, first_fraction=0.0,
-                 trail_pct=None, be_trigger=None, be_floor=0.0, tiers=()):
+                 trail_pct=None, be_trigger=None, be_floor=0.0, tiers=(),
+                 gap_multiple=None):
         self.stop_pct = stop_pct
         self.first_exit = first_exit
         self.first_fraction = first_fraction
@@ -105,12 +109,14 @@ class ExitConfig:
         self.be_trigger = be_trigger
         self.be_floor = be_floor
         self.tiers = list(tiers)
+        self.gap_multiple = gap_multiple
 
     def label(self):
         tp = ",".join(f"{g:g}:{f:g}" for g, f in self.tiers) or "none"
         be = f"{self.be_trigger:g}->{self.be_floor:g}" if self.be_trigger is not None else "none"
+        gap = f"{self.gap_multiple:g}x" if self.gap_multiple else "off"
         return (f"stop={self.stop_pct:g} trail={self.trail_pct if self.trail_pct else 'none'} "
-                f"be={be} tp={tp}")
+                f"be={be} tp={tp} gap={gap}")
 
 
 def replay_one(path, cfg):
@@ -139,6 +145,19 @@ def replay_one(path, cfg):
     for _, gain in path:
         used += 1
         peak = max(peak, gain)
+
+        # --- GAP_EXIT, ahead of everything else, mirroring strategy.py's
+        # own rule order (see the `checks` list in Strategy.check_exits: GAP_EXIT
+        # is evaluated FIRST for exactly this reason). It fires on the RAW
+        # observation, not on a "crossed since last sample" basis like the
+        # protective exits below - a gap is by definition not a level walked
+        # to, so there is no earlier, better fill to credit it with. Sells
+        # everything remaining at the observed price, same as the live rule.
+        if cfg.gap_multiple and gain <= cfg.stop_pct * cfg.gap_multiple:
+            realized += remaining * gain
+            remaining = 0.0
+            reason = "GAP_EXIT"
+            break
 
         # --- protective exits, widest-binding first ---
         stop_level = cfg.stop_pct
@@ -358,6 +377,7 @@ def config_from_live(path="config.yaml"):
     except Exception:
         return None
     be = (t.get("breakeven_tiers") or [{}])[0]
+    gap_cfg = t.get("gap_exit") or {}
     return ExitConfig(
         stop_pct=t.get("final_exit_loss_pct", -1.0),
         first_exit=t.get("first_exit_loss_pct"),
@@ -366,6 +386,7 @@ def config_from_live(path="config.yaml"):
         be_trigger=be.get("trigger_pct"),
         be_floor=be.get("floor_pct", 0.0) or 0.0,
         tiers=[(x["gain_pct"], x["sell_fraction"]) for x in (t.get("take_profit_tiers") or [])],
+        gap_multiple=gap_cfg.get("gap_multiple") if gap_cfg.get("enabled") else None,
     )
 
 
@@ -398,6 +419,10 @@ def main():
     ap.add_argument("--trail", type=float)
     ap.add_argument("--be", help="trigger/floor, e.g. 0.5/0.15, or 'none'")
     ap.add_argument("--tp", help="gain:fraction pairs, e.g. 0.75:0.4,1.0:0.3,1.25:1.0")
+    ap.add_argument("--gap-multiple", type=float,
+                    help="GAP_EXIT trigger as a multiple of --stop (or the live "
+                         "final_exit_loss_pct if --stop is not given), e.g. 1.5. "
+                         "Pass 0 to disable it even if config.yaml has it on.")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--no-costs", action="store_true",
                     help="model zero execution cost (the pre-2026-09-02 behaviour). "
@@ -423,6 +448,8 @@ def main():
         cfg.trail_pct = args.trail
     if args.be is not None:
         cfg.be_trigger, cfg.be_floor = parse_be(args.be)
+    if args.gap_multiple is not None:
+        cfg.gap_multiple = args.gap_multiple or None
     if args.tp is not None:
         cfg.tiers = parse_tiers(args.tp)
 

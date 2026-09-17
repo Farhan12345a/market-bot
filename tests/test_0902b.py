@@ -598,7 +598,7 @@ check("flatten_all_positions still reads the position SIGN",
 check("...and still guards each position separately",
       esrc.count("except Exception") >= 5)
 check("the burst still runs its own tighter final exit than the session",
-      t["opening_burst"]["exits"]["final_exit_loss_pct"] == -0.65
+      t["opening_burst"]["exits"]["final_exit_loss_pct"] == -0.85
       and t["opening_burst"]["exits"]["final_exit_loss_pct"] > t["final_exit_loss_pct"],
       (t["opening_burst"]["exits"]["final_exit_loss_pct"], t["final_exit_loss_pct"]))
 check("multifactor_rank still OFF (it inverted move order)",
