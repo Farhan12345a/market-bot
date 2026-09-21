@@ -114,6 +114,10 @@ cfg["trading"]["halt_check"] = {"enabled": False}
 cfg["trading"]["require_fresh_data_for_entry"] = {"enabled": False}
 cfg["trading"]["marketable_limit_entries"] = {"enabled": False}
 cfg["trading"]["opening_burst"]["min_move_to_spread_ratio"] = 0
+# Forced on regardless of the live toggle (disabled 2026-09-21) - this suite
+# exercises the MECHANISM, which must stay correct whether or not today's
+# config happens to be running it.
+cfg["trading"]["opening_burst"]["enabled"] = True
 cfg["trading"]["liquidity_cap"] = {"enabled": False}
 
 import pytz

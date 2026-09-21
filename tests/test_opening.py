@@ -17,6 +17,12 @@ from _repo import REPO, CONFIG, repo_file, sandbox_cwd
 import src.main as M
 
 CFG = yaml.safe_load(open(CONFIG))
+# Forced on regardless of the live toggle (disabled 2026-09-21, see
+# config.yaml's comment on this key) - this whole suite exercises the
+# opening-burst MECHANISM, which must stay correct whether or not today's
+# config happens to be running it. Section 28 checks the real on-disk value
+# separately, from its own fresh reload, not this mutated copy.
+CFG["trading"]["opening_burst"]["enabled"] = True
 ET = pytz.timezone("America/New_York")
 P = F = 0
 def check(n, c, d=""):
@@ -775,9 +781,16 @@ check("disabled takes nothing and measures nothing",
       e8.orders == [] and st8["baseline"] == {})
 
 print("\n=== 28. TOMORROW'S SETTINGS, ONE LAST TIME ===")
-_t = CFG["trading"]
+# Read fresh from disk rather than the module-level CFG, which this file
+# force-enables at the top so the rest of the suite can exercise the
+# mechanism regardless of today's live toggle.
+_t = yaml.safe_load(open(CONFIG))["trading"]
 _o = _t["opening_burst"]
-check("burst enabled", _o["enabled"] is True)
+# DISABLED 2026-09-21 on explicit user instruction after another loss on
+# 2026-09-18 ("NO TRADES in the opening window period") - see config.yaml's
+# comment on this key. The rest of this block's checks still hold: they
+# describe what the mode WOULD do if re-enabled, not whether it currently is.
+check("burst disabled", _o["enabled"] is False)
 check("window 09:30 -> 09:33",
       (_o["baseline_time"], _o["decide_by"]) == ("09:30", "09:33"))
 check("threshold 0.3%", _o["min_move_pct"] == 0.3, _o["min_move_pct"])

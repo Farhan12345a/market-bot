@@ -38,7 +38,19 @@ trading:
   # individual stock's strength. This mode is a deliberate, budgeted retest of
   # that conclusion with better instrumentation - not a reversal of it.
   opening_burst:
-    enabled: true
+    # DISABLED 2026-09-21 on explicit user instruction ("NO TRADES in the
+    # opening window period"), after another loss on 2026-09-18 - the same
+    # session the retry_max_deviation_pct quote guard (commit 9cb006f) went
+    # live. _opening_burst_config() returns None when this is false, and
+    # _run_opening_move_exp() returns 0 immediately (src/main.py:2204-2206) -
+    # no baseline is captured, no signal is measured, no trade is submitted
+    # for this window. That also means no forward-return journaling happens
+    # for it either, unlike the ceiling control group's skip-but-journal
+    # pattern - a real cost if this gets revisited later, but the user asked
+    # for zero trades in this window, not a shadow mode, and no shadow-mode
+    # toggle exists yet to give both. Do not re-enable without the standing
+    # go-ahead this file requires for entry changes.
+    enabled: false
 
     # Measure from this instant. The stream is subscribed BEFORE the open (see
     # stream_prestart_minutes) so a price actually exists at 09:30:00.

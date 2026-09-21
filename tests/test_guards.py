@@ -248,7 +248,11 @@ check("the rank map is 1-based", '"rank": {sym: i + 1 for i, sym in enumerate(me
 
 
 print("\n=== 5. THE OPENING BREAKEVEN FLOOR ===")
-oc = M._opening_exit_config(CFG)
+# _opening_exit_config returns None when opening_burst is off (disabled
+# 2026-09-21) - forced on here since this checks the EXIT PROFILE OVERLAY
+# mechanism itself, not today's live on/off toggle.
+_cfg_ob = copy.deepcopy(CFG); _cfg_ob["trading"]["opening_burst"]["enabled"] = True
+oc = M._opening_exit_config(_cfg_ob)
 tiers = oc["trading"]["breakeven_tiers"]
 check("one tier", len(tiers) == 1, tiers)
 check("trigger is 0.15", tiers[0]["trigger_pct"] == 0.15, tiers)
