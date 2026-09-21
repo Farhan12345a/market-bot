@@ -283,19 +283,25 @@ def regime(state, spy, qqq, breadth=None, now=None):
 s = {}
 m, l = regime(s, +0.5, +0.5, now=at(9, 31))
 check("first reading is adopted immediately (nothing to whipsaw against)", l == "bullish", (m, l))
-m, l = regime(s, -0.5, -0.5, now=at(9, 41))
-check("one bearish reading does NOT flip it", l == "bullish", (m, l))
-check("...and size is unchanged", m == rc["bullish_multiplier"], m)
-m, l = regime(s, -0.5, -0.5, now=at(9, 42))
-check(f"a {need}th consecutive bearish reading DOES flip it", l == "bearish", (m, l))
+# Each call a minute apart, matching the 60s morning cadence, so every one of
+# them is actually "due" and re-evaluated rather than serving a cached read.
+for i in range(need - 1):
+    m, l = regime(s, -0.5, -0.5, now=at(9, 41 + i, 0))
+    check(f"bearish reading {i + 1}/{need - 1} does NOT flip it yet", l == "bullish", (m, l))
+check("...and size is still unchanged after need-1 readings", m == rc["bullish_multiplier"], m)
+m, l = regime(s, -0.5, -0.5, now=at(9, 41 + need - 1, 0))
+check(f"the {need}th consecutive bearish reading DOES flip it", l == "bearish", (m, l))
 check("...to the bearish multiplier", m == rc["bearish_multiplier"], m)
 s2 = {}
 regime(s2, +0.5, +0.5, now=at(9, 31))
-regime(s2, -0.5, -0.5, now=at(9, 41))
-m, l = regime(s2, +0.5, +0.5, now=at(9, 42))
+for i in range(need - 1):
+    regime(s2, -0.5, -0.5, now=at(9, 41 + i, 0))
+m, l = regime(s2, +0.5, +0.5, now=at(9, 41 + need - 1, 0))
 check("an interrupted run abandons the part-built case", l == "bullish", (m, l))
-m, l = regime(s2, -0.5, -0.5, now=at(9, 43))
-check("...and the count restarts rather than resuming", l == "bullish", (m, l))
+for i in range(need - 1):
+    m, l = regime(s2, -0.5, -0.5, now=at(9, 41 + need + i, 0))
+    check(f"...and the count restarts rather than resuming ({i + 1}/{need - 1})",
+          l == "bullish", (m, l))
 
 # ===================================================================
 print("\n=== 8. CHOP: the fourth label, read from OUR names not SPY ===")

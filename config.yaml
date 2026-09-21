@@ -1837,7 +1837,21 @@ trading:
     # because entries then land exactly when the reading happens to be
     # favourable. The first reading of the day is adopted immediately; there is
     # nothing to whipsaw against yet.
-    confirmations: 2
+    #
+    # 2 -> 6 on 2026-09-21. The hysteresis mechanism was already exactly right
+    # in design, but 2 confirmations at the 09:30-09:40 cadence (every poll,
+    # ~10s) only holds a label for ~20s - not enough to survive real
+    # opening-minutes noise. Confirmed from the 2026-09-18 log: regime flipped
+    # bearish at 09:34:06 and kept re-reading not-bearish for brief windows
+    # for the next 40+ minutes, and every one of those windows let an entry
+    # through (RIOT, TENB, NAVN, ISRG, BRKR, IONQ, ILMN, AXGN, NFLX all
+    # entered AFTER the bearish flip, during punch-through windows) - which is
+    # the exact whipsaw this parameter exists to prevent, just not held long
+    # enough. 6 confirmations is ~60s of consistent agreement during the
+    # opening cadence - a deliberate first step, not a final number. This is
+    # the ONE variable for this held week; do not also touch cadence or the
+    # multipliers alongside it.
+    confirmations: 6
 
     # What happens to ALREADY-OPEN positions when the regime turns bearish.
     # Without this the regime read governs new entries only, and open
