@@ -38,6 +38,12 @@ trading:
   # individual stock's strength. This mode is a deliberate, budgeted retest of
   # that conclusion with better instrumentation - not a reversal of it.
   opening_burst:
+    # RE-ENABLED 2026-09-22 on explicit user instruction, reversing the
+    # 2026-09-21 disable below. Was OFF for exactly one session (2026-09-21),
+    # which is worth knowing if that day's numbers get compared against a
+    # "normal" day later - it had zero opening-window trades and zero
+    # forward-return journaling for that window, not a quiet one.
+    #
     # DISABLED 2026-09-21 on explicit user instruction ("NO TRADES in the
     # opening window period"), after another loss on 2026-09-18 - the same
     # session the retry_max_deviation_pct quote guard (commit 9cb006f) went
@@ -50,7 +56,7 @@ trading:
     # for zero trades in this window, not a shadow mode, and no shadow-mode
     # toggle exists yet to give both. Do not re-enable without the standing
     # go-ahead this file requires for entry changes.
-    enabled: false
+    enabled: true
 
     # Measure from this instant. The stream is subscribed BEFORE the open (see
     # stream_prestart_minutes) so a price actually exists at 09:30:00.
