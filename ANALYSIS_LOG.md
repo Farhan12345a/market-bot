@@ -516,6 +516,7 @@ Signals re-fire on the same symbol every poll, so the row count badly overstates
 
 
 
+
 ---
 
 # Notes (hand-written — survives regeneration)
