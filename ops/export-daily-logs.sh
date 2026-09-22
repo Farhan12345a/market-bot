@@ -10,11 +10,16 @@ DATE="${1:-$(date +%F)}"
 OUT="logs/daily/$DATE"
 mkdir -p "$OUT"
 
-# 1. Every CSV log's rows for this date
+# 1. Every CSV log's rows for this date. Match the date as either the first
+#    column (trade_history.csv, signal_journal.csv both start with `date`) or
+#    a later column preceded by a comma (trade_paths.csv col 3, trade_context.csv
+#    col 2) - a plain ",$DATE," alone silently misses the first-column case
+#    and came back header-only for both of those files on 2026-09-21 despite
+#    real trades existing that day.
 for f in trade_history trade_paths signal_journal trade_context; do
   src="logs/${f}.csv"
   [ -f "$src" ] || continue
-  { head -1 "$src"; grep ",$DATE," "$src" || true; } > "$OUT/${f}.csv"
+  { head -1 "$src"; grep -E "^$DATE,|,$DATE," "$src" || true; } > "$OUT/${f}.csv"
 done
 
 # 2. The service log for market hours that day (09:00-17:00 ET = 13:00-21:00 UTC).

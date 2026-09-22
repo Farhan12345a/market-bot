@@ -786,11 +786,10 @@ print("\n=== 28. TOMORROW'S SETTINGS, ONE LAST TIME ===")
 # mechanism regardless of today's live toggle.
 _t = yaml.safe_load(open(CONFIG))["trading"]
 _o = _t["opening_burst"]
-# DISABLED 2026-09-21 on explicit user instruction after another loss on
-# 2026-09-18 ("NO TRADES in the opening window period") - see config.yaml's
-# comment on this key. The rest of this block's checks still hold: they
-# describe what the mode WOULD do if re-enabled, not whether it currently is.
-check("burst disabled", _o["enabled"] is False)
+# RE-ENABLED 2026-09-22 on explicit user instruction, after one session
+# (2026-09-21) disabled per the prior note here - see config.yaml's comment
+# on this key for the full history.
+check("burst enabled", _o["enabled"] is True)
 check("window 09:30 -> 09:33",
       (_o["baseline_time"], _o["decide_by"]) == ("09:30", "09:33"))
 check("threshold 0.3%", _o["min_move_pct"] == 0.3, _o["min_move_pct"])
