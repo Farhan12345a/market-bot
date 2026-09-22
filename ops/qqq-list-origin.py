@@ -130,6 +130,35 @@ def main():
             print("  (no rows for either source)")
         print()
 
+    # trade_context.csv carries `regime` (bullish/neutral/choppy/bearish) at
+    # entry; signal_journal.csv does not yet. This is the breakdown behind
+    # the "only add QQQ names on bullish days" question - source x regime,
+    # not just source alone.
+    regime_rows = (buckets.get(("trade_context.csv", "general_screener"), [])
+                   + buckets.get(("trade_context.csv", "qqq_list"), []))
+    if regime_rows:
+        print("=== trade_context.csv, by source x regime ===")
+        cell = defaultdict(lambda: [0, 0.0])
+        for day_dir in days:
+            qqq_syms = qqq_symbols_for_day(day_dir)
+            for r in load_csv(os.path.join(day_dir, "trade_context.csv")):
+                sym = (r.get("symbol") or "").strip()
+                regime = r.get("regime") or "unknown"
+                source = "qqq_list" if sym in qqq_syms else "general_screener"
+                pnl = num(r.get("realized_pnl"))
+                if pnl is None:
+                    continue
+                key = (regime, source)
+                cell[key][0] += 1
+                cell[key][1] += pnl
+        regimes = sorted({k[0] for k in cell})
+        for regime in regimes:
+            for source in ("general_screener", "qqq_list"):
+                n, pnl = cell.get((regime, source), [0, 0.0])
+                if n:
+                    print(f"  {regime:10s} {source:18s} n={n:3d}  pnl={pnl:8.2f}  avg={pnl/n:6.2f}")
+        print()
+
 
 if __name__ == "__main__":
     sys.exit(main())
