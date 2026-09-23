@@ -292,7 +292,11 @@ check("no order submitted prematurely", b12.sell_calls == [], b12.sell_calls)
 
 print("\n=== 13. main.py IS WIRED TO THE ENTRY-SIDE SAFETY NET TOO ===")
 check("retry_unfilled_entries is actually called from the poll loop",
-      "executor.retry_unfilled_entries()" in src)
+      "executor.retry_unfilled_entries(" in src)
+check("...with its grace period sourced from config, not hardcoded "
+      "(2026-09-23: retry_grace_seconds, so the opening-burst fill-rate "
+      "test can be tuned without editing code)",
+      "retry_grace_seconds" in src and "grace_seconds=_grace" in src)
 check("an abandoned entry is dropped from Strategy, not left half-tracked",
       "strategy.drop_phantom(_sym)" in src)
 

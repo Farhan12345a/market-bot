@@ -3491,7 +3491,10 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         # were only ever discovered, and dropped, by the exit-side phantom
         # guard minutes later.
         try:
-            _filled_entries, _abandoned_entries = executor.retry_unfilled_entries()
+            _mle_cfg = (config.get("trading") or {}).get("marketable_limit_entries") or {}
+            _grace = _mle_cfg.get("retry_grace_seconds", 12)
+            _filled_entries, _abandoned_entries = executor.retry_unfilled_entries(
+                grace_seconds=_grace)
             for _sym in _abandoned_entries:
                 strategy.drop_phantom(_sym)
         except Exception as e:

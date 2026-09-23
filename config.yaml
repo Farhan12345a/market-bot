@@ -1393,6 +1393,45 @@ trading:
     # once a few sessions of retry-quote deviation data exist.
     retry_max_deviation_pct: 6.0
 
+    # RETRY PATIENCE (2026-09-23), on explicit user request after the
+    # opening burst's first session back (2026-09-22) filled 0/14 openers -
+    # the same "0/N filled" symptom that led to disabling the mode on
+    # 2026-09-21, now recurring under a different specific mechanism.
+    #
+    # THIS IS NOT A NEW PROBLEM. Every prior fix attempt is still active and
+    # none of them solved it: the opening-burst slippage band above was
+    # widened for exactly this reason on 2026-09-03 (that day's 7 openers
+    # ALSO phantomed); retry_unfilled_entries itself was added 2026-09-08
+    # after 8 of 9 openers went unfilled; the SIP feed switch was tested
+    # against the "it's IEX coverage" theory and DISCONFIRMED it (commit
+    # fdfcfdf: the first SIP session still went 0/5). 2026-09-22's INTC leg
+    # priced its marketable limit 0.95% above the decision-time ask -
+    # already near the 1.0% opening_burst ceiling above - and still did not
+    # fill within the old 12s grace window. A limit that aggressive failing
+    # to cross points at TIMING (the fill/report not landing in the first
+    # 12s) rather than at price, which is what commit fdfcfdf flagged as
+    # "grace_seconds: the untested next lever" and never actually tried -
+    # the mode was disabled before that experiment ran.
+    #
+    # 12 -> 20. retry_unfilled_entries() uses this for BOTH the wait before
+    # the first forced retry AND the wait before giving up on that retry
+    # (see its docstring) - a single shared value, so this affects both
+    # stages. The quote-deviation guard above remains the backstop either
+    # way: more patience can only mean MORE real fills get caught, never a
+    # worse fill, since a quote that has genuinely run away is still refused
+    # regardless of how long the wait was. Left unset (or removed) this
+    # falls back to the original 12s everywhere retry_unfilled_entries is
+    # called without an explicit override.
+    #
+    # ONE VARIABLE, HELD AND WATCHED - per this file's own entry-change
+    # rule, this is Tier 1 (opening_burst timing) even though the number
+    # lives in a different config block. This is a test, not a fix: it is
+    # not yet known whether the opening burst's fills were genuinely
+    # sitting unmatched for lack of patience, or never marketable in the
+    # first place. Needs several more opening-burst sessions' fill-rate
+    # data before either conclusion is safe to draw.
+    retry_grace_seconds: 20
+
   marketable_limit_exits:
     enabled: true
     slippage_pct: 0.3
