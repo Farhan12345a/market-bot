@@ -16,7 +16,7 @@ mkdir -p "$OUT"
 #    col 2) - a plain ",$DATE," alone silently misses the first-column case
 #    and came back header-only for both of those files on 2026-09-21 despite
 #    real trades existing that day.
-for f in trade_history trade_paths signal_journal trade_context; do
+for f in trade_history trade_paths signal_journal trade_context short_signal_journal; do
   src="logs/${f}.csv"
   [ -f "$src" ] || continue
   { head -1 "$src"; grep -E "^$DATE,|,$DATE," "$src" || true; } > "$OUT/${f}.csv"
