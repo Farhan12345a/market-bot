@@ -425,8 +425,12 @@ print("\n=== 16. TOMORROW'S SETTINGS ===")
 # mode actually trading). What must hold is the PROPERTY: clear of the spread so
 # a single bid/ask bounce cannot trigger it.
 check("a threshold is set", _ob["min_move_pct"] > 0, _ob["min_move_pct"])
-check("threshold clears the median spread (0.126% on 2026-08-26) by 2x+",
-      _ob["min_move_pct"] > 0.126 * 2, _ob["min_move_pct"])
+# 2x+ -> 1.5x+ for 2026-09-23: min_move_pct 0.3 -> 0.2 on explicit user
+# request deliberately tightened this margin (0.2/0.126 = 1.587x, not the
+# 2x+ 0.3% gave) - a real, known trade-off, not an oversight. Still clears
+# the noise floor; just by less.
+check("threshold clears the median spread (0.126% on 2026-08-26) by 1.5x+",
+      _ob["min_move_pct"] > 0.126 * 1.5, _ob["min_move_pct"])
 check("14 of the 10 concurrent slots - deliberately over, exempted in "
       "pre_entry_check", _ob["max_positions"] == 14)
 check("no slots guaranteed left for the normal session anymore - a full "
@@ -792,7 +796,9 @@ _o = _t["opening_burst"]
 check("burst enabled", _o["enabled"] is True)
 check("window 09:30 -> 09:33",
       (_o["baseline_time"], _o["decide_by"]) == ("09:30", "09:33"))
-check("threshold 0.3%", _o["min_move_pct"] == 0.3, _o["min_move_pct"])
+# 0.3 -> 0.2 for 2026-09-23, on explicit user request (see config.yaml's
+# comment on this key).
+check("threshold 0.2%", _o["min_move_pct"] == 0.2, _o["min_move_pct"])
 check("14 positions at 0.6x size",
       (_o["max_positions"], _o["size_multiplier"]) == (14, 0.6))
 check("streamed only", _o["streamed_only"] is True)
@@ -872,7 +878,11 @@ st_late = {"baseline": {}, "taken": [], "done": False}
 # Prices are consumed per read, and a symbol that is not streamed is never
 # read - so these two values are the FIRST and SECOND prints each symbol makes
 # once it appears, not a fixed 09:30/09:31 schedule.
-md_late = MD({"A": [100.0, 101.0], "B": [50.0, 50.1]}, streamed=set())
+# B's move is deliberately well under min_move_pct (0.3 -> 0.2 for
+# 2026-09-23) rather than sitting exactly on the old boundary, so this
+# scenario keeps testing "did not move enough" instead of drifting onto
+# whatever the current threshold happens to be.
+md_late = MD({"A": [100.0, 101.0], "B": [50.0, 50.05]}, streamed=set())
 e_late, s_late = Exec(), Strat()
 c_late = cfg()
 check("nothing measured while the stream serves no symbols",

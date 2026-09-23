@@ -110,7 +110,18 @@ trading:
     # Watch the OPENING THRESHOLD REVIEW line at 09:32: it prints every measured
     # symbol's move and says what threshold would have caught what. Set the next
     # value from that rather than from guesswork.
-    min_move_pct: 0.3
+    #
+    # 0.3 -> 0.2 for 2026-09-23, on explicit user request, alongside the
+    # retry_grace_seconds widening (marketable_limit_entries) and the wider
+    # opening_burst slippage band below. NOTE, stated plainly: this widens
+    # WHICH SIGNALS QUALIFY, not whether an order fills once submitted - it
+    # does not address 2026-09-22's actual failure (0/14 filled; HUT and AXTI
+    # both cleared the OLD 0.3% bar easily and still never filled). More
+    # qualifying signals means more attempts at the same fill mechanism, not
+    # a better-working one. 0.2% is still ~1.6x the 0.126% median-spread
+    # noise floor measured 2026-08-26, so it should not be pure noise, but the
+    # margin above that floor is thinner than 0.3% gave (2.4x).
+    min_move_pct: 0.2
 
     # Symbols the burst MEASURED, saw clear min_move_pct, and did not take are
     # suppressed in the normal entry window until this time. The two modes
@@ -1353,9 +1364,21 @@ trading:
     # orders to fill in that window" - only applied to is_opening_burst=True
     # entries, the normal-window band above is untouched.
     opening_burst:
-      slippage_pct: 0.35
-      spread_multiple: 2.5
-      max_slippage_pct: 1.0
+      # Widened again 2026-09-23, on explicit user request, after 2026-09-22
+      # showed the OLD ceiling wasn't the binding constraint on its own:
+      # INTC's marketable limit priced at 0.95% above the ask (spread_multiple
+      # x its 0.38% spread), essentially AT the old 1.0% max_slippage_pct
+      # ceiling, and still did not fill within the grace window. Raising this
+      # further is a real, if lower-confidence, lever - it cannot make a fill
+      # worse than not filling at all, only risk a worse price ON a fill that
+      # does happen. Moved alongside retry_grace_seconds (12 -> 20s, same
+      # date) - both changed together on explicit request, so if fills
+      # improve this session the two cannot be told apart; if they help,
+      # separate them on the next entry-change pass to learn which one
+      # mattered.
+      slippage_pct: 0.5
+      spread_multiple: 3.0
+      max_slippage_pct: 2.0
 
     # RETRY BAND (2026-09-09), for Executor.retry_unfilled_entries only - a
     # WIDE marketable-limit for the forced second attempt, priced off a
