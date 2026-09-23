@@ -1,0 +1,1 @@
+trade_id,date,symbol,entry_time,entry_price,position_size,entry_method,size_multiplier,spy_return,qqq_return,spy_vs_vwap,qqq_vs_vwap,market_breadth,regime,stock_vs_vwap,relative_volume,momentum,continuation_score,sector_strength,spread_pct,mfe_pct,mae_pct,exit_time,exit_price,exit_reason,realized_pnl,realized_pnl_pct

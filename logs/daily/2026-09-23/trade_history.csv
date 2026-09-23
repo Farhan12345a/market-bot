@@ -1,0 +1,1 @@
+date,symbol,entry_time,entry_price,entry_method,burst_logic,price_source,signal_pct,post_exit_pct,post_exit_note,entry_rsi,mfe_pct,mae_pct,exit_time,exit_price,exit_reason,stop_loss_used,exit_rsi,qty,pl,pl_pct,list_source,entry_slippage_pct,decision_price,fill_price,exit_slippage_pct
