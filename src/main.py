@@ -3566,6 +3566,45 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         )
                     elif not _mm:
                         reconcile_state["last_signature"] = None
+
+                    # PERSISTENT UNTRACKED-LONG AUTO-CLOSE (2026-09-23). An
+                    # untracked POSITIVE quantity is unprotected - no exit
+                    # rule is watching it. 2026-09-22: ZS's late-filling
+                    # remainder sat like this for ~6 hours, only caught by
+                    # the 16:00 FLATTEN_ALL sweep. Gated on the SAME symbol
+                    # persisting across >=2 consecutive reconciles (>=5 min
+                    # at this block's default interval - comfortably past
+                    # any single-poll fill/cancel race) so this never fires
+                    # on the ordinary, self-resolving case reconcile exists
+                    # to tolerate. Ignores a SHORT entirely - that stays the
+                    # loud, report-only path; a short is evidence of a
+                    # different bug and already gets closed by end-of-day
+                    # FLATTEN_ALL, not silently by this.
+                    _streak = reconcile_state.setdefault("orphan_streak", {})
+                    _untracked_now = set()
+                    if _mm:
+                        try:
+                            _live_now = executor.broker.get_positions() or {}
+                        except Exception:
+                            _live_now = {}
+                        for _sym, _reason in _mm:
+                            if "not tracking" not in _reason:
+                                continue
+                            _pos = _live_now.get(_sym)
+                            try:
+                                _held = float(getattr(_pos, "qty", 0) or 0)
+                            except (TypeError, ValueError):
+                                continue
+                            if _held <= 0:
+                                continue  # a short - leave it to the loud path
+                            _untracked_now.add(_sym)
+                            _streak[_sym] = _streak.get(_sym, 0) + 1
+                            if _streak[_sym] >= 2:
+                                executor.close_orphaned_position(_sym)
+                                _streak[_sym] = 0
+                    for _sym in list(_streak):
+                        if _sym not in _untracked_now:
+                            _streak.pop(_sym, None)
                 except Exception as e:
                     logger.debug(f"reconcile skipped: {e}")
         if regime_active:

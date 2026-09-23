@@ -726,5 +726,46 @@ check("missing decision_price -> guard is a no-op, retries as before",
       b30.limit_calls == [("NVDA", 3, 102.0, "buy")], b30.limit_calls)
 check("filled, not abandoned", filled30 == [("NVDA", 3)] and abandoned30 == [])
 
+print("\n=== 31. close_orphaned_position: A PERSISTENT UNTRACKED LONG GETS "
+      "CLOSED (2026-09-23, the ZS gap) ===")
+b31 = Broker(holdings={"ZS": 3}, quote=None)   # broker holds 3, executor tracks nothing
+e31 = Executor(b31, CFG)
+result31 = e31.close_orphaned_position("ZS")
+check("a real order is returned, not None", result31 is not None)
+check("the sell was submitted for the full orphaned qty",
+      b31.sell_calls == [("ZS", 3, "sell")], b31.sell_calls)
+check("the broker's own avg_entry_price was adopted, not left blank",
+      e31.open_entries.get("ZS") == 100.0, e31.open_entries.get("ZS"))
+check("entry_meta records it as RECONCILED, not a normal signal",
+      e31.entry_meta.get("ZS", {}).get("method") == "RECONCILED", e31.entry_meta.get("ZS"))
+
+print("\n=== 32. close_orphaned_position: A SHORT IS NEVER TOUCHED - stays "
+      "the loud, report-only case ===")
+b32 = Broker(holdings={"CRWD": -12}, quote=None)
+e32 = Executor(b32, CFG)
+result32 = e32.close_orphaned_position("CRWD")
+check("nothing is returned for a short", result32 is None)
+check("no order was ever submitted for it", b32.sell_calls == [], b32.sell_calls)
+check("it was never adopted into tracking either",
+      "CRWD" not in e32.open_entries)
+
+print("\n=== 33. close_orphaned_position: NOTHING TO CLOSE IS A CLEAN NO-OP ===")
+b33 = Broker(holdings={}, quote=None)
+e33 = Executor(b33, CFG)
+check("a symbol the broker doesn't even list returns None",
+      e33.close_orphaned_position("GHOST") is None)
+check("no order submitted", b33.sell_calls == [], b33.sell_calls)
+
+print("\n=== 34. main.py GATES THE AUTO-CLOSE ON PERSISTENCE, NOT A SINGLE "
+      "RECONCILE (a fill/cancel race must not trigger it) ===")
+check("close_orphaned_position is actually wired into the poll loop",
+      "executor.close_orphaned_position(" in src)
+check("...gated on the symbol persisting across consecutive reconciles, "
+      "not firing on the first sighting",
+      '_streak[_sym] = _streak.get(_sym, 0) + 1' in src
+      and "_streak[_sym] >= 2" in src)
+check("...and a SHORT is filtered out before the streak counter ever sees it",
+      "if _held <= 0" in src)
+
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)

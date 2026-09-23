@@ -589,6 +589,79 @@ class Executor:
             )
         return out, None
 
+    def close_orphaned_position(self, symbol, reason="ORPHAN_RECONCILE"):
+        """
+        Close ONE position the broker holds that this executor has no
+        tracking for at all - the single-symbol counterpart to
+        flatten_all_positions' end-of-day sweep, meant to be called early by
+        the periodic reconcile once a mismatch has PERSISTED across
+        consecutive checks (see main.py's reconcile block), rather than
+        leaving it unprotected until 16:00.
+
+        WHY THIS EXISTS. reconcile_against_broker deliberately only reports
+        - "the right repair differs by cause" - but an untracked POSITIVE
+        quantity is the one case with exactly one safe repair: nothing is
+        watching it, so it carries full market risk with no stop-loss, no
+        take-profit, nothing. 2026-09-22: ZS's second entry filled 16
+        shares, its RESISTANCE exit closed what was tracked at that instant,
+        and 3 shares that finished filling afterward became invisible -
+        sitting unprotected for roughly 6 hours until the blunt 16:00
+        FLATTEN_ALL happened to catch it (a small gain, that time; nothing
+        about the gap guaranteed that).
+
+        Deliberately narrow: the caller has already confirmed (a) this is a
+        genuine, PERSISTENT orphan, not a single-poll fill/cancel race - see
+        the 2-consecutive-reconcile gate in main.py - and (b) the held
+        quantity is positive. A short is a different bug with a different
+        history (see flatten_all_positions) and stays reconcile's loud,
+        report-only case rather than being silently closed here.
+
+        Returns the order on success, None if there was nothing to close or
+        the close failed (logged either way, never raises).
+        """
+        try:
+            live = self.broker.get_positions() or {}
+        except Exception as e:
+            logger.debug(f"close_orphaned_position({symbol}): could not fetch positions ({e})")
+            return None
+
+        position = live.get(symbol)
+        if position is None:
+            return None
+
+        try:
+            raw_qty = float(position.qty)
+        except (TypeError, ValueError):
+            return None
+
+        qty = int(raw_qty)
+        if qty <= 0:
+            # Not this method's job - zero is nothing to close, and a short
+            # (negative) is the different bug flatten_all_positions already
+            # surfaces loudly rather than something to cover silently here.
+            return None
+
+        if symbol not in self.open_entries or not self.open_entries[symbol]:
+            avg_entry = getattr(position, "avg_entry_price", None)
+            self.open_entries[symbol] = float(avg_entry) if avg_entry else None
+        if symbol not in self.entry_meta:
+            self.record_entry_meta(symbol, method="RECONCILED", rsi=None)
+        current_price = getattr(position, "current_price", None)
+        price = float(current_price) if current_price else None
+
+        order = self.submit_exit_order(symbol, qty, reason, price, side="sell")
+        if order is not None:
+            logger.warning(
+                f"{symbol}: closed a persistent orphan position ({qty} shares) found "
+                f"unprotected by the periodic reconcile - see reconcile_against_broker."
+            )
+        else:
+            logger.error(
+                f"{symbol}: found a persistent orphan position ({qty} shares) but "
+                f"could not close it - still unprotected, check the account manually."
+            )
+        return order
+
     def retry_unconfirmed_exits(self, grace_seconds=15, alert_fn=None):
         """
         Verify every marketable-limit exit this executor submitted actually
