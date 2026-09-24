@@ -125,9 +125,9 @@ check("the 2026-08-21 losers would now be blocked",
 print("\n=== G. MONDAY CONFIG ===")
 t_=CFG["trading"]
 for k,v in [("entry_window_start","09:33"),("take_profit_pct",1.25),
-            ("resistance_min_decline_pct",0.5),("earnings_list_top_n",3),
+            ("resistance_min_decline_pct",0.5),("earnings_list_top_n",5),
             ("earnings_require_beat",True),("earnings_max_gap_pct",3.0),
-            ("reentry_cooldown_minutes",5),("stream_max_subscriptions",30)]:
+            ("reentry_cooldown_minutes",5),("stream_max_subscriptions",60)]:
     check(f"{k} = {v}", t_[k]==v, t_[k])
 check("burst_max_entries still 3 (raise AFTER ranking is fixed)", t_["burst_max_entries"]==3, t_["burst_max_entries"])
 check("entry window still opens after the bell", t_["entry_window_start"] > "09:30")

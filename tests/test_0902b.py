@@ -592,8 +592,9 @@ check("sector cap tightened 3 -> 2 (three XLK names did 66% of 09-02's damage)",
       t["max_positions_per_sector"] == 2, t["max_positions_per_sector"])
 check("leveraged/basket ETF exclusions still on",
       t["exclude_leveraged_etfs"] is True and t["exclude_basket_etfs"] is True)
-check("the stream cap moved to 30 on 2026-09-17 (Algo Trader Plus lifted "
-      "the 30-symbol free-tier boundary entirely)", t["stream_max_subscriptions"] == 30)
+check("the stream cap moved to 60 on 2026-09-24, scaled with the wider "
+      "watchlist (Algo Trader Plus has no subscription-count ceiling)",
+      t["stream_max_subscriptions"] == 60)
 check("trade ticks still on", t["use_trade_ticks_for_entry"] is True)
 check("index slots still reserved", t["stream_reserve_index_slots"] is True)
 check("the correlation limiter is still enabled", t["correlation_limit"]["enabled"] is True)

@@ -94,9 +94,9 @@ check("no context -> push unchanged from before", t2.startswith("P&L"), t2.split
 
 print("\n=== E. CONFIG FOR MONDAY ===")
 t_=CFG["trading"]
-check("cap moved to 30 on 2026-09-17 - Algo Trader Plus, no free-tier boundary left", t_["stream_max_subscriptions"]==30, t_["stream_max_subscriptions"])
+check("cap moved to 60 on 2026-09-24, scaled with the wider watchlist - Algo Trader Plus, no free-tier boundary left", t_["stream_max_subscriptions"]==60, t_["stream_max_subscriptions"])
 check("ticks stay ON for Monday", t_["use_trade_ticks_for_entry"] is True)
 budget = t_["stream_max_subscriptions"]   # unique symbols; ticks are free
-check("yields 30 streamed symbols - ticks no longer halve it", budget==30, budget)
+check("yields 60 streamed symbols - ticks no longer halve it", budget==60, budget)
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

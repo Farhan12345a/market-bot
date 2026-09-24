@@ -532,7 +532,18 @@ trading:
   # cap entirely ("unlimited symbols"), so 30 is no longer sitting at a
   # ceiling with zero margin - still matched to num_stocks_to_trade (15) +
   # benchmarks, not raised further without a reason to.
-  stream_max_subscriptions: 30
+  #
+  # 30 -> 60 on 2026-09-24, alongside num_stocks_to_trade 15->27 (see its
+  # comment). This IS "a reason to" raise it, per the paragraph above -
+  # without this, most of the wider watchlist would silently fall back to
+  # ~15-minute-delayed REST pricing instead of live ticks, which would have
+  # quietly defeated the whole point of widening the universe. 27 watched +
+  # up to ~8 benchmarks (SPY, QQQ, sector ETFs - varies by day) is
+  # comfortably inside 60, not tight against it like 30 was against 15+5.
+  # Algo Trader Plus has no subscription-count ceiling, so this costs
+  # nothing extra - it was never a paid-tier constraint, just an unrevisited
+  # number matched to the old watchlist size.
+  stream_max_subscriptions: 60
   # iex -> sip on 2026-09-17, Algo Trader Plus ($99/mo) now active. IEX
   # carries ~2% of US volume - see the opening_burst.decide_by comment above
   # and the two-day-running FROG/IOT/OKTA/ZS/S/CRWD/FSLY/HPE fill-failure
@@ -1396,9 +1407,18 @@ trading:
       # improve this session the two cannot be told apart; if they help,
       # separate them on the next entry-change pass to learn which one
       # mattered.
-      slippage_pct: 0.5
-      spread_multiple: 3.0
-      max_slippage_pct: 2.0
+      #
+      # Cranked further 2026-09-24, on explicit user request, after
+      # 2026-09-23 showed the direction was right: fills went 0/14 -> 3/14
+      # (21%) with this band plus retry_grace_seconds at 20s. Same caveat as
+      # last time, now one layer deeper - THREE rounds of change to this
+      # mechanism (2026-09-03 widen, 2026-09-23 widen+patience, this one)
+      # have now happened without ever isolating a single variable, so even
+      # if fills improve further, which lever (or combination) is doing the
+      # work stays unknown. Flagged plainly, done anyway on explicit request.
+      slippage_pct: 0.65
+      spread_multiple: 3.5
+      max_slippage_pct: 2.75
 
     # RETRY BAND (2026-09-09), for Executor.retry_unfilled_entries only - a
     # WIDE marketable-limit for the forced second attempt, priced off a
@@ -1473,7 +1493,14 @@ trading:
     # sitting unmatched for lack of patience, or never marketable in the
     # first place. Needs several more opening-burst sessions' fill-rate
     # data before either conclusion is safe to draw.
-    retry_grace_seconds: 20
+    #
+    # 20 -> 30 on 2026-09-24, on explicit user request, after 2026-09-23's
+    # 3/14 (21%) fill rate under 20s - a real result, first non-zero one
+    # this mode has ever produced, moved alongside the price band above at
+    # the same time (again). Still short of the "a minute or more" step
+    # this file's own daily-check routine flags as the next real escalation
+    # if fills stall - this is a moderate further step, not that one.
+    retry_grace_seconds: 30
 
   marketable_limit_exits:
     enabled: true
@@ -2249,7 +2276,16 @@ trading:
   # NOT reverted alongside this - it is a separate lever (live vs REST
   # price coverage, not universe breadth) and now has more headroom than
   # ever relative to a 15-name watchlist, which is strictly fine.
-  num_stocks_to_trade: 15  # Number of top stocks to select each day
+  # 15 -> 27 on 2026-09-24, on explicit user request ("increase this to
+  # 50... keep the same selection ratio"), scaled proportionally alongside
+  # qqq_list_top_n (10->18) and earnings_list_top_n (3->5) - 15:10:3 was the
+  # prior ratio, 27:18:5 sums to the same 50 scaled up (27+18+5=50). Tier 5:
+  # the biggest lever there is, changing WHICH NAMES CAN EVER BE PICKED, not
+  # just sized differently - three Tier-5 settings moved in the same
+  # commit, so if performance changes, which of the three (or the
+  # combination) mattered will not be separable afterward. Flagged plainly,
+  # done anyway on explicit request.
+  num_stocks_to_trade: 27  # Number of top stocks to select each day
   # ---------------------------------------------------------------------
   # Opening-move history (added 2026-08-21)
   # ---------------------------------------------------------------------
@@ -2380,7 +2416,7 @@ trading:
   # earnings_require_beat, is the screen; "unknown" is no longer a veto.
   earnings_require_known_beat: false
   earnings_max_gap_pct: 3.0
-  earnings_list_top_n: 3
+  earnings_list_top_n: 5  # 3 -> 5 on 2026-09-24, scaled with num_stocks_to_trade - see its comment
   earnings_calendar_timeout_seconds: 20
 
   # QQQ list: the Nasdaq-100 constituents in src/screener/qqq_constituents.txt,
@@ -2389,7 +2425,7 @@ trading:
   # heavily correlated, so adding 10 of them is one bet held ten times rather
   # than ten bets - the trend gate is what keeps that from happening daily.
   use_qqq_list: true
-  qqq_list_top_n: 10
+  qqq_list_top_n: 18  # 10 -> 18 on 2026-09-24, scaled with num_stocks_to_trade - see its comment
   qqq_trend_lookback_days: 5
 
   # Default stock universe. Watched EVERY DAY no matter what - merged with

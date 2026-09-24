@@ -80,12 +80,13 @@ lg=logging.getLogger("src.main"); lg.addHandler(h); lg.setLevel(logging.INFO)
 cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(CFG, [f"S{i}" for i in range(25)])
 check("25 watched, 25 budget -> 'every tradeable name gets live prices'",
       any("every tradeable name" in m for m in cap.msgs), cap.msgs)
-cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(CFG, [f"S{i}" for i in range(59)])
-check("59 watched -> explicit warning", any("exceeds the stream budget" in m for m in cap.msgs), cap.msgs)
-# 25-symbol budget as of 2026-09-08 (unique symbols, not channel-subs), so
-# 59 watched leaves 34 on REST.
-check("names how many run on REST", any("29 symbol" in m for m in cap.msgs), cap.msgs)
-check("quantifies it as a percentage", any("49% of the" in m for m in cap.msgs), cap.msgs)
+cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(CFG, [f"S{i}" for i in range(150)])
+check("150 watched -> explicit warning", any("exceeds the stream budget" in m for m in cap.msgs), cap.msgs)
+# 60-symbol budget as of 2026-09-24 (unique symbols, not channel-subs) -
+# scaled with num_stocks_to_trade's 15->27, see config.yaml's comment on
+# stream_max_subscriptions. 150 watched leaves 90 on REST.
+check("names how many run on REST", any("90 symbol" in m for m in cap.msgs), cap.msgs)
+check("quantifies it as a percentage", any("60% of the" in m for m in cap.msgs), cap.msgs)
 noticks=copy.deepcopy(CFG); noticks["trading"]["use_trade_ticks_for_entry"]=False
 cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(noticks, [f"S{i}" for i in range(14)])
 check("ticks off changes NOTHING now - the cap counts symbols, not channels",

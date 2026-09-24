@@ -47,7 +47,10 @@ check("cooldown shorter than the entry window", T["reentry_cooldown_minutes"] < 
 budget=T["stream_max_subscriptions"]
 check(f"stream budget {budget} >= watchlist target {T['num_stocks_to_trade']}-2",
       budget >= T["num_stocks_to_trade"]-2, (budget,T["num_stocks_to_trade"]))
-check("stream cap under the free-tier limit", T["stream_max_subscriptions"]<=30)
+# No upper-bound check here on purpose (removed 2026-09-24, stream_max_subscriptions
+# 30->60): Algo Trader Plus has no subscription-count ceiling ("unlimited symbols"),
+# so there is no longer a real free-tier number to assert against - the budget-vs-
+# watchlist check above is the invariant that actually matters now.
 check("momentum fade window >= 3 samples", T["momentum_fade_window_samples"]>=3)
 check("resistance floor positive", T["resistance_min_decline_pct"]>0)
 

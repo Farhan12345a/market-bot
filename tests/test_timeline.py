@@ -262,7 +262,9 @@ if prev.returncode == 0:
         # comfortably under the documented free-tier boundary of ~30
         # (ST.DEFAULT_MAX_SUBSCRIPTIONS, test_cap.py). 25 -> 30 on
         # 2026-09-17: Algo Trader Plus removed that boundary entirely.
-        "stream_max_subscriptions": 30,
+        # 30 -> 60 on 2026-09-24, scaled alongside num_stocks_to_trade's
+        # 15 -> 27 below - see config.yaml's comment on this key.
+        "stream_max_subscriptions": 60,
         # -0.5 -> -0.7 on 2026-09-03. Exit-side (see CLAUDE.md's "NOT an entry
         # change" list), so not subject to the one-variable-at-a-time rule
         # below, but still recorded here rather than silently dropped from
@@ -272,6 +274,12 @@ if prev.returncode == 0:
         # right" - the clearest and largest-sample skew of the three stop-type
         # exits measured that day.
         "first_exit_loss_pct": -0.7,
+        # 15 -> 20 -> back to 15 (see the `same` list's old comment, still
+        # below for the historical record) -> 27 on 2026-09-24, on explicit
+        # user request, scaled alongside qqq_list_top_n and
+        # earnings_list_top_n (not tracked in this timeline) - see
+        # config.yaml's comment on this key. Tier 5.
+        "num_stocks_to_trade": 27,
     }
     for k, want in changed.items():
         check(f"{k} deliberately changed to {want}", t.get(k) == want,
@@ -283,15 +291,10 @@ if prev.returncode == 0:
             "final_exit_loss_pct", "trailing_stop_pct",
             "breakeven_tiers", "use_resistance_exit",
             "use_breakeven_floor", "reentry_cooldown_minutes",
-            "use_continuation_score",
-            # 15 -> 20 on 2026-09-08 (see `deliberate`'s old comment, still
-            # below for the historical record) -> back to 15 on 2026-09-10:
-            # the universe widening was judged to have made 2026-09-09's
-            # selection edge worse (see PENDING_WORK.md), so this round-tripped
-            # to baseline. stream_max_subscriptions (now 30) was deliberately
-            # NOT reverted alongside it - it is a data-coverage cap, not a
-            # selection-pool size, and has no downside at a smaller pool.
-            "num_stocks_to_trade"]
+            "use_continuation_score"]
+            # num_stocks_to_trade moved OUT of this list and into `changed`
+            # on 2026-09-24 (15 -> 20 -> back to 15 on 2026-09-10, now -> 27)
+            # - see `changed`'s comment on this key.
 
     # DELIBERATELY CHANGED THIS RUN, and listed here rather than quietly
     # removed from `same`. This guard's whole job is to make an entry-setting
