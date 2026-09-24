@@ -39,6 +39,15 @@ journalctl -u market-bot --since "$DATE 13:00:00" --until "$DATE 21:00:00" \
 git add -f "$OUT" ANALYSIS_LOG.md
 if ! git diff --cached --quiet; then
   git commit -m "Daily log export for $DATE"
+  # PULL BEFORE PUSH (2026-09-24). Without this, every run raced against
+  # whatever a dev session had pushed to origin since this repo's last pull -
+  # not a rare edge case, an every-single-day one, since a dev session is
+  # usually pushing something around the same time this runs. --no-rebase
+  # is safe here specifically because this script only ever touches
+  # logs/daily/<date>/ and ANALYSIS_LOG.md, which nothing else in the repo
+  # writes to - a merge conflict on this path would mean two copies of this
+  # exact script ran for the same date at once, not a real content clash.
+  git pull --no-rebase --no-edit
   git push
 else
   echo "Nothing new for $DATE"
