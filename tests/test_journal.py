@@ -124,5 +124,69 @@ check("finish_day still does a final flush", "signal_journal.flush()" in src)
 check("KeyboardInterrupt path flushes", src.count("_flush_journal_safely(signal_journal)")>=2)
 check("shutdown flush is exception-guarded", "Could not flush the signal journal on shutdown" in src)
 
+print("\n=== H. SHORT-SIDE EVIDENCE GATHERING (2026-09-23) ===")
+# Same class, a second instance pointed at its own file/flag - see
+# SignalJournal.__init__'s path/enabled overrides.
+d10=tempfile.mkdtemp(); p10=os.path.join(d10,"long.csv"); p10s=os.path.join(d10,"short.csv")
+c10=copy.deepcopy(CFG)
+c10["analytics"]={"log_signals":True,"signal_log_file":p10,
+                   "forward_return_minutes":[15,30],
+                   "log_short_signals":True,"short_signal_log_file":p10s}
+jlong=SignalJournal(c10)
+jshort=SignalJournal(c10, path=c10["analytics"]["short_signal_log_file"],
+                      enabled=c10["analytics"]["log_short_signals"])
+check("the two instances use DIFFERENT paths", jlong.path != jshort.path,
+      (jlong.path, jshort.path))
+check("short path came from the override, not the long-side default",
+      jshort.path == p10s, jshort.path)
+
+rec(jlong,"UPMOVE"); jlong.flush(final=True)
+rec(jshort,"DOWNMOVE"); jshort.flush(final=True)
+check("a long-side record never lands in the short file",
+      "UPMOVE" not in "".join(x["symbol"] for x in rows(p10s)))
+check("a short-side record never lands in the long file",
+      "DOWNMOVE" not in "".join(x["symbol"] for x in rows(p10)))
+check("short file actually got its row", any(x["symbol"]=="DOWNMOVE" for x in rows(p10s)))
+
+c11=copy.deepcopy(CFG)
+c11["analytics"]={"log_signals":True,"signal_log_file":os.path.join(tempfile.mkdtemp(),"l.csv"),
+                   "forward_return_minutes":[15,30]}
+jshort_off=SignalJournal(c11, path=os.path.join(tempfile.mkdtemp(),"s.csv"), enabled=False)
+rec(jshort_off,"X")
+check("enabled=False on the override disables that instance independently "
+      "of the long side's own log_signals flag",
+      jshort_off.flush(final=True) is None)
+
+check("short_candidate_pct is configured", "short_candidate_pct" in CFG["trading"])
+check("...defaults equal to rapid_increase_pct as the least-biased starting point",
+      CFG["trading"]["short_candidate_pct"] == CFG["trading"]["rapid_increase_pct"])
+sa=CFG["analytics"]
+check("log_short_signals configured", sa.get("log_short_signals") is True)
+check("short_signal_log_file configured",
+      sa.get("short_signal_log_file") == "logs/short_signal_journal.csv")
+
+print("\n=== I. MAIN WIRING - SHORT SIDE IS RECORD-ONLY, NEVER TRADED ===")
+check("run_trading_day accepts a short_signal_journal parameter",
+      "short_signal_journal=None" in src)
+check("a second SignalJournal instance is created for it (both call sites - "
+      "the default fallback inside run_trading_day, and main()'s own setup)",
+      src.count("short_signal_log_file") >= 2, src.count("short_signal_log_file"))
+check("short candidates flow through their own list, never burst_candidates",
+      "short_candidates = []" in src and "short_candidates.append(" in src)
+check("short candidates are recorded directly - taken is a hardcoded False, "
+      "never a variable a decision could have set",
+      'taken=False, skip_reason="short_side_not_traded_evidence_only"' in src)
+check("the short-candidate block contains no _attempt_entry call at all "
+      "(the safety property that makes this purely observational)",
+      "_attempt_entry(" not in src.split("SHORT-SIDE EVIDENCE GATHERING")[1].split(
+          "Best-first, so the throttle")[0])
+check("both journals flush incrementally every poll",
+      "short_signal_journal.flush(final=False)" in src)
+check("both journals get their forward returns updated every poll",
+      "short_signal_journal.update_forward_returns(" in src)
+check("both journals flush on finish_day", "short_signal_journal.flush()" in src)
+check("both journals flush on a crash/interrupt, not just the long one",
+      src.count("_flush_journal_safely(short_signal_journal)") >= 2)
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

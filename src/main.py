@@ -2904,7 +2904,7 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     )
     return True
 
-def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values, email_notifier, et, signal_journal=None):
+def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values, email_notifier, et, signal_journal=None, short_signal_journal=None):
     """
     Runs the entire trading day as ONE continuous loop, from entry_window_start
     until either all positions have closed after the entry window ends, or the
@@ -3024,6 +3024,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
 
     def finish_day(reason):
         signal_journal.flush()
+        short_signal_journal.flush()
         executor.save_trades_log()
         # Compute the burst summary BEFORE the report that displays it. This
         # used to run three lines lower, so every report ever sent carried the
@@ -3067,6 +3068,18 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
 
     if signal_journal is None:
         signal_journal = SignalJournal(config)
+    if short_signal_journal is None:
+        # Evidence-gathering only, requested by the user 2026-09-23 ahead of
+        # a possible future short-side strategy - see the config comment on
+        # analytics.short_signal_log_file. Same class as the long-side
+        # journal, a different file, gated by its own enabled flag so it
+        # can be turned off without touching the long side's logging at all.
+        _sa = config.get("analytics", {})
+        short_signal_journal = SignalJournal(
+            config,
+            path=_sa.get("short_signal_log_file", "logs/short_signal_journal.csv"),
+            enabled=_sa.get("log_short_signals", True),
+        )
     stream_warned = False
     volume_history = {symbol: deque(maxlen=20) for symbol in symbols}  # for intraday RVOL
     spy_history = deque()          # SPY samples, for excess-return-vs-market
@@ -3139,12 +3152,16 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         signal_journal.update_forward_returns(
             lambda sym: (market_data.get_latest_bar(sym, "1Min") or {}).get("close")
         )
+        short_signal_journal.update_forward_returns(
+            lambda sym: (market_data.get_latest_bar(sym, "1Min") or {}).get("close")
+        )
         # Persist anything whose forward horizons have all elapsed. Append-only,
         # so this is cheap and cannot damage rows already written. Without it the
         # journal existed purely in memory until finish_day, and any session that
         # ended by crash, OOM or restart contributed nothing at all - which is
         # fatal for a dataset whose entire value is accumulating day over day.
         signal_journal.flush(final=False)
+        short_signal_journal.flush(final=False)
         # What happened AFTER each exit. Same price source the loop already
         # reads, so no extra API calls for symbols still on the watchlist.
         executor.note_post_exit_prices(
@@ -3737,6 +3754,14 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             # off and keep their existing immediate behavior rather than being
             # restructured while unproven.
             burst_candidates = []
+            # Evidence-gathering only for a possible future short-side
+            # strategy (requested 2026-09-23) - candidates that moved DOWN
+            # by at least short_candidate_pct, recorded to
+            # short_signal_journal with the same feature set as the long
+            # side, but NEVER passed to _attempt_entry. No trade is ever
+            # placed from this list; see the recording block after the
+            # continuation-factor enrichment below.
+            short_candidates = []
             for symbol in symbols:
                 # Re-checked per SYMBOL, not just once per poll. The outer
                 # check above only runs at the top of a cycle, and this inner
@@ -3991,6 +4016,21 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                             "rsi": symbol_rsi, "signal_pct": round(pct_change, 3), "bar": bar,
                         })
 
+                    else:
+                        # Evidence-gathering only - see short_candidates'
+                        # definition above. check_rapid_increase_entry
+                        # already returns (0, 0.0) for a symbol already in
+                        # strategy.trades, so pct_change here is only ever a
+                        # genuine fresh reading, never a stale 0.0 mistaken
+                        # for "not down enough."
+                        _short_threshold = config["trading"].get("short_candidate_pct")
+                        if _short_threshold and pct_change <= -_short_threshold:
+                            short_candidates.append({
+                                "symbol": symbol, "price": price,
+                                "method": "RAPID_DECREASE_CANDIDATE",
+                                "rsi": symbol_rsi, "signal_pct": round(pct_change, 3), "bar": bar,
+                            })
+
                 except Exception as e:
                     logger.error(f"Error checking entry for {symbol}: {e}")
                     continue
@@ -4036,6 +4076,43 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     rvol=cand["rvol"],
                     spread_pct=cand["spread_pct"],
                     sector_returns=sector_returns,
+                )
+
+            # SHORT-SIDE EVIDENCE GATHERING (2026-09-23), requested by the
+            # user ahead of a possible future short strategy. Same
+            # enrichment as the long side, immediately followed by
+            # recording - no ranking, no throttle, no _attempt_entry call,
+            # ever. This candidate is never eligible to become a trade;
+            # taken/skip_reason are recorded as fixed, honest constants
+            # rather than run through logic that would imply otherwise.
+            for cand in short_candidates:
+                cand["spread_pct"] = _spread_pct(market_data, cand["symbol"], cand["price"])
+                cand["rvol"] = _compute_rvol(cand["bar"], volume_history[cand["symbol"]])
+                cand["cont"] = _continuation_fields(
+                    config, cand["symbol"], cand["price"], cand["signal_pct"], spy_pct,
+                    [p for _, p in price_history[cand["symbol"]]],
+                    list(volume_history[cand["symbol"]]),
+                    _vwap(vwap_acc, cand["symbol"]),
+                    {**(screener_details.get(cand["symbol"]) or {}),
+                     "opening_high": opening_high.get(cand["symbol"])},
+                    rvol=cand["rvol"],
+                    spread_pct=cand["spread_pct"],
+                    sector_returns=sector_returns,
+                )
+                sig_pct = cand["signal_pct"]
+                short_signal_journal.record(
+                    symbol=cand["symbol"], entry_method=cand["method"], price=cand["price"],
+                    signal_pct=sig_pct,
+                    spy_pct=spy_pct,
+                    excess_vs_spy_pct=(round(sig_pct - spy_pct, 3)
+                                       if sig_pct is not None and spy_pct is not None else None),
+                    rvol=cand["rvol"],
+                    spread_pct=cand["spread_pct"],
+                    burst_width=len(short_candidates),
+                    **_opening_move_fields(screener_details, cand["symbol"]),
+                    **cand["cont"],
+                    taken=False, skip_reason="short_side_not_traded_evidence_only",
+                    qty=None, size_multiplier=None,
                 )
 
             # Best-first, so the throttle keeps the best of a burst rather than
@@ -4678,6 +4755,12 @@ def main():
         reconcile_existing_positions(broker, strategy, executor)
         email_notifier = EmailNotifier(config)
         signal_journal = SignalJournal(config)
+        _sa = config.get("analytics", {})
+        short_signal_journal = SignalJournal(
+            config,
+            path=_sa.get("short_signal_log_file", "logs/short_signal_journal.csv"),
+            enabled=_sa.get("log_short_signals", True),
+        )
 
         logger.info("Paper trading bot started")
         logger.info(f"Trading hours: 9:30 AM - {config['trading']['time_stop_hour']}:00 ET")
@@ -4831,7 +4914,7 @@ def main():
                 try:
                     run_trading_day(
                         config, market_data, strategy, executor, symbols, rsi_values,
-                        email_notifier, et, signal_journal,
+                        email_notifier, et, signal_journal, short_signal_journal,
                     )
                     last_session_date = datetime.now(et).date()
                 finally:
@@ -5077,6 +5160,7 @@ def main():
         executor.flatten_all_positions()
         executor.save_trades_log()
         _flush_journal_safely(signal_journal)
+        _flush_journal_safely(short_signal_journal)
         email_notifier.send_daily_summary()
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
@@ -5093,6 +5177,7 @@ def main():
             executor.flatten_all_positions()
             executor.save_trades_log()
             _flush_journal_safely(signal_journal)
+            _flush_journal_safely(short_signal_journal)
             email_notifier.send_daily_summary()
         except:
             pass

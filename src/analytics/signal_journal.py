@@ -105,10 +105,19 @@ class SignalJournal:
     writes completed rows to CSV.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, path=None, enabled=None):
+        """
+        path/enabled let a second instance point at a different file under a
+        different flag - see short_signal_journal in main.py, which reuses
+        this exact class (same schema, same forward-return/flush mechanics)
+        rather than duplicating ~150 lines of buffering logic for what is
+        the same problem on the down side. Both default to the long-side
+        analytics.signal_log_file/log_signals keys when not given, so
+        existing callers are unaffected.
+        """
         analytics = config.get("analytics", {})
-        self.enabled = analytics.get("log_signals", True)
-        self.path = analytics.get("signal_log_file", "logs/signal_journal.csv")
+        self.enabled = analytics.get("log_signals", True) if enabled is None else enabled
+        self.path = path or analytics.get("signal_log_file", "logs/signal_journal.csv")
         self.horizons = analytics.get("forward_return_minutes", [15, 30])
 
         self._pending = []  # rows still waiting on their forward returns

@@ -664,6 +664,26 @@ trading:
   # A shorter window is only useful on live data: with REST-delayed prices,
   # entry timing is dominated by feed lag, not window width.
   rapid_increase_pct: 0.3            # Minimum % price gain within the lookback window to trigger a buy
+
+  # SHORT-SIDE EVIDENCE GATHERING (2026-09-23), on explicit user request
+  # ahead of a possible future short strategy: "start doing this now."
+  # PURELY OBSERVATIONAL - gates nothing, trades nothing, never reaches
+  # _attempt_entry. A down-move of at least this % over the SAME lookback
+  # window rapid_increase_pct uses gets recorded to short_signal_journal
+  # (analytics.short_signal_log_file below) with the identical feature set
+  # the long side records - cf_* factors, rvol, spread, forward returns at
+  # 15/30min - so in a few weeks the question "does momentum-down behave
+  # like the mirror of momentum-up, or differently" is answerable from data
+  # instead of assumed either way.
+  #
+  # Set equal to rapid_increase_pct as the simplest, least-biased starting
+  # point - there is no evidence yet that the down side should use a
+  # different threshold, and picking one now would just be a guess wearing
+  # a number. Revisit once real forward-return data exists.
+  #
+  # Set to 0 or remove to stop recording short candidates without touching
+  # anything else (see analytics.log_short_signals for the other switch).
+  short_candidate_pct: 0.3
   # CEILING on the entry signal. rapid_increase_pct is the floor - how big a
   # move must be to qualify. This is how big is TOO big: a signal above this is
   # SKIPPED, because the move has already happened and the -1.0% stop then sits
@@ -2624,3 +2644,11 @@ analytics:
   log_signals: true
   signal_log_file: "logs/signal_journal.csv"
   forward_return_minutes: [15, 30]
+
+  # SHORT-SIDE evidence gathering (2026-09-23) - a second, independent
+  # SignalJournal instance (see src/analytics/signal_journal.py) writing to
+  # its own file, gated by trading.short_candidate_pct above. Same
+  # forward_return_minutes horizons apply to both. Turning this off does
+  # not touch log_signals/signal_log_file at all - fully independent.
+  log_short_signals: true
+  short_signal_log_file: "logs/short_signal_journal.csv"
