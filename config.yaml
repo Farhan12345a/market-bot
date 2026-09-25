@@ -533,17 +533,15 @@ trading:
   # ceiling with zero margin - still matched to num_stocks_to_trade (15) +
   # benchmarks, not raised further without a reason to.
   #
-  # 30 -> 60 on 2026-09-24, alongside num_stocks_to_trade 15->27 (see its
-  # comment). This IS "a reason to" raise it, per the paragraph above -
-  # without this, most of the wider watchlist would silently fall back to
-  # ~15-minute-delayed REST pricing instead of live ticks, which would have
-  # quietly defeated the whole point of widening the universe. 27 watched +
-  # up to ~8 benchmarks (SPY, QQQ, sector ETFs - varies by day) is
-  # comfortably inside 60, not tight against it like 30 was against 15+5.
-  # Algo Trader Plus has no subscription-count ceiling, so this costs
-  # nothing extra - it was never a paid-tier constraint, just an unrevisited
-  # number matched to the old watchlist size.
-  stream_max_subscriptions: 60
+  # 30 -> 60 on 2026-09-24, alongside num_stocks_to_trade 15->27. Reverted
+  # 2026-09-25 back to 30, alongside the universe shrink below (18+7+3=28,
+  # about the same size as the old 15+10+3=28) - the wider 46-55 symbol
+  # subscription load on 2026-09-24 is one plausible contributor to that
+  # session's 8/14 phantom opening-burst fills (stream was still only
+  # serving 33/46 watched symbols, 0 with a baseline, at 09:30:08 when order
+  # submission started) - not confirmed as the sole cause, but not run back
+  # up again alongside everything else that's being pulled back.
+  stream_max_subscriptions: 30
   # iex -> sip on 2026-09-17, Algo Trader Plus ($99/mo) now active. IEX
   # carries ~2% of US volume - see the opening_burst.decide_by comment above
   # and the two-day-running FROG/IOT/OKTA/ZS/S/CRWD/FSLY/HPE fill-failure
@@ -1408,17 +1406,16 @@ trading:
       # separate them on the next entry-change pass to learn which one
       # mattered.
       #
-      # Cranked further 2026-09-24, on explicit user request, after
-      # 2026-09-23 showed the direction was right: fills went 0/14 -> 3/14
-      # (21%) with this band plus retry_grace_seconds at 20s. Same caveat as
-      # last time, now one layer deeper - THREE rounds of change to this
-      # mechanism (2026-09-03 widen, 2026-09-23 widen+patience, this one)
-      # have now happened without ever isolating a single variable, so even
-      # if fills improve further, which lever (or combination) is doing the
-      # work stays unknown. Flagged plainly, done anyway on explicit request.
-      slippage_pct: 0.65
-      spread_multiple: 3.5
-      max_slippage_pct: 2.75
+      # Reverted 2026-09-25: the 2026-09-24 crank (0.65/3.5/2.75) is undone.
+      # That session's OPENING_MOVE budget (14 slots) came back 8/14 phantom
+      # (RECONCILE showed the broker holding nothing for ADSK/FSLY/GLXY/IONQ/
+      # MRNA/MSTR/MXL/SMCI right after "confirmed") - a fill-tracking failure,
+      # not evidence the wider band helped. Held back at the 2026-09-23
+      # values, which DID produce real (non-phantom) opening-burst fills,
+      # albeit unprofitable ones that day (OPENING_MOVE: 4 trades, -$27.69).
+      slippage_pct: 0.5
+      spread_multiple: 3.0
+      max_slippage_pct: 2.0
 
     # RETRY BAND (2026-09-09), for Executor.retry_unfilled_entries only - a
     # WIDE marketable-limit for the forced second attempt, priced off a
@@ -1456,51 +1453,14 @@ trading:
     # once a few sessions of retry-quote deviation data exist.
     retry_max_deviation_pct: 6.0
 
-    # RETRY PATIENCE (2026-09-23), on explicit user request after the
-    # opening burst's first session back (2026-09-22) filled 0/14 openers -
-    # the same "0/N filled" symptom that led to disabling the mode on
-    # 2026-09-21, now recurring under a different specific mechanism.
-    #
-    # THIS IS NOT A NEW PROBLEM. Every prior fix attempt is still active and
-    # none of them solved it: the opening-burst slippage band above was
-    # widened for exactly this reason on 2026-09-03 (that day's 7 openers
-    # ALSO phantomed); retry_unfilled_entries itself was added 2026-09-08
-    # after 8 of 9 openers went unfilled; the SIP feed switch was tested
-    # against the "it's IEX coverage" theory and DISCONFIRMED it (commit
-    # fdfcfdf: the first SIP session still went 0/5). 2026-09-22's INTC leg
-    # priced its marketable limit 0.95% above the decision-time ask -
-    # already near the 1.0% opening_burst ceiling above - and still did not
-    # fill within the old 12s grace window. A limit that aggressive failing
-    # to cross points at TIMING (the fill/report not landing in the first
-    # 12s) rather than at price, which is what commit fdfcfdf flagged as
-    # "grace_seconds: the untested next lever" and never actually tried -
-    # the mode was disabled before that experiment ran.
-    #
-    # 12 -> 20. retry_unfilled_entries() uses this for BOTH the wait before
-    # the first forced retry AND the wait before giving up on that retry
-    # (see its docstring) - a single shared value, so this affects both
-    # stages. The quote-deviation guard above remains the backstop either
-    # way: more patience can only mean MORE real fills get caught, never a
-    # worse fill, since a quote that has genuinely run away is still refused
-    # regardless of how long the wait was. Left unset (or removed) this
-    # falls back to the original 12s everywhere retry_unfilled_entries is
-    # called without an explicit override.
-    #
-    # ONE VARIABLE, HELD AND WATCHED - per this file's own entry-change
-    # rule, this is Tier 1 (opening_burst timing) even though the number
-    # lives in a different config block. This is a test, not a fix: it is
-    # not yet known whether the opening burst's fills were genuinely
-    # sitting unmatched for lack of patience, or never marketable in the
-    # first place. Needs several more opening-burst sessions' fill-rate
-    # data before either conclusion is safe to draw.
-    #
-    # 20 -> 30 on 2026-09-24, on explicit user request, after 2026-09-23's
-    # 3/14 (21%) fill rate under 20s - a real result, first non-zero one
-    # this mode has ever produced, moved alongside the price band above at
-    # the same time (again). Still short of the "a minute or more" step
-    # this file's own daily-check routine flags as the next real escalation
-    # if fills stall - this is a moderate further step, not that one.
-    retry_grace_seconds: 30
+    # RETRY PATIENCE - tried at 20s (2026-09-23) then 30s (2026-09-24), on
+    # explicit user request both times. Reverted 2026-09-25, key removed
+    # entirely: 2026-09-24's session (30s, plus the wider price band above)
+    # came back with 8 of its 14 OPENING_MOVE slots phantom - tracked as
+    # filled, broker held nothing - which is a fill-TRACKING failure, not
+    # evidence that more patience was helping. Falls back to the original
+    # hardcoded 12s everywhere retry_unfilled_entries is called, same as
+    # before this key existed.
 
   marketable_limit_exits:
     enabled: true
@@ -2276,16 +2236,15 @@ trading:
   # NOT reverted alongside this - it is a separate lever (live vs REST
   # price coverage, not universe breadth) and now has more headroom than
   # ever relative to a 15-name watchlist, which is strictly fine.
-  # 15 -> 27 on 2026-09-24, on explicit user request ("increase this to
-  # 50... keep the same selection ratio"), scaled proportionally alongside
-  # qqq_list_top_n (10->18) and earnings_list_top_n (3->5) - 15:10:3 was the
-  # prior ratio, 27:18:5 sums to the same 50 scaled up (27+18+5=50). Tier 5:
-  # the biggest lever there is, changing WHICH NAMES CAN EVER BE PICKED, not
-  # just sized differently - three Tier-5 settings moved in the same
-  # commit, so if performance changes, which of the three (or the
-  # combination) mattered will not be separable afterward. Flagged plainly,
-  # done anyway on explicit request.
-  num_stocks_to_trade: 27  # Number of top stocks to select each day
+  # 15 -> 27 on 2026-09-24, on explicit user request, scaled alongside
+  # qqq_list_top_n and earnings_list_top_n. Reverted 2026-09-25, on explicit
+  # user request, to 18 - not back to the original 15, and qqq_list_top_n
+  # goes to 7 (below its original 10) rather than moving in the same ratio;
+  # the two are no longer scaled together. 2026-09-24's P&L-by-list-source
+  # breakdown was the reason: qqq-sourced trades were -254 on 5/15 that
+  # session, the worst bucket by far, while screener-sourced trades were
+  # +70 on 5/18 - the correlated QQQ names did most of the damage.
+  num_stocks_to_trade: 18  # Number of top stocks to select each day
   # ---------------------------------------------------------------------
   # Opening-move history (added 2026-08-21)
   # ---------------------------------------------------------------------
@@ -2416,7 +2375,7 @@ trading:
   # earnings_require_beat, is the screen; "unknown" is no longer a veto.
   earnings_require_known_beat: false
   earnings_max_gap_pct: 3.0
-  earnings_list_top_n: 5  # 3 -> 5 on 2026-09-24, scaled with num_stocks_to_trade - see its comment
+  earnings_list_top_n: 3  # 3 -> 5 on 2026-09-24, reverted to 3 on 2026-09-25 - see num_stocks_to_trade's comment
   earnings_calendar_timeout_seconds: 20
 
   # QQQ list: the Nasdaq-100 constituents in src/screener/qqq_constituents.txt,
@@ -2425,7 +2384,7 @@ trading:
   # heavily correlated, so adding 10 of them is one bet held ten times rather
   # than ten bets - the trend gate is what keeps that from happening daily.
   use_qqq_list: true
-  qqq_list_top_n: 18  # 10 -> 18 on 2026-09-24, scaled with num_stocks_to_trade - see its comment
+  qqq_list_top_n: 7  # 10 -> 18 on 2026-09-24, cut to 7 on 2026-09-25 (below the original 10) after qqq-sourced trades were 2026-09-24's worst bucket by far (-254, 5/15) - see num_stocks_to_trade's comment
   qqq_trend_lookback_days: 5
 
   # Default stock universe. Watched EVERY DAY no matter what - merged with
