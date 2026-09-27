@@ -1025,13 +1025,26 @@ class Strategy:
         return None
 
     def tighten_all_for_regime(self, final_pct=None, trail_pct=None,
-                               breakeven_trigger=None):
+                               breakeven_trigger=None, side=None):
         """
-        Apply tighten_for_regime to every open position. Returns
-        {symbol: what changed} for the ones that actually changed.
+        Apply tighten_for_regime to every open position, or only those
+        matching `side` ("long"/"short") when given. Returns {symbol: what
+        changed} for the ones that actually changed.
+
+        side matters because BEARISH tightening is a long-only concept (a
+        short is favored by a bearish tape, not fighting it) and the mirror
+        - BULLISH tightening - is short-only for the same reason. Without
+        this filter, a bearish-triggered tighten call would also squeeze an
+        open short's stops for no reason connected to what actually
+        threatens that position. tighten_for_regime's own math (through
+        TradeManager.direction) is already correct for either side - this
+        filter is about WHICH positions a given regime transition should
+        touch at all, not about getting the math right once it does.
         """
         out = {}
         for symbol, trade in list(self.trades.items()):
+            if side is not None and getattr(trade, "side", "long") != side:
+                continue
             try:
                 note = trade.tighten_for_regime(final_pct, trail_pct, breakeven_trigger)
                 if note:

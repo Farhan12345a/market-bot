@@ -3749,6 +3749,10 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             # that, independently, for one shared reason. Fired ONCE per
             # transition into a bearish label - latched on the label itself,
             # so a regime that oscillates cannot re-tighten every poll.
+            # side="long" - a bearish tape is what LONGS are fighting;
+            # a short in the same tape is favored, not threatened, so it is
+            # explicitly left out of this pass (see the mirrored bullish
+            # block below, and tighten_all_for_regime's own docstring).
             if _label == "bearish" and regime_state.get("tightened_at") != _label:
                 regime_state["tightened_at"] = _label
                 _rt = (regime_cfg.get("bearish_exits") or {})
@@ -3757,12 +3761,14 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         final_pct=_rt.get("final_exit_loss_pct", -0.5),
                         trail_pct=_rt.get("trailing_stop_pct", 0.4),
                         breakeven_trigger=_rt.get("breakeven_trigger_pct", 0.1),
+                        side="long",
                     )
                     if _changes:
                         logger.warning(
                             f"===== REGIME BEARISH: tightening {len(_changes)} open "
-                            f"position(s) rather than letting each find its own stop "
-                            f"=====")
+                            f"long position(s) rather than letting each find its own "
+                            f"stop ====="
+                        )
                         for _s, _note in _changes.items():
                             logger.warning(f"  {_s}: {_note}")
             elif _label and _label != "bearish":
@@ -3770,6 +3776,36 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 # again. Nothing is loosened by this - tighten_for_regime is
                 # monotonic and never re-widens a live stop.
                 regime_state["tightened_at"] = None
+
+            # MIRROR, for open SHORTS (added 2026-09-27, explicit user
+            # request): a BULLISH tape is what a short is fighting, exactly
+            # the way a bearish one is what a long fights above. Same
+            # monotonic tighten-not-kill philosophy, same latch pattern,
+            # just a SEPARATE latch key (tightened_at_short) so the two
+            # transitions track independently - a session that goes
+            # bearish then bullish then bearish again must be able to
+            # tighten longs on each bearish leg and shorts on the bullish
+            # one in between, without either latch stepping on the other.
+            if _label == "bullish" and regime_state.get("tightened_at_short") != _label:
+                regime_state["tightened_at_short"] = _label
+                _rt_s = (regime_cfg.get("bullish_exits") or {})
+                if _rt_s.get("enabled", True) and strategy.get_open_trades():
+                    _changes_s = strategy.tighten_all_for_regime(
+                        final_pct=_rt_s.get("final_exit_loss_pct", -0.5),
+                        trail_pct=_rt_s.get("trailing_stop_pct", 0.4),
+                        breakeven_trigger=_rt_s.get("breakeven_trigger_pct", 0.1),
+                        side="short",
+                    )
+                    if _changes_s:
+                        logger.warning(
+                            f"===== REGIME BULLISH: tightening {len(_changes_s)} open "
+                            f"short position(s) rather than letting each find its own "
+                            f"stop ====="
+                        )
+                        for _s, _note in _changes_s.items():
+                            logger.warning(f"  {_s}: {_note}")
+            elif _label and _label != "bullish":
+                regime_state["tightened_at_short"] = None
 
             _prov = regime_state.get("provisional")
             if _label is None and _prov is not None:

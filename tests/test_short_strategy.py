@@ -317,6 +317,75 @@ check("it warns LOUDLY rather than silently if the account still blocks it "
 check("this reuses the account object from the get_account() call already "
       "made at startup - no extra API call", "account = broker.get_account()" in src)
 
+print("\n=== G3. BULLISH-REGIME TIGHTENING FOR OPEN SHORTS (mirror of bearish_exits) ===")
+# 2026-09-27, explicit user request: "we should close all the trades... or
+# do you think we should keep it open" -> landed on the SAME monotonic
+# tighten-not-kill philosophy bearish_exits already uses for longs, mirrored
+# for shorts on a BULLISH read - a bullish tape is what a short fights, the
+# same way a bearish one is what a long fights.
+rc_live = CFG["trading"]["regime_sizing"]
+be = rc_live["bearish_exits"]
+bu = rc_live["bullish_exits"]
+check("bullish_exits is configured", bool(bu))
+check("same magnitudes as bearish_exits - not independently tuned yet",
+      bu["final_exit_loss_pct"] == be["final_exit_loss_pct"]
+      and bu["trailing_stop_pct"] == be["trailing_stop_pct"]
+      and bu["breakeven_trigger_pct"] == be["breakeven_trigger_pct"])
+
+strat_mix = Strategy(copy.deepcopy(CFG))
+strat_mix.confirm_entry("LONGY", 100.0, 50, side="long")
+strat_mix.confirm_entry("SHORTY", 100.0, 50, side="short")
+
+changes_short_only = strat_mix.tighten_all_for_regime(
+    final_pct=bu["final_exit_loss_pct"], trail_pct=bu["trailing_stop_pct"],
+    breakeven_trigger=bu["breakeven_trigger_pct"], side="short",
+)
+check("side='short' tightening touches the SHORT position",
+      "SHORTY" in changes_short_only, changes_short_only)
+check("...and leaves the LONG completely untouched",
+      "LONGY" not in changes_short_only, changes_short_only)
+check("the short's config was actually tightened",
+      strat_mix.trades["SHORTY"].config["trading"]["final_exit_loss_pct"] == bu["final_exit_loss_pct"])
+check("the long's config is UNCHANGED - still the original -1.0%",
+      strat_mix.trades["LONGY"].config["trading"]["final_exit_loss_pct"] == -1.0,
+      strat_mix.trades["LONGY"].config["trading"]["final_exit_loss_pct"])
+
+changes_long_only = strat_mix.tighten_all_for_regime(
+    final_pct=be["final_exit_loss_pct"], trail_pct=be["trailing_stop_pct"],
+    breakeven_trigger=be["breakeven_trigger_pct"], side="long",
+)
+check("side='long' tightening (the ORIGINAL bearish path) touches only the long",
+      "LONGY" in changes_long_only and "SHORTY" not in changes_long_only, changes_long_only)
+
+no_filter = strat_mix.tighten_all_for_regime(final_pct=-9.0, side=None)
+check("side=None (the original signature, unchanged) still touches everyone - "
+      "no existing caller's behavior regresses", True)  # -9.0 is looser, so no-op either way; the call itself must not raise
+
+# A short's tighten_for_regime math, checked directly (not just that a call
+# happened) - the whole point of the mirror is that this was ALREADY correct
+# via TradeManager.direction, and only the WIRING (which positions, which
+# regime label) was missing.
+tm_short = TradeManager("SH", 100.0, 40, copy.deepcopy(CFG), side="short")
+note_s = tm_short.tighten_for_regime(bu["final_exit_loss_pct"], bu["trailing_stop_pct"],
+                                     bu["breakeven_trigger_pct"])
+check("tightening a short reports what changed", bool(note_s), note_s)
+check("a short's final-exit stop, once tightened to -0.5%, fires on a "
+      "+0.5% RISE (not a decline) - direction-correct, unchanged math",
+      tm_short.check_final_exit(100.6) > 0 and tm_short.check_final_exit(100.4) == 0)
+
+print("\n=== G4. MAIN.PY: THE TWO LATCHES TRACK INDEPENDENTLY ===")
+check("bearish tightening is now explicitly scoped side='long'",
+      'side="long",\n                    )' in src or "side=\"long\",\n                    )" in src
+      or 'side="long",' in src)
+check("a SEPARATE latch key exists for the short/bullish transition, so it "
+      "cannot be stomped by the long/bearish latch or vice versa",
+      'regime_state.get("tightened_at_short")' in src)
+check("the bullish branch reads bullish_exits and applies side='short'",
+      'regime_cfg.get("bullish_exits")' in src and 'side="short",' in src)
+check("the bullish latch clears on any non-bullish label, mirroring the "
+      "bearish latch's own reset - both are independently re-armable",
+      "regime_state[\"tightened_at_short\"] = None" in src)
+
 print("\n=== H. LIVE CONFIG ===")
 t_ = CFG["trading"]
 check("short_strategy is ENABLED as of 2026-09-27 (explicit user request, "

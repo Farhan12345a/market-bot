@@ -1943,6 +1943,21 @@ trading:
       final_exit_loss_pct: -0.5    # from -1.0%
       trailing_stop_pct: 0.4       # from 0.75%
       breakeven_trigger_pct: 0.1   # anything that got 0.1% green exits flat
+
+    # MIRROR of bearish_exits above, for open SHORTS (added 2026-09-27,
+    # explicit user request alongside enabling short_strategy). A BULLISH
+    # tape is what a short is fighting, exactly the way a bearish one is
+    # what a long fights - same monotonic tighten-not-kill philosophy,
+    # same numbers (there is no evidence yet they should differ by side),
+    # applied only to positions tracked with side="short" (see
+    # tighten_all_for_regime's side filter). Same magnitudes as
+    # bearish_exits, not independently tuned - revisit once real short
+    # trade data exists.
+    bullish_exits:
+      enabled: true
+      final_exit_loss_pct: -0.5
+      trailing_stop_pct: 0.4
+      breakeven_trigger_pct: 0.1
     bullish_multiplier: 1.0
     neutral_multiplier: 0.5
     bearish_multiplier: 0.0    # 0 = no new longs. 0.25 = quarter size instead.
