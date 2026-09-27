@@ -165,7 +165,7 @@ check("log_short_signals configured", sa.get("log_short_signals") is True)
 check("short_signal_log_file configured",
       sa.get("short_signal_log_file") == "logs/short_signal_journal.csv")
 
-print("\n=== I. MAIN WIRING - SHORT SIDE IS RECORD-ONLY, NEVER TRADED ===")
+print("\n=== I. MAIN WIRING - SHORT SIDE IS RECORD-ONLY UNLESS EXPLICITLY ENABLED ===")
 check("run_trading_day accepts a short_signal_journal parameter",
       "short_signal_journal=None" in src)
 check("a second SignalJournal instance is created for it (both call sites - "
@@ -173,13 +173,22 @@ check("a second SignalJournal instance is created for it (both call sites - "
       src.count("short_signal_log_file") >= 2, src.count("short_signal_log_file"))
 check("short candidates flow through their own list, never burst_candidates",
       "short_candidates = []" in src and "short_candidates.append(" in src)
-check("short candidates are recorded directly - taken is a hardcoded False, "
-      "never a variable a decision could have set",
-      'taken=False, skip_reason="short_side_not_traded_evidence_only"' in src)
-check("the short-candidate block contains no _attempt_entry call at all "
-      "(the safety property that makes this purely observational)",
-      "_attempt_entry(" not in src.split("SHORT-SIDE EVIDENCE GATHERING")[1].split(
-          "Best-first, so the throttle")[0])
+_short_block = src.split("# SHORT-SIDE, requested by the user")[1].split(
+    "Best-first, so the throttle")[0]
+check("the short-candidate block is gated on trading.short_strategy.enabled - "
+      "2026-09-27, upgraded from purely observational to a real (but "
+      "off-by-default) entry path",
+      '_short_enabled = (config.get("trading", {}).get("short_strategy") or {}).get("enabled", False)'
+      in _short_block)
+check("while short_enabled is false, taken/skip_reason default to the exact "
+      "same fixed constants as the original evidence-only behavior",
+      'taken, skip_reason = False, "short_side_not_traded_evidence_only"' in _short_block)
+check("an _attempt_entry call DOES now exist in this block, but only inside "
+      "the `if _short_enabled:` branch - real trades are possible only when "
+      "the config flag is explicitly turned on",
+      "_attempt_entry(" in _short_block and "if _short_enabled:" in _short_block)
+check("the real short entry is tagged side=\"short\" - never silently opens a long",
+      'side="short",' in _short_block)
 check("both journals flush incrementally every poll",
       "short_signal_journal.flush(final=False)" in src)
 check("both journals get their forward returns updated every poll",

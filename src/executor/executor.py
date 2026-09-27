@@ -609,12 +609,25 @@ class Executor:
         FLATTEN_ALL happened to catch it (a small gain, that time; nothing
         about the gap guaranteed that).
 
-        Deliberately narrow: the caller has already confirmed (a) this is a
+        Deliberately narrow: the caller has already confirmed this is a
         genuine, PERSISTENT orphan, not a single-poll fill/cancel race - see
-        the 2-consecutive-reconcile gate in main.py - and (b) the held
-        quantity is positive. A short is a different bug with a different
-        history (see flatten_all_positions) and stays reconcile's loud,
-        report-only case rather than being silently closed here.
+        the 2-consecutive-reconcile gate in main.py.
+
+        A NEGATIVE (short) quantity here is handled two different ways
+        depending on trading.short_strategy.enabled:
+          - DISABLED (the default, and everything before 2026-09-27): a
+            negative quantity can only be the old phantom-entry bug (a
+            failed exit's sell accepted by the margin account as opening a
+            real, unintended short) - there is no code path that could
+            legitimately produce one. Stays the loud, report-only case
+            flatten_all_positions already covers, exactly as before.
+          - ENABLED: a persistent untracked short is now an EXPECTED failure
+            mode symmetric to the untracked-long case this method was
+            written for - the same late-fill race (a marketable-limit short
+            entry fills after tracking has already moved on) can orphan a
+            short exactly the way it orphaned ZS's long remainder on
+            2026-09-22. Closed the same way, just covered (side="buy")
+            instead of sold.
 
         Returns the order on success, None if there was nothing to close or
         the close failed (logged either way, never raises).
@@ -635,21 +648,27 @@ class Executor:
             return None
 
         qty = int(raw_qty)
-        if qty <= 0:
-            # Not this method's job - zero is nothing to close, and a short
-            # (negative) is the different bug flatten_all_positions already
-            # surfaces loudly rather than something to cover silently here.
+        _short_enabled = ((self.config.get("trading") or {}).get("short_strategy") or {}).get("enabled", False)
+        if qty == 0:
             return None
+        if qty < 0 and not _short_enabled:
+            # Not this method's job while shorting is off - see the
+            # docstring. flatten_all_positions still catches it at 16:00.
+            return None
+
+        close_side = "buy" if qty < 0 else "sell"
+        qty = abs(qty)
 
         if symbol not in self.open_entries or not self.open_entries[symbol]:
             avg_entry = getattr(position, "avg_entry_price", None)
             self.open_entries[symbol] = float(avg_entry) if avg_entry else None
         if symbol not in self.entry_meta:
-            self.record_entry_meta(symbol, method="RECONCILED", rsi=None)
+            self.record_entry_meta(symbol, method="RECONCILED", rsi=None,
+                                   side=("short" if close_side == "buy" else "long"))
         current_price = getattr(position, "current_price", None)
         price = float(current_price) if current_price else None
 
-        order = self.submit_exit_order(symbol, qty, reason, price, side="sell")
+        order = self.submit_exit_order(symbol, qty, reason, price, side=close_side)
         if order is not None:
             logger.warning(
                 f"{symbol}: closed a persistent orphan position ({qty} shares) found "
@@ -872,8 +891,13 @@ class Executor:
                 held = int(float(getattr(live.get(symbol), "qty", 0) or 0))
             except (TypeError, ValueError):
                 held = 0
+            # A pending BUY (long) fills as a POSITIVE broker quantity; a
+            # pending SELL-to-open (short) fills as a NEGATIVE one - checking
+            # `held > 0` unconditionally would never recognize a filled short
+            # as filled at all, retrying it forever until abandoned.
+            expect_sign = -1 if info.get("side") == "sell" else 1
 
-            if held > 0:
+            if expect_sign * held > 0:
                 # At least partially filled - submit_exit_order's own qty
                 # correction already sells only what is genuinely held, so a
                 # partial fill needs nothing further here.
@@ -983,7 +1007,7 @@ class Executor:
                     _final_held = int(float(getattr((_final or {}).get(symbol), "qty", 0) or 0))
                 except (TypeError, ValueError):
                     _final_held = 0
-                if _final_held > 0:
+                if expect_sign * _final_held > 0:
                     logger.info(
                         f"{symbol}: filled after all, right as this was "
                         f"about to give up on it - keeping it tracked "
@@ -1020,7 +1044,8 @@ class Executor:
                 logger.debug(f"{symbol}: pre-retry cancel failed, retrying anyway: {e}")
 
             order, route = self._submit_forced_entry_retry(
-                symbol, info["qty"], decision_price=info.get("decision_price")
+                symbol, info["qty"], decision_price=info.get("decision_price"),
+                side=info.get("side", "buy"),
             )
 
             if order is not None:
@@ -1033,8 +1058,9 @@ class Executor:
                 # real if it does not.
                 info["ts"] = time.monotonic()
                 info["retried"] = True
+                _verb = "buy" if info.get("side", "buy") == "buy" else "short-sell"
                 logger.info(
-                    f"{symbol}: forced {route} buy submitted for the "
+                    f"{symbol}: forced {route} {_verb} submitted for the "
                     f"{info['qty']} share(s) the marketable-limit entry "
                     f"never filled - verifying it fills before giving up"
                 )
@@ -1053,7 +1079,7 @@ class Executor:
 
         return filled, abandoned
 
-    def _submit_forced_entry_retry(self, symbol, qty, decision_price=None):
+    def _submit_forced_entry_retry(self, symbol, qty, decision_price=None, side="buy"):
         """
         The forced retry itself, for retry_unfilled_entries: a WIDE
         marketable-limit priced off a FRESH quote when one is available,
@@ -1097,16 +1123,20 @@ class Executor:
             except Exception as e:
                 logger.debug(f"{symbol}: quote fetch for the forced retry failed: {e}")
                 quote = None
-            if quote and quote.get("ask"):
+            # A buy retry needs to cross the ASK; a sell-to-open (short)
+            # retry needs to cross the BID - the same fresh-quote-plus-band
+            # logic, priced off the correct side of the book.
+            _quote_key = "ask" if side == "buy" else "bid"
+            if quote and quote.get(_quote_key):
                 try:
-                    fresh_ask = float(quote["ask"])
+                    fresh_px = float(quote[_quote_key])
                 except (TypeError, ValueError):
-                    fresh_ask = None
-                if fresh_ask and max_dev_pct and decision_price:
-                    dev_pct = abs(fresh_ask - float(decision_price)) / float(decision_price) * 100.0
+                    fresh_px = None
+                if fresh_px and max_dev_pct and decision_price:
+                    dev_pct = abs(fresh_px - float(decision_price)) / float(decision_price) * 100.0
                     if dev_pct > float(max_dev_pct):
                         logger.warning(
-                            f"{symbol}: fresh retry quote (ask {fresh_ask}) is "
+                            f"{symbol}: fresh retry quote ({_quote_key} {fresh_px}) is "
                             f"{dev_pct:.1f}% from the decision price "
                             f"({decision_price}), past retry_max_deviation_pct "
                             f"({max_dev_pct}%) - treating this quote as "
@@ -1114,10 +1144,11 @@ class Executor:
                             f"pricing a real order off it."
                         )
                         return None, "bad-quote"
-                if fresh_ask:
+                if fresh_px:
                     try:
-                        limit_px = round(fresh_ask * (1 + float(retry_band_pct) / 100.0), 2)
-                        order = self.broker.submit_limit_order(symbol, qty, limit_px, side="buy")
+                        _band_mult = 1 if side == "buy" else -1
+                        limit_px = round(fresh_px * (1 + _band_mult * float(retry_band_pct) / 100.0), 2)
+                        order = self.broker.submit_limit_order(symbol, qty, limit_px, side=side)
                         if order is not None:
                             return order, "wide-limit"
                     except Exception as e:
@@ -1127,7 +1158,7 @@ class Executor:
                         )
 
         try:
-            return self.broker.submit_market_order(symbol, qty, side="buy"), "market"
+            return self.broker.submit_market_order(symbol, qty, side=side), "market"
         except Exception as e:
             logger.warning(f"{symbol}: forced market retry also failed ({type(e).__name__}: {e})")
             return None, "market"
@@ -1427,7 +1458,7 @@ class Executor:
 
         return True, ""
 
-    def record_entry_meta(self, symbol, method, rsi, entry_time=None, price_source=None):
+    def record_entry_meta(self, symbol, method, rsi, entry_time=None, price_source=None, side="long"):
         """
         Record how/when a position was opened, independent of open_entries
         (which only holds price and is read by the P&L calc). Called for
@@ -1445,10 +1476,16 @@ class Executor:
             # existed there was no way to tell the two apart after the fact -
             # so the stream's actual effect on fill quality was unmeasurable.
             "price_source": price_source or "unknown",
+            # "long" (default, every entry path before 2026-09-27) or "short" -
+            # the config-gated short strategy. Carried through to
+            # trade_history.csv/trade_context.csv so a short is never
+            # ambiguous with a long in the reports.
+            "side": side,
         }
 
     def submit_entry_order(self, symbol, qty, price=None, entry_method=None,
-                           entry_rsi=None, spread_pct=None, is_opening_burst=False):
+                           entry_rsi=None, spread_pct=None, is_opening_burst=False,
+                           side="buy"):
         """
         Submit a market order to enter a position. Returns the order on
         success, or None on failure (does NOT raise) - callers must check the
@@ -1461,6 +1498,14 @@ class Executor:
         "did it actually work" an explicit value the caller must check,
         rather than an exception that could be caught too late or in the
         wrong place.
+
+        side="buy" (default, every call site before 2026-09-27) opens a long.
+        side="sell" opens a SHORT - added for the config-gated short
+        strategy (trading.short_strategy.enabled). Everything below that
+        depends on direction (which way the marketable-limit band leans,
+        which way cash/exposure move) branches on `side`; the broker call
+        itself, the retry/verification bookkeeping and entry_meta are
+        otherwise identical for both.
         """
         # MARKETABLE LIMIT ENTRY - a limit placed ABOVE the reference price.
         #
@@ -1511,7 +1556,12 @@ class Executor:
                     mult = float(ecfg.get("spread_multiple", 1.5))
                     band_pct = max(band_pct, float(spread_pct) * mult)
                 band_pct = min(band_pct, float(ecfg.get("max_slippage_pct", 0.6)))
-                limit_px = round(float(price) * (1 + band_pct / 100.0), 2)
+                # A buy-to-open needs a limit ABOVE the reference to cross the
+                # ASK; a sell-to-open (short) needs one BELOW it to cross the
+                # BID - the same "wider of floor/spread-multiple, capped"
+                # band, just leaning the other way.
+                _band_mult = 1 if side == "buy" else -1
+                limit_px = round(float(price) * (1 + _band_mult * band_pct / 100.0), 2)
                 self._last_entry_band_pct = band_pct
             except (TypeError, ValueError) as e:
                 logger.debug(f"{symbol}: entry limit price unavailable ({e}) - using market")
@@ -1521,10 +1571,11 @@ class Executor:
             order = None
             if limit_px:
                 try:
-                    order = self.broker.submit_limit_order(symbol, qty, limit_px, side="buy")
+                    order = self.broker.submit_limit_order(symbol, qty, limit_px, side=side)
+                    _rel = "above" if side == "buy" else "below"
                     logger.info(
                         f"{symbol}: entry routed as a MARKETABLE LIMIT at {limit_px} "
-                        f"({getattr(self, '_last_entry_band_pct', 0):.3f}% above {price}"
+                        f"({getattr(self, '_last_entry_band_pct', 0):.3f}% {_rel} {price}"
                         + (f", spread {spread_pct:.3f}%" if spread_pct is not None else "")
                         + ") - crosses the spread like a market order but refuses "
                         f"a fill further away"
@@ -1539,7 +1590,7 @@ class Executor:
                     )
                     order = None
             if order is None:
-                order = self.broker.submit_market_order(symbol, qty, side="buy")
+                order = self.broker.submit_market_order(symbol, qty, side=side)
         except Exception as e:
             logger.error(f"Failed to submit entry order for {symbol}: {e}")
             return None
@@ -1548,6 +1599,7 @@ class Executor:
         self.record_entry_meta(
             symbol, method=entry_method or "UNKNOWN", rsi=entry_rsi,
             price_source=(self.entry_price_source(symbol) if self.entry_price_source else None),
+            side=("short" if side == "sell" else "long"),
         )
 
         self.order_history.append({
@@ -1570,7 +1622,13 @@ class Executor:
         # max_concurrent_positions/max_total_exposure_fraction before the
         # next poll's fresh query ever catches up. This closes that race.
         if price:
-            self._buying_power -= qty * price
+            # A buy SPENDS cash (opening a long); a sell-to-open RECEIVES
+            # short-sale proceeds - the same cash-flow direction
+            # submit_exit_order already uses for a cover (side="buy" there
+            # spends cash too, exactly mirroring this). Exposure itself is a
+            # magnitude regardless of direction, so it is not signed.
+            _cash_sign = -1 if side == "buy" else 1
+            self._buying_power += _cash_sign * qty * price
             self._total_exposure_usd += qty * price
             self._pending_cost[symbol] = qty * price
         self._open_symbols.add(symbol)
@@ -1601,6 +1659,7 @@ class Executor:
         if limit_px:
             self._pending_entry_verify[symbol] = {
                 "ts": time.monotonic(), "qty": qty, "decision_price": price,
+                "side": side,
             }
 
         logger.info(f"{ANSI_GREEN}Entry order submitted for {symbol}: {qty} shares at {price}{ANSI_RESET}")
@@ -1928,6 +1987,8 @@ class Executor:
                 "price_source": meta.get("price_source") or "unknown",
                 "signal_pct": meta.get("signal_pct"),
                 "list_source": meta.get("list_source"),
+                "side": meta.get("side", "long"),
+                "entry_window": meta.get("entry_window", "primary"),
                 # Max favorable / adverse excursion: the best and worst
                 # unrealized moves this position saw before closing. Purely
                 # observational, but they answer a question the exit reason
@@ -2483,6 +2544,13 @@ class Executor:
             # was not measured at all. Both are signed so NEGATIVE is always
             # adverse for the position, whichever side it is.
             "entry_slippage_pct", "decision_price", "fill_price", "exit_slippage_pct",
+            # 2026-09-27: "long" (the only value before this date) or "short" -
+            # the config-gated short strategy - and which entry window the
+            # trade came from ("primary" 09:33-10:15, "extended" 10:15-16:00,
+            # or "opening_burst") - the config-gated extended-hours
+            # experiment. Both default to what every prior row already was,
+            # so old rows read correctly with no migration needed.
+            "side", "entry_window",
         ]
         try:
             path = Path(filepath)
@@ -2506,7 +2574,9 @@ class Executor:
                 # v3: before the slippage columns
                 [c for c in fieldnames if c not in
                  ("entry_slippage_pct", "decision_price", "fill_price",
-                  "exit_slippage_pct")],
+                  "exit_slippage_pct", "side", "entry_window")],
+                # v4: before side/entry_window
+                [c for c in fieldnames if c not in ("side", "entry_window")],
             ]
             repair_header(str(path), fieldnames, legacy_schemas=legacy)
             write_header = not path.exists() or path.stat().st_size == 0

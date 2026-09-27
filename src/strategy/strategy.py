@@ -40,6 +40,7 @@ class TradeState(Enum):
     FLAT = "flat"
     ENTRY_PENDING = "entry_pending"
     LONG = "long"
+    SHORT = "short"
     EXITING = "exiting"
 
 def _samples_for_minutes(config, minutes_key, samples_key, default_minutes, default_samples):
@@ -71,14 +72,25 @@ def _samples_for_minutes(config, minutes_key, samples_key, default_minutes, defa
 class TradeManager:
     """Manages entry and exit logic for individual positions"""
 
-    def __init__(self, symbol, entry_price, qty, config):
+    def __init__(self, symbol, entry_price, qty, config, side="long"):
         self.symbol = symbol
         self.entry_price = entry_price
         self.entry_qty = qty
         self.qty_remaining = qty
         self.config = config
 
-        self.state = TradeState.LONG
+        # "long" (default, unchanged behavior) or "short" - added 2026-09-27
+        # for the config-gated short strategy. direction is the one thing
+        # every price comparison in this class multiplies by: +1 leaves a
+        # long's math exactly as it always was, -1 mirrors it for a short
+        # (a short profits when price FALLS, so "favorable" and "adverse"
+        # swap everywhere gain/loss, peak-tracking and the trailing stop are
+        # computed). qty is always a POSITIVE magnitude regardless of side,
+        # matching the convention Executor.submit_exit_order already uses.
+        self.side = side
+        self.direction = -1 if side == "short" else 1
+
+        self.state = TradeState.LONG if side == "long" else TradeState.SHORT
         self.entry_time = _now_et()
         self.highest_price = entry_price
         # When the position last made a NEW HIGH. Entry counts as the first
@@ -108,6 +120,20 @@ class TradeManager:
 
         self.orders_log = []
 
+    def favorable_extreme(self):
+        """
+        The best price this position has seen, in ITS OWN favor - the highest
+        price for a long, the lowest for a short. highest_since_entry and
+        lowest_since_entry are both tracked unconditionally regardless of
+        side (see Strategy.check_exit), so this just picks the one that
+        means "peak" for this position's direction.
+        """
+        return self.highest_since_entry if self.direction == 1 else self.lowest_since_entry
+
+    def adverse_extreme(self):
+        """The worst price this position has seen, the mirror of favorable_extreme."""
+        return self.lowest_since_entry if self.direction == 1 else self.highest_since_entry
+
     def check_first_exit(self, current_price):
         """
         Check if we should sell 33% at -0.5% loss. Pure check - does NOT set
@@ -116,7 +142,7 @@ class TradeManager:
         confirmation, would permanently disable the first-exit tranche for
         this position if the order ever failed to submit.
         """
-        loss_pct = (current_price - self.entry_price) / self.entry_price
+        loss_pct = self.direction * (current_price - self.entry_price) / self.entry_price
         first_exit_trigger = self.config["trading"]["first_exit_loss_pct"] / 100
 
         if not self.first_exit_done and loss_pct <= first_exit_trigger:
@@ -185,7 +211,7 @@ class TradeManager:
         if not self.config["trading"].get("use_take_profit", False):
             return 0, None
 
-        gain_pct = (current_price - self.entry_price) / self.entry_price * 100
+        gain_pct = self.direction * (current_price - self.entry_price) / self.entry_price * 100
         tiers = self.take_profit_tiers()
 
         for idx in range(len(tiers) - 1, -1, -1):
@@ -284,7 +310,7 @@ class TradeManager:
         if not trading.get("use_breakeven_floor", False):
             return 0
 
-        peak_gain = (self.highest_since_entry - self.entry_price) / self.entry_price
+        peak_gain = self.direction * (self.favorable_extreme() - self.entry_price) / self.entry_price
 
         # Epsilon for the same reason as the take-profit tiers: a peak computed
         # as exactly +0.5% lands just under 0.005 in binary floating point, and
@@ -295,14 +321,20 @@ class TradeManager:
         if not armed:
             return 0
 
-        floor_price = self.entry_price * (1 + max(armed) / 100)
-        if current_price <= floor_price * (1 + TIER_EPSILON):
+        # Compared in directional GAIN-PERCENT space, like every other tiered
+        # check in this class, rather than as a raw price - a short's floor
+        # sits BELOW its entry price in dollar terms, and re-deriving the
+        # epsilon nudge's sign for a below-entry price threshold is exactly
+        # the kind of subtle mistake this class exists to avoid.
+        current_gain = self.direction * (current_price - self.entry_price) / self.entry_price * 100
+        floor_pct = max(armed)
+        if current_gain <= floor_pct + TIER_EPSILON:
             return self.qty_remaining
         return 0
 
     def check_final_exit(self, current_price):
         """Check if we should sell all remaining at -1.0% loss"""
-        loss_pct = (current_price - self.entry_price) / self.entry_price
+        loss_pct = self.direction * (current_price - self.entry_price) / self.entry_price
         final_exit_trigger = self.config["trading"]["final_exit_loss_pct"] / 100
 
         if loss_pct <= final_exit_trigger:
@@ -334,7 +366,7 @@ class TradeManager:
         if engine is None:
             return None
         try:
-            gain_pct = (current_price - self.entry_price) / self.entry_price * 100
+            gain_pct = self.direction * (current_price - self.entry_price) / self.entry_price * 100
             if not engine.should_recalculate(gain_pct, self._last_stop_milestone):
                 return None
             self._last_stop_milestone = engine._milestone_for(gain_pct)
@@ -386,7 +418,7 @@ class TradeManager:
         try:
             stop_pct = abs(float(self.config["trading"].get("final_exit_loss_pct", -1.0)))
             mult = float(cfg.get("gap_multiple", 1.5))
-            move = (current_price - self.entry_price) / self.entry_price * 100
+            move = self.direction * (current_price - self.entry_price) / self.entry_price * 100
             if move <= -(stop_pct * mult):
                 logger.warning(
                     f"{self.symbol}: GAP EXIT - {move:+.2f}% from entry, past "
@@ -452,8 +484,17 @@ class TradeManager:
         return trail
 
     def update_trailing_stop(self, current_price):
-        """Update highest price and check trailing stop"""
-        if current_price > self.highest_price:
+        """
+        Update the trailing anchor and check the trailing stop.
+
+        self.highest_price holds the MOST FAVORABLE price seen regardless of
+        side - the highest for a long (unchanged name/meaning from before
+        shorts existed), but the LOWEST for a short, since a falling price is
+        what a short wants to see. "new favorable extreme" is
+        direction*current_price > direction*highest_price, which reduces to
+        the original current_price > highest_price when direction is +1.
+        """
+        if self.direction * current_price > self.direction * self.highest_price:
             self.highest_price = current_price
             # Timestamped so a position that stops making new highs can be
             # told apart from one that is still working. Only a NEW HIGH resets
@@ -462,9 +503,11 @@ class TradeManager:
             self.last_high_at = _now_et()
 
         trail_pct = self.effective_trail_pct() / 100
-        trail_level = self.highest_price * (1 - trail_pct)
+        # A long's trail sits BELOW its peak by trail_pct; a short's sits
+        # ABOVE its trough by trail_pct - direction flips which.
+        trail_level = self.highest_price * (1 - self.direction * trail_pct)
 
-        if current_price <= trail_level:
+        if self.direction * current_price <= self.direction * trail_level:
             return self.qty_remaining  # Exit all on trailing stop
         return 0
 
@@ -523,8 +566,10 @@ class TradeManager:
         momentum = self.calculate_momentum()
         slope_threshold = self.config["trading"].get("momentum_fade_slope_threshold", 0.0001)
 
-        # If momentum is negative or very weak (slope <= threshold), exit
-        if momentum is not None and momentum < slope_threshold:
+        # A long wants a rising slope; a short wants a falling one - direction
+        # flips which raw slope sign counts as "healthy" so both sides read
+        # this the same way: below threshold means MY momentum is fading.
+        if momentum is not None and self.direction * momentum < slope_threshold:
             logger.info(f"{self.symbol}: Momentum fading (slope: {momentum:.6f}), exiting")
             return self.qty_remaining
 
@@ -563,6 +608,7 @@ class TradeManager:
             return 0
 
         recent = self.price_history[-lookback:]
+        d = self.direction
 
         # "Falling", not "fell on every single tick".
         #
@@ -577,10 +623,14 @@ class TradeManager:
         # the position's peak and price is meaningfully below it now. Allowing a
         # tolerance for up-ticks makes the rule mean the same thing at any poll
         # rate, which is the whole point of expressing the window in minutes.
-        ups = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i - 1])
+        # "Uptick" means "moved in this position's OWN favorable direction" -
+        # d*recent[i] > d*recent[i-1] reduces to the plain recent[i] >
+        # recent[i-1] a long always used, and flips for a short so a falling
+        # raw price (favorable for a short) still counts as an "uptick" here.
+        ups = sum(1 for i in range(1, len(recent)) if d * recent[i] > d * recent[i - 1])
         max_ups = int((len(recent) - 1) * self.config["trading"].get(
             "resistance_max_uptick_fraction", 0.34))
-        falling = recent[-1] < recent[0] and ups <= max_ups
+        falling = d * recent[-1] < d * recent[0] and ups <= max_ups
 
         # Never sell into an upturn.
         #
@@ -595,15 +645,15 @@ class TradeManager:
         # Deliberately only the most recent tick. A longer "is it recovering"
         # test would re-introduce the poll-rate sensitivity that expressing the
         # window in minutes was meant to remove.
-        if len(recent) >= 2 and recent[-1] > recent[-2]:
+        if len(recent) >= 2 and d * recent[-1] > d * recent[-2]:
             return 0
 
-        if not (falling and recent[0] == self.highest_since_entry):
+        if not (falling and recent[0] == self.favorable_extreme()):
             return 0
 
         peak = recent[0]
         min_decline = self.config["trading"].get("resistance_min_decline_pct", 0.0)
-        decline_pct = (peak - current_price) / peak * 100 if peak > 0 else 0.0
+        decline_pct = d * (peak - current_price) / peak * 100 if peak > 0 else 0.0
 
         if decline_pct < min_decline:
             return 0
@@ -621,8 +671,8 @@ class TradeManager:
         """
         if not self.entry_price:
             return None, None
-        mfe = (self.highest_since_entry - self.entry_price) / self.entry_price * 100
-        mae = (self.lowest_since_entry - self.entry_price) / self.entry_price * 100
+        mfe = self.direction * (self.favorable_extreme() - self.entry_price) / self.entry_price * 100
+        mae = self.direction * (self.adverse_extreme() - self.entry_price) / self.entry_price * 100
         return round(mfe, 4), round(mae, 4)
 
     def tighten_for_regime(self, final_pct, trail_pct, breakeven_trigger):
@@ -735,7 +785,7 @@ class Strategy:
         be tracked and qty must be positive."""
         return symbol not in self.trades and qty > 0
 
-    def confirm_entry(self, symbol, price, qty, config_override=None):
+    def confirm_entry(self, symbol, price, qty, config_override=None, side="long"):
         """
         Commit a new position to internal tracking. Call this ONLY after the
         broker has confirmed the entry order actually filled - never before.
@@ -762,17 +812,18 @@ class Strategy:
         # life. That matters: changing exit rules under an open position
         # mid-session would make its behaviour unattributable to either profile.
         cfg = config_override or self.config
-        self.trades[symbol] = TradeManager(symbol, price, qty, cfg)
+        self.trades[symbol] = TradeManager(symbol, price, qty, cfg, side=side)
+        side_note = " SHORT" if side == "short" else ""
         if config_override is not None:
             t = cfg["trading"]
             logger.info(
-                f"{symbol}: Entered {qty} shares at {price} under a CUSTOM exit "
+                f"{symbol}: Entered{side_note} {qty} shares at {price} under a CUSTOM exit "
                 f"profile - first {t.get('first_exit_loss_pct')}%, final "
                 f"{t.get('final_exit_loss_pct')}%, trail {t.get('trailing_stop_pct')}%, "
                 f"tiers {[x.get('gain_pct') for x in (t.get('take_profit_tiers') or [])]}"
             )
         else:
-            logger.info(f"{symbol}: Entered {qty} shares at {price}")
+            logger.info(f"{symbol}: Entered{side_note} {qty} shares at {price}")
 
     def correct_entry_price(self, symbol, actual):
         """
@@ -810,9 +861,19 @@ class Strategy:
 
         old_price = trade.entry_price
         trade.entry_price = actual
+        # highest_since_entry/lowest_since_entry are literal, side-agnostic
+        # price extremes (used for MFE/MAE reporting regardless of side), so
+        # max/min is always correct here. highest_price is the trailing-stop
+        # anchor and tracks whichever extreme is FAVORABLE for this
+        # position's direction - the highest price for a long, the lowest
+        # for a short - so rebasing it needs the same direction flip
+        # update_trailing_stop uses.
         trade.highest_since_entry = max(trade.highest_since_entry, actual)
         trade.lowest_since_entry = min(trade.lowest_since_entry, actual)
-        trade.highest_price = max(trade.highest_price, actual)
+        if trade.direction == 1:
+            trade.highest_price = max(trade.highest_price, actual)
+        else:
+            trade.highest_price = min(trade.highest_price, actual)
 
         logger.info(
             f"{symbol}: exit rules rebased to the actual fill "

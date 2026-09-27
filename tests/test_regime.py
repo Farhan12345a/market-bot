@@ -229,8 +229,9 @@ check("the halt function is gone entirely", "def _breadth_halt(" not in src)
 check("...and nothing gates entries on a halt flag", "if halted:" not in src)
 check("regime multiplier is written onto the executor for _position_size to read",
       "executor.regime_size_multiplier = _mult" in src)
-check("_position_size reads it back via getattr with a safe 1.0 default",
-      'getattr(executor, "regime_size_multiplier", 1.0)' in src)
+check("_position_size reads it back via getattr with a safe 1.0 default "
+      "(long or short, per side - 2026-09-27)",
+      "regime_mult = getattr(executor, _mult_attr, 1.0)" in src)
 
 print("\n=== 8. LIVE CONFIG ===")
 rc_live = CFG["trading"].get("regime_sizing") or {}

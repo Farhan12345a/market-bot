@@ -71,7 +71,7 @@ class Strat:
     def __init__(s): s.trades = {}
     def get_open_trades(s): return s.trades
     def can_enter(s, sym, qty): return True
-    def confirm_entry(s, sym, px, qty, config_override=None): s.trades[sym] = True
+    def confirm_entry(s, sym, px, qty, config_override=None, side="long"): s.trades[sym] = True
 
 
 class Exec:
@@ -85,7 +85,7 @@ class Exec:
     def reentry_cooldown_remaining(s, sym): return 0.0
     def pre_entry_check(s, qty, price, symbol=None, is_opening_burst=False): return True, None
     def submit_entry_order(s, sym, qty, price, entry_method=None, entry_rsi=None,
-                           spread_pct=None, is_opening_burst=False):
+                           spread_pct=None, is_opening_burst=False, side="buy"):
         s.orders.append(sym)
         return types.SimpleNamespace(id=f"o{len(s.orders)}")
     def record_entry_meta(s, *a, **k): pass

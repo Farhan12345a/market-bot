@@ -764,8 +764,9 @@ check("...gated on the symbol persisting across consecutive reconciles, "
       "not firing on the first sighting",
       '_streak[_sym] = _streak.get(_sym, 0) + 1' in src
       and "_streak[_sym] >= 2" in src)
-check("...and a SHORT is filtered out before the streak counter ever sees it",
-      "if _held <= 0" in src)
+check("...and a SHORT is filtered out before the streak counter ever sees it "
+      "unless short_strategy is enabled (2026-09-27)",
+      "if _held < 0 and not _short_enabled" in src)
 
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)

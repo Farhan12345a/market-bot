@@ -40,7 +40,7 @@ class Strat:
     # order had been submitted - the exception was swallowed by the opening
     # loop's per-symbol guard and the position was never tracked. A mock that
     # drifts from the interface hides exactly the failure it should surface.
-    def confirm_entry(self, s, p, q, config_override=None):
+    def confirm_entry(self, s, p, q, config_override=None, side="long"):
         self.trades[s] = {"price": p, "qty": q, "cfg": config_override}
 
 
@@ -53,7 +53,7 @@ class Exec:
     def reentry_cooldown_remaining(self, s): return self._cooldown
     def pre_entry_check(self, qty, price, symbol=None, is_opening_burst=False): return True, ""
     def submit_entry_order(self, s, qty, price, entry_method=None, entry_rsi=None,
-                           spread_pct=None, is_opening_burst=False):
+                           spread_pct=None, is_opening_burst=False, side="buy"):
         self.orders.append({"symbol": s, "qty": qty, "price": price, "method": entry_method})
         return {"id": len(self.orders)}
     def refresh_account_snapshot(self): pass
@@ -519,8 +519,8 @@ strat, ex = Strat(), Exec()
 # Real Strategy so confirm_entry builds a real TradeManager.
 real = Strategy(CFG)
 class RealStrat(Strat):
-    def confirm_entry(self, s, p, q, config_override=None):
-        self.trades[s] = TradeManager(s, p, q, config_override or CFG)
+    def confirm_entry(self, s, p, q, config_override=None, side="long"):
+        self.trades[s] = TradeManager(s, p, q, config_override or CFG, side=side)
 
 rs = RealStrat()
 run(cfg(), md, rs, ex, ["AAA"], st, at("09:30"))
@@ -631,8 +631,10 @@ print("\n=== 24. THE LOOP STARTS EARLY, ENTRIES DO NOT ===")
 # sleeping until entry_start. On 2026-08-27 that let OKTA and CRWD be bought at
 # 09:33:13; both peaked at MFE 0.00%, both hit FINAL_EXIT -1.0%, -$195.52 in 25
 # seconds.
-check("the normal entry block has a LOWER bound again",
-      "elif entry_start <= now < entry_end:" in msrc)
+check("the normal entry block has a LOWER bound again (upper bound is now "
+      "new_entry_deadline, entry_end widened only when "
+      "extended_hours_experiment is on - 2026-09-27)",
+      "elif entry_start <= now < new_entry_deadline:" in msrc)
 check("...and the unbounded form is gone",
       "elif now < entry_end:" not in msrc)
 check("the loop still starts early for the burst", "while now < loop_start:" in msrc)
@@ -753,7 +755,7 @@ check("...but a recovery inside the window still qualifies", len(e5.orders) == 1
 # (f) Broker rejects the order - no phantom position.
 class RejectExec(Exec):
     def submit_entry_order(self, s, qty, price, entry_method=None, entry_rsi=None,
-                           spread_pct=None, is_opening_burst=False):
+                           spread_pct=None, is_opening_burst=False, side="buy"):
         return None
 st6 = {"baseline": {}, "taken": [], "done": False}
 md6 = MD({"AAA": [100.0, 102.0]})

@@ -1993,6 +1993,77 @@ trading:
     bearish_below_pct: -0.3    # either reading below this -> bearish
     bullish_above_pct: 0.0     # BOTH readings at/above this -> bullish
 
+  # -----------------------------------------------------------------------
+  # THE SHORT STRATEGY (added 2026-09-27), config-gated, OFF BY DEFAULT.
+  # -----------------------------------------------------------------------
+  # Built on explicit user request, ahead of the ~2-week evidence bar the
+  # short_candidate_pct/short_signal_journal observational mechanism above
+  # was set to reach (2 days in as of this writing: both showed down-moves
+  # continuing more often than bouncing, but that is nowhere near enough to
+  # trade on). Shipped disabled specifically so the MECHANISM exists and is
+  # tested before the evidence does, not so it trades on 2 days of data.
+  #
+  # Deliberately a straight mirror of the long side, per explicit user
+  # request ("literally just mirroring how we have the current setup but
+  # for short, doing the inverse of everything") - same entry threshold
+  # (short_candidate_pct above), same position sizing, same risk limits
+  # (max_daily_entries, max_concurrent_positions, correlation_limit all
+  # shared with the long side rather than given a separate budget), same
+  # exit SHAPE with the numbers inverted below. This is a v1 built to be
+  # symmetric with a proven system, not a short-specific redesign - revisit
+  # once real short trade data exists to say whether shorts actually behave
+  # like the mirror image of longs or need their own tuning.
+  short_strategy:
+    enabled: false
+    # Regime gating is the MIRROR of regime_sizing above: full size (or the
+    # fraction below) in a BEARISH tape, zero in a BULLISH one - a short is
+    # fighting the tape in bullish conditions exactly the way a long fights
+    # it in bearish ones. Reuses the SAME regime label regime_sizing
+    # computes each poll (see _short_regime_multiplier) - there is one
+    # reading of "how is the tape behaving", not two independent ones.
+    # neutral/choppy fall back to regime_sizing's own values when unset here,
+    # since there is no evidence yet those should differ by side.
+    bearish_multiplier: 1.0    # 1.0 = full short size when bearish
+    bullish_multiplier: 0.0    # 0 = no new shorts when bullish
+    # neutral_multiplier / choppy_multiplier: unset here on purpose - falls
+    # back to regime_sizing's neutral_multiplier/choppy_multiplier (0.5/0.5).
+
+    # EXIT PROFILE - the exact inverse of the long side's exit numbers
+    # (first_exit_loss_pct -0.7, final_exit_loss_pct -1.0, trailing_stop_pct
+    # 0.75, take_profit_tiers 1.0/1.25/1.5, breakeven_tiers 0.5/0.3). A
+    # short's TradeManager already interprets these the same way a long's
+    # does (direction=-1 flips every comparison - see strategy.py) - this
+    # block exists so tuning the long side's exits can never silently move
+    # the short side's too, exactly like opening_burst's own exits block.
+    exits:
+      first_exit_loss_pct: -0.7
+      final_exit_loss_pct: -1.0
+      trailing_stop_pct: 0.75
+      take_profit_tiers:
+        - {gain_pct: 1.0, sell_fraction: 0.4}
+        - {gain_pct: 1.25, sell_fraction: 0.3}
+        - {gain_pct: 1.5, sell_fraction: 1.0}
+      breakeven_tiers:
+        - {trigger_pct: 0.5, floor_pct: 0.05}
+        - {trigger_pct: 0.3, floor_pct: 0.05}
+
+  # -----------------------------------------------------------------------
+  # EXTENDED-HOURS MEASUREMENT (added 2026-09-27), on explicit user request.
+  # -----------------------------------------------------------------------
+  # Everything about the PRIMARY entry window (entry_window_start/_end
+  # above, 09:33-10:15) is UNCHANGED - this does not touch that mechanism,
+  # its thresholds, or its measurement at all. It only lets the SAME entry
+  # logic keep running past 10:15 instead of going idle, all the way to the
+  # 16:00 close, so the user can see what the existing signal/sizing/exit
+  # setup would do across the rest of the day. Every trade is tagged with
+  # which window it came from (entry_window: "primary" vs "extended" in
+  # trade_history.csv) so the two are NEVER combined in a report - the user
+  # was explicit that this must stay a separate section, not folded into
+  # the number the primary window is being measured against.
+  extended_hours_experiment:
+    enabled: true
+    end_time: "16:00"   # how late new entries are taken; exits/time-stop unchanged
+
   # Total positions OPENED over the whole day, regardless of how many are held
   # at once - a different limit from max_concurrent_positions above. On
   # 2026-08-19 the concurrent cap of 10 held, yet 54 buys still went through in

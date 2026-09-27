@@ -646,6 +646,76 @@ class EmailNotifier:
             '</div>'
         )
 
+    def _extended_hours_html(self, trades):
+        """
+        Extended-hours measurement (trading.extended_hours_experiment),
+        added 2026-09-27 on explicit user request: the SAME entry logic as
+        the primary 09:33-10:15 window, just left running through the
+        16:00 close instead of going idle. Filtered on entry_window ==
+        "extended" - a trade_history.csv column added the same day,
+        defaulting to "primary" for anything that predates it, so this
+        section is simply empty (returns "") on any older trade and on a
+        day where extended_hours_experiment is off.
+
+        Deliberately never combined with the primary window's own P&L
+        figure above - that was the explicit point of tagging trades by
+        window in the first place, mirroring how the opening-move
+        experiment is already reported in its own separate section rather
+        than folded into the session total.
+        """
+        eh = [t for t in (trades or []) if (t.get("entry_window") or "") == "extended"]
+        if not eh:
+            return ""
+
+        total = sum(t.get("pl", 0) or 0 for t in eh)
+        wins = [t for t in eh if (t.get("pl", 0) or 0) > 0]
+        losses = [t for t in eh if (t.get("pl", 0) or 0) < 0]
+        wr = (len(wins) / len(eh) * 100) if eh else 0
+        pl_color = "#10b981" if total >= 0 else "#ef4444"
+
+        def pct(t):
+            v = t.get("pl_pct")
+            return f"{v:+.2f}%" if isinstance(v, (int, float)) else "N/A"
+
+        rows = []
+        for t in sorted(eh, key=lambda x: x.get("entry_time") or ""):
+            pl = t.get("pl", 0) or 0
+            c = "#10b981" if pl >= 0 else "#ef4444"
+            side_tag = " (SHORT)" if t.get("side") == "short" else ""
+            rows.append(
+                f"<tr><td><strong>{t.get('symbol','?')}{side_tag}</strong></td>"
+                f"<td>{(t.get('entry_time') or '')[11:19]}</td>"
+                f"<td>{(t.get('exit_time') or '')[11:19]}</td>"
+                f"<td>${t.get('entry_price', 0):.2f}</td>"
+                f"<td>${t.get('exit_price', 0):.2f}</td>"
+                f"<td>{t.get('qty', 0)}</td>"
+                f"<td style='color:{c};font-weight:600;'>${pl:,.2f}</td>"
+                f"<td style='color:{c};font-weight:600;'>{pct(t)}</td>"
+                f"<td class='exit-reason'>{t.get('exit_reason','?')}</td></tr>"
+            )
+
+        return (
+            '<h2 style="margin-top:30px;border-bottom:2px solid #0891b2;'
+            'padding-bottom:10px;">Extended Hours (10:15-16:00)</h2>'
+            '<div style="background:#ecfeff;border-left:4px solid #0891b2;'
+            'padding:12px 15px;border-radius:8px;margin-bottom:14px;">'
+            f'<div style="font-size:22px;font-weight:700;color:{pl_color};">'
+            f'${total:,.2f}</div>'
+            f'<div style="font-size:13px;color:#0e7490;margin-top:4px;">'
+            f'{len(eh)} trade(s) &middot; {len(wins)}W / {len(losses)}L &middot; '
+            f'{wr:.0f}% win rate</div>'
+            '<div style="font-size:11px;color:#155e75;margin-top:6px;">'
+            'Same signal, sizing and exit rules as the primary 09:33-10:15 '
+            'window - just left running the rest of the day. Reported '
+            'separately and never summed with the primary window\'s own '
+            'number, per standing instruction.</div>'
+            '</div>'
+            '<table class="trades-table"><thead><tr>'
+            '<th>Symbol</th><th>Entry</th><th>Exit</th><th>Entry $</th><th>Exit $</th>'
+            '<th>Qty</th><th>P&L</th><th>P&L %</th><th>Exit Reason</th>'
+            '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        )
+
     def _opening_exit_profile_html(self):
         """
         The exit rules these trades ran under, printed next to their results.
@@ -783,6 +853,7 @@ class EmailNotifier:
         run_context_html = self._run_context_html()
         replay_progress_html = self._replay_progress_html()
         opening_burst_html = self._opening_burst_html(trades)
+        extended_hours_html = self._extended_hours_html(trades)
         open_positions_html = self._open_positions_html(open_positions)
         unrealized_pl = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
 
@@ -862,6 +933,8 @@ class EmailNotifier:
                 </div>
 
                 {opening_burst_html}
+
+                {extended_hours_html}
 
                 {open_positions_html}
 

@@ -458,6 +458,33 @@ def _regime_multiplier(config, state, breadth_state, spy_history, now, et,
     return mult, label
 
 
+def _short_regime_multiplier(config, label):
+    """
+    The MIRROR of _regime_multiplier's table, for the config-gated short
+    strategy (trading.short_strategy.enabled). Reuses the SAME regime label
+    _regime_multiplier already computed each poll - there is only one
+    reading of "how is the tape behaving", the short side just responds to
+    it in the opposite direction: full size (or the configured fraction) in
+    a BEARISH tape, zero in a BULLISH one, since a short is fighting the
+    tape exactly where a long would be fighting it in bullish conditions.
+
+    Returns 1.0 (no opinion) when short_strategy or regime_sizing is off, or
+    before the regime has produced a label yet - same "no penalty for
+    missing data" convention _regime_multiplier itself uses.
+    """
+    sc = config.get("trading", {}).get("short_strategy") or {}
+    if not sc.get("enabled") or label is None:
+        return 1.0
+    rc = config.get("trading", {}).get("regime_sizing") or {}
+    table = {
+        "bearish": sc.get("bearish_multiplier", 1.0),
+        "bullish": sc.get("bullish_multiplier", 0.0),
+        "neutral": sc.get("neutral_multiplier", rc.get("neutral_multiplier", 0.5)),
+        "choppy": sc.get("choppy_multiplier", rc.get("choppy_multiplier", 0.5)),
+    }
+    return table.get(label, 1.0)
+
+
 _DYNAMIC_STOPS = {"engine": None}
 # The live regime state, so _attempt_entry can read the current label without
 # it being threaded through every caller. Set once per session by
@@ -1598,7 +1625,7 @@ def _effective_stop_pct(config, symbol, trading):
 
 
 def _position_size(config, executor, price, symbol=None, volume_history=None,
-                    trading_override=None):
+                    trading_override=None, side="long"):
     """
     Shares to buy for one entry. Returns 0 when no position should be taken.
 
@@ -1752,7 +1779,14 @@ def _position_size(config, executor, price, symbol=None, volume_history=None,
     # after the three ceilings, so it composes with EVERY caller's own
     # size_multiplier (burst throttle, the opening-burst mode's 0.5x) rather
     # than needing to be threaded into each one individually.
-    regime_mult = getattr(executor, "regime_size_multiplier", 1.0)
+    #
+    # A short reads the MIRRORED multiplier (short_regime_size_multiplier,
+    # set alongside regime_size_multiplier from the same regime label - see
+    # _short_regime_multiplier) rather than the long one: a bearish tape
+    # should scale shorts UP while it scales longs to zero, not the other
+    # way around.
+    _mult_attr = "short_regime_size_multiplier" if side == "short" else "regime_size_multiplier"
+    regime_mult = getattr(executor, _mult_attr, 1.0)
 
     # How deep the day's loss already is. Multiplies with the regime scalar
     # rather than replacing it: a choppy tape and a half-spent day are two
@@ -2090,6 +2124,31 @@ def _opening_exit_config(config):
     if not ob:
         return None
     overrides = ob.get("exits") or {}
+    if not overrides:
+        return None
+    import copy as _copy
+    out = _copy.deepcopy(config)
+    out["trading"].update(overrides)
+    return out
+
+
+def _short_exit_config(config):
+    """
+    A full config whose trading section carries the short strategy's exit
+    overrides (trading.short_strategy.exits) - the same COPY-AND-OVERLAY
+    pattern _opening_exit_config uses and for the same reason: anything not
+    restated under short_strategy.exits keeps behaving exactly like the
+    normal session (resistance, momentum fade, the time stop, etc.), so
+    nobody has to re-declare every exit rule just to change the handful
+    that need to be short-specific.
+
+    Returns None when short_strategy is absent/disabled or declares no
+    exit overrides, matching _opening_exit_config's own contract.
+    """
+    sc = (config.get("trading") or {}).get("short_strategy") or {}
+    if not sc.get("enabled"):
+        return None
+    overrides = sc.get("exits") or {}
     if not overrides:
         return None
     import copy as _copy
@@ -2606,6 +2665,7 @@ def _run_opening_move_exp(config, market_data, strategy, executor, symbols, rsi_
                 # not the runaway loop those limits exist to catch. Per-order
                 # sanity limits still apply. See Executor.rate_limit_check.
                 is_opening_burst=True,
+                entry_window_label="opening_burst",
             )
             if entered:
                 taken.append(symbol)
@@ -2665,11 +2725,22 @@ def _entry_context(cand, spy_pct, qqq_pct, spy_vs_vwap, qqq_vs_vwap,
 def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symbol_rsi,
                    size_multiplier=1.0, burst_note=None, signal_pct=None,
                    skip_cooldown=False, exit_config=None, context=None,
-                   market_data=None, volume_history=None, is_opening_burst=False):
+                   market_data=None, volume_history=None, is_opening_burst=False,
+                   side="long", entry_window_label=None):
     """
     Shared entry path for all three entry signals (three-bar momentum, rapid
     increase immediate, pullback resumption). Returns True if a position was
     actually opened.
+
+    side="long" (default, unchanged) or "short" - added 2026-09-27 for the
+    config-gated short strategy (trading.short_strategy.enabled). Every
+    guard below (sizing, cooldowns, halt/price/exclusion checks,
+    pre_entry_check) runs identically for both - the only things that
+    branch on side are which way the broker order goes
+    (executor.submit_entry_order) and which TradeManager direction gets
+    created (strategy.confirm_entry). This is deliberate: the user asked to
+    mirror the long path exactly rather than design a separate risk
+    posture for shorts.
 
     Order matters, and is the fix for the 2026-08-18 phantom-entry bug:
       1. strategy.can_enter - pure check, no state mutated.
@@ -2693,19 +2764,28 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
         config, symbol, _chop_exit_config(config, _REGIME_STATE.get("state"), exit_config))
     qty = int(_position_size(config, executor, price, symbol=symbol,
                              volume_history=volume_history,
-                             trading_override=(_resolved_exit_cfg or {}).get("trading")
+                             trading_override=(_resolved_exit_cfg or {}).get("trading"),
+                             side=side,
                              ) * size_multiplier)
     if qty <= 0:
         # Distinguish "the regime says stand down" from "the arithmetic came
         # out at zero shares". Both refuse the entry, but only one of them is
         # a decision - and reading a deliberate stand-down as a sizing
         # rounding error is how a working risk control gets tuned away.
-        if getattr(executor, "regime_size_multiplier", 1.0) == 0:
-            logger.info(
-                f"{symbol}: entry skipped - regime is bearish (both indices below "
-                f"VWAP), no new longs today. This is regime_sizing standing down, "
-                f"not a sizing failure."
-            )
+        _mult_attr = "short_regime_size_multiplier" if side == "short" else "regime_size_multiplier"
+        if getattr(executor, _mult_attr, 1.0) == 0:
+            if side == "short":
+                logger.info(
+                    f"{symbol}: entry skipped - regime is bullish (both indices "
+                    f"above VWAP), no new shorts today. This is regime_sizing "
+                    f"standing down, not a sizing failure."
+                )
+            else:
+                logger.info(
+                    f"{symbol}: entry skipped - regime is bearish (both indices below "
+                    f"VWAP), no new longs today. This is regime_sizing standing down, "
+                    f"not a sizing failure."
+                )
         else:
             logger.info(f"{symbol}: entry skipped - position size worked out to 0 shares at {price:.2f}")
         return False
@@ -2863,7 +2943,8 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
             _spread = None
     order = executor.submit_entry_order(symbol, qty, price, entry_method=entry_method,
                                         entry_rsi=symbol_rsi, spread_pct=_spread,
-                                        is_opening_burst=is_opening_burst)
+                                        is_opening_burst=is_opening_burst,
+                                        side=("sell" if side == "short" else "buy"))
     if order is None:
         return False  # broker rejected/failed - already logged by submit_entry_order, nothing committed
 
@@ -2877,8 +2958,11 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
     strategy.confirm_entry(
         symbol, price, qty,
         config_override=_resolved_exit_cfg,
+        side=side,
     )
     executor.entry_meta.setdefault(symbol, {})["list_source"] = symbol_source.get(symbol, "screener")
+    if entry_window_label:
+        executor.entry_meta[symbol]["entry_window"] = entry_window_label
     # Market/stock state at the entry instant, for trade_context.csv. Stored
     # on entry_meta because that is what survives to the exit, where the row
     # is finally written with its outcome attached.
@@ -2899,8 +2983,9 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
             executor.entry_meta[symbol]["signal_pct"] = round(signal_pct, 3)
     rsi_note = f", RSI={symbol_rsi:.1f}" if symbol_rsi is not None else ""
     size_note = f", {size_multiplier:g}x size" if size_multiplier != 1.0 else ""
+    side_note = " SHORT" if side == "short" else ""
     logger.info(
-        f"{symbol}: {entry_method} entry confirmed - {qty} shares @ {price:.2f}{rsi_note}{size_note}"
+        f"{symbol}: {entry_method}{side_note} entry confirmed - {qty} shares @ {price:.2f}{rsi_note}{size_note}"
     )
     return True
 
@@ -2933,6 +3018,19 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     """
     entry_start = parse_hhmm_today(config["trading"]["entry_window_start"], et)
     entry_end = parse_hhmm_today(config["trading"]["entry_window_end"], et)
+    # EXTENDED-HOURS MEASUREMENT (2026-09-27), on explicit user request: keep
+    # taking new entries with the SAME signal/sizing/exit logic past
+    # entry_end, all the way to end_time, instead of going idle. entry_end
+    # itself is UNCHANGED and still used everywhere it names the PRIMARY
+    # window (reporting, logging) - only new_entry_deadline (below) governs
+    # whether the entry gate and the day-completion check actually let a
+    # new position open. Each entry is tagged "primary" or "extended" at
+    # the point of attempt (see the entry_window_label computed inside the
+    # main poll loop) so a report can split the two without ever summing
+    # them into one number.
+    _eh_cfg = config["trading"].get("extended_hours_experiment") or {}
+    new_entry_deadline = (parse_hhmm_today(_eh_cfg.get("end_time", "16:00"), et)
+                          if _eh_cfg.get("enabled") else entry_end)
     time_stop_hour = config["trading"]["time_stop_hour"]
     # Fire this many minutes BEFORE time_stop_hour, so a market order still
     # has real liquidity to fill in. Expressed as a lead rather than as a
@@ -3107,6 +3205,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     # with no bearish tape to explain it. Same class of bug as strategy.trades
     # surviving a day, which this file already guards against elsewhere.
     executor.regime_size_multiplier = 1.0
+    executor.short_regime_size_multiplier = 1.0
     market_open_dt = parse_hhmm_today("09:30", et)
     sector_history = {}
     # Only the sectors this watchlist actually needs. Computed once here rather
@@ -3593,10 +3692,17 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     # at this block's default interval - comfortably past
                     # any single-poll fill/cancel race) so this never fires
                     # on the ordinary, self-resolving case reconcile exists
-                    # to tolerate. Ignores a SHORT entirely - that stays the
-                    # loud, report-only path; a short is evidence of a
-                    # different bug and already gets closed by end-of-day
-                    # FLATTEN_ALL, not silently by this.
+                    # to tolerate.
+                    #
+                    # A negative (short) quantity is ignored here UNLESS
+                    # trading.short_strategy.enabled - while shorting is off
+                    # it can only be the old phantom-entry bug, which stays
+                    # the loud, report-only path (see
+                    # close_orphaned_position's docstring). Once shorts are a
+                    # real, intentional part of the system, an untracked
+                    # short is the exact same late-fill race as ZS's long,
+                    # just mirrored, and deserves the same safety net.
+                    _short_enabled = ((config.get("trading") or {}).get("short_strategy") or {}).get("enabled", False)
                     _streak = reconcile_state.setdefault("orphan_streak", {})
                     _untracked_now = set()
                     if _mm:
@@ -3612,8 +3718,10 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                                 _held = float(getattr(_pos, "qty", 0) or 0)
                             except (TypeError, ValueError):
                                 continue
-                            if _held <= 0:
-                                continue  # a short - leave it to the loud path
+                            if _held == 0:
+                                continue
+                            if _held < 0 and not _short_enabled:
+                                continue  # a short, and shorting is off - leave it to the loud path
                             _untracked_now.add(_sym)
                             _streak[_sym] = _streak.get(_sym, 0) + 1
                             if _streak[_sym] >= 2:
@@ -3675,6 +3783,15 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         f"({_label}, {_mult}x) replaces the provisional burst-close "
                         f"read ({_prov}x)."
                     )
+            # Mirrored short-side multiplier, from the SAME label - see
+            # _short_regime_multiplier. No provisional short-side gate
+            # exists yet (unlike the long side's bearish-only burst-close
+            # read above) - before check_time this is simply 1.0, same as
+            # regime_sizing being off. Harmless while short_strategy is off
+            # by default; worth adding a symmetric provisional gate if
+            # shorts are ever actually enabled and traded through the
+            # opening minutes.
+            executor.short_regime_size_multiplier = _short_regime_multiplier(config, _label)
 
         # Sector scoreboard, logged with the breadth check and again at the halt
         # decision. sector_strength already feeds the signal journal per signal
@@ -3713,7 +3830,14 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     f"no new entries for the rest of the day; exits continue as normal"
                 )
                 daily_entry_cap_logged = True
-        elif entry_start <= now < entry_end:
+        elif entry_start <= now < new_entry_deadline:
+            # entry_window_label: which window THIS poll's entries belong to,
+            # for trade_history.csv/reporting - "primary" is entry_end's own
+            # unchanged window, "extended" is everything the
+            # extended_hours_experiment adds past it. Computed once per poll
+            # (now is fixed for the whole pass) and threaded onto entry_meta
+            # by _attempt_entry.
+            entry_window_label = "primary" if now < entry_end else "extended"
             # SPY is tracked purely as a market benchmark - never traded. It is
             # what separates "this stock is strong" from "the market went up":
             # during a burst every name's raw move looks alike, but excess
@@ -4078,13 +4202,14 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     sector_returns=sector_returns,
                 )
 
-            # SHORT-SIDE EVIDENCE GATHERING (2026-09-23), requested by the
-            # user ahead of a possible future short strategy. Same
-            # enrichment as the long side, immediately followed by
-            # recording - no ranking, no throttle, no _attempt_entry call,
-            # ever. This candidate is never eligible to become a trade;
-            # taken/skip_reason are recorded as fixed, honest constants
-            # rather than run through logic that would imply otherwise.
+            # SHORT-SIDE, requested by the user 2026-09-23 as evidence-only,
+            # upgraded 2026-09-27 to a real (but config-gated, off by
+            # default) entry path - trading.short_strategy.enabled. Same
+            # enrichment as the long side either way. While disabled, this
+            # is UNCHANGED from the original evidence-gathering behavior:
+            # no ranking, no throttle, no _attempt_entry call, ever,
+            # taken/skip_reason recorded as fixed, honest constants.
+            _short_enabled = (config.get("trading", {}).get("short_strategy") or {}).get("enabled", False)
             for cand in short_candidates:
                 cand["spread_pct"] = _spread_pct(market_data, cand["symbol"], cand["price"])
                 cand["rvol"] = _compute_rvol(cand["bar"], volume_history[cand["symbol"]])
@@ -4099,6 +4224,56 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     spread_pct=cand["spread_pct"],
                     sector_returns=sector_returns,
                 )
+
+                taken, skip_reason = False, "short_side_not_traded_evidence_only"
+                if _short_enabled:
+                    symbol, price = cand["symbol"], cand["price"]
+                    taken, skip_reason = False, None
+                    # Same correlation limiter the long side uses, checked
+                    # against the SAME open-position price histories - a
+                    # short crowded into the same names a long burst just
+                    # bought is exactly the concentration risk the limiter
+                    # exists to catch, regardless of which side is entering.
+                    _corr_blocked, _corr_reason = (False, None)
+                    try:
+                        from src.analytics.correlation import correlation_block
+                        _corr_blocked, _corr_reason = correlation_block(
+                            config, symbol,
+                            {s: [p for _, p in price_history[s]] for s in price_history},
+                            list(strategy.get_open_trades().keys()),
+                        )
+                    except Exception as e:
+                        logger.debug(f"correlation check skipped for {symbol}: {e}")
+
+                    if max_daily_entries and entries_triggered >= max_daily_entries:
+                        skip_reason = "max_daily_entries"
+                    elif _corr_blocked:
+                        skip_reason = "correlation_limit"
+                        logger.info(f"{symbol}: entry skipped - {_corr_reason}")
+                    else:
+                        taken = _attempt_entry(
+                            config, strategy, executor, symbol, price, cand["method"], cand["rsi"],
+                            context=_entry_context(
+                                cand, spy_pct,
+                                _window_pct_change(qqq_history),
+                                _vs_vwap(vwap_acc, spy_history, "SPY"),
+                                _vs_vwap(vwap_acc, qqq_history, "QQQ"),
+                                breadth_state, regime_state,
+                                _pct_vs(price, _vwap(vwap_acc, symbol)),
+                                1,
+                            ),
+                            market_data=market_data,
+                            volume_history=volume_history,
+                            side="short",
+                            exit_config=_short_exit_config(config),
+                            entry_window_label=entry_window_label,
+                        )
+                        if taken:
+                            entries_triggered += 1
+                            had_any_trades = True
+                        else:
+                            skip_reason = "rejected_by_pre_entry_checks"
+
                 sig_pct = cand["signal_pct"]
                 short_signal_journal.record(
                     symbol=cand["symbol"], entry_method=cand["method"], price=cand["price"],
@@ -4111,7 +4286,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     burst_width=len(short_candidates),
                     **_opening_move_fields(screener_details, cand["symbol"]),
                     **cand["cont"],
-                    taken=False, skip_reason="short_side_not_traded_evidence_only",
+                    taken=taken, skip_reason=skip_reason,
                     qty=None, size_multiplier=None,
                 )
 
@@ -4171,6 +4346,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         ),
                         market_data=market_data,
                         volume_history=volume_history,
+                        entry_window_label=entry_window_label,
                     )
                     if taken:
                         entries_triggered += 1
@@ -4231,7 +4407,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
 
         # ---- day-completion checks ----
         open_trades = strategy.get_open_trades()
-        if not open_trades and now >= entry_end and had_any_trades:
+        if not open_trades and now >= new_entry_deadline and had_any_trades:
             # The BROKER is the authority on what is held, not strategy.trades.
             #
             # Ending the day here returns from run_trading_day, and the 16:00
