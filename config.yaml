@@ -1994,14 +1994,18 @@ trading:
     bullish_above_pct: 0.0     # BOTH readings at/above this -> bullish
 
   # -----------------------------------------------------------------------
-  # THE SHORT STRATEGY (added 2026-09-27), config-gated, OFF BY DEFAULT.
+  # THE SHORT STRATEGY (added 2026-09-27, ENABLED same day on explicit user
+  # request), reported as its OWN section, deliberately never combined with
+  # the primary (long) window's own P&L - see analytics/reporting notes and
+  # email_notifier.py's short-strategy section.
   # -----------------------------------------------------------------------
-  # Built on explicit user request, ahead of the ~2-week evidence bar the
-  # short_candidate_pct/short_signal_journal observational mechanism above
-  # was set to reach (2 days in as of this writing: both showed down-moves
-  # continuing more often than bouncing, but that is nowhere near enough to
-  # trade on). Shipped disabled specifically so the MECHANISM exists and is
-  # tested before the evidence does, not so it trades on 2 days of data.
+  # Built ahead of the ~2-week evidence bar the short_candidate_pct/
+  # short_signal_journal observational mechanism above was set to reach (2
+  # days in as of 2026-09-27: both showed down-moves continuing more often
+  # than bouncing, nowhere near enough to trade on by itself) - the user's
+  # own call was to turn it on anyway now that the MECHANISM is built and
+  # tested, specifically BECAUSE it is kept fully separate from the tracked
+  # primary P&L while evidence keeps accumulating in parallel.
   #
   # Deliberately a straight mirror of the long side, per explicit user
   # request ("literally just mirroring how we have the current setup but
@@ -2013,20 +2017,43 @@ trading:
   # symmetric with a proven system, not a short-specific redesign - revisit
   # once real short trade data exists to say whether shorts actually behave
   # like the mirror image of longs or need their own tuning.
+  #
+  # REQUIRES THE ALPACA ACCOUNT ITSELF TO PERMIT SHORTING. This flag is a
+  # CODE switch only - Alpaca separately enforces its own account-level
+  # no_shorting setting, which this account has relied on since before
+  # shorts were ever intended (see PHANTOM_EXIT's comment in executor.py).
+  # main() checks account.shorting_enabled at startup and logs loudly if
+  # the account itself still blocks it - if you see that warning, shorting
+  # needs to be turned on in the Alpaca account configuration too, or every
+  # short entry will keep getting silently rejected by the broker.
   short_strategy:
-    enabled: false
+    enabled: true
     # Regime gating is the MIRROR of regime_sizing above: full size (or the
     # fraction below) in a BEARISH tape, zero in a BULLISH one - a short is
     # fighting the tape in bullish conditions exactly the way a long fights
     # it in bearish ones. Reuses the SAME regime label regime_sizing
     # computes each poll (see _short_regime_multiplier) - there is one
     # reading of "how is the tape behaving", not two independent ones.
-    # neutral/choppy fall back to regime_sizing's own values when unset here,
-    # since there is no evidence yet those should differ by side.
+    #
+    # MUTUAL EXCLUSION IS A HARD RULE, not just these numbers: explicit user
+    # instruction, 2026-09-27 - "there SHOULD NEVER BE SHORTS AND LONGS
+    # MIXING IN A SPECIFIC REGIME WINDOW. its always, either one or the
+    # other." Enforced in code (run_trading_day, right after both
+    # multipliers are computed each poll): whenever the long side is taking
+    # ANY new positions this poll (regime_size_multiplier > 0, which
+    # includes its default 1.0 "no opinion yet" reading before check_time),
+    # the short multiplier is forced to exactly 0 regardless of what
+    # neutral_multiplier/choppy_multiplier say below. In practice this means
+    # shorts only ever fire in a confirmed BEARISH read - neutral and choppy
+    # both leave longs at a nonzero multiplier (0.5 each), so the hard rule
+    # zeroes shorts there too. The two multipliers below are kept
+    # configurable for the day there is real evidence shorts should behave
+    # differently in a choppy tape specifically, but they cannot violate the
+    # hard exclusion by themselves.
     bearish_multiplier: 1.0    # 1.0 = full short size when bearish
     bullish_multiplier: 0.0    # 0 = no new shorts when bullish
-    # neutral_multiplier / choppy_multiplier: unset here on purpose - falls
-    # back to regime_sizing's neutral_multiplier/choppy_multiplier (0.5/0.5).
+    neutral_multiplier: 0.0    # forced to 0 by the hard rule regardless; explicit rather than implied
+    choppy_multiplier: 0.0     # same
 
     # EXIT PROFILE - the exact inverse of the long side's exit numbers
     # (first_exit_loss_pct -0.7, final_exit_loss_pct -1.0, trailing_stop_pct

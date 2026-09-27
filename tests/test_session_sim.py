@@ -443,7 +443,17 @@ if True:
     print("\n=== 3. THE 2026-09-01 FAILURE: entries that NEVER FILL ===")
     # The exact shape that produced four phantom positions: orders accepted,
     # never filled, exits then firing against stock that was never owned.
+    #
+    # short_strategy explicitly pinned OFF for this scenario (2026-09-27):
+    # once the abandoned long entries are dropped, NOW/PLTR's continued
+    # crash (-1.2%/-1.5%) legitimately qualifies as a fresh short candidate
+    # under the LIVE (shorting-enabled) config - a real, intended new short
+    # entry, not a recurrence of this bug. That is correct behavior, just
+    # not what THIS scenario is about; testing the phantom-entry/retry-
+    # abandon mechanism needs the short path held out of the way so a
+    # legitimate new position can't be mistaken for the bug this guards.
     cfg3 = base_config()
+    cfg3["trading"]["short_strategy"] = {"enabled": False}
     scripts3 = {
         "NOW": Script(100.0, [(0, 0.0), (1, 0.6), (2, -0.4), (5, -1.2)]),
         "PLTR": Script(60.0, [(0, 0.0), (1, 0.5), (2, -0.5), (5, -1.5)]),
@@ -586,8 +596,13 @@ if True:
 
     print("\n=== 7. A SHORT ALREADY IN THE ACCOUNT AT THE OPEN ===")
     # The 2026-08-28 shape: the bot starts with a short it never meant to
-    # hold. It must refuse to adopt it, and the 16:00 flatten must COVER it.
+    # hold. With short_strategy OFF (pinned explicitly here, since this
+    # scenario is specifically about the historical phantom-short bug, not
+    # the 2026-09-27 intentional short strategy - see test_signs.py section
+    # 7b for the adopt-when-enabled path) it must refuse to adopt it, and
+    # the 16:00 flatten must COVER it either way.
     cfg7 = base_config()
+    cfg7["trading"]["short_strategy"] = {"enabled": False}
     scripts7 = {
         "AAA": Script(100.0, [(0, 0.0), (1, 0.5), (20, 1.0)]),
         "SPY": Script(500.0, [(0, 0.0), (5, 0.3)]),

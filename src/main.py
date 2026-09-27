@@ -3784,14 +3784,26 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         f"read ({_prov}x)."
                     )
             # Mirrored short-side multiplier, from the SAME label - see
-            # _short_regime_multiplier. No provisional short-side gate
-            # exists yet (unlike the long side's bearish-only burst-close
-            # read above) - before check_time this is simply 1.0, same as
-            # regime_sizing being off. Harmless while short_strategy is off
-            # by default; worth adding a symmetric provisional gate if
-            # shorts are ever actually enabled and traded through the
-            # opening minutes.
+            # _short_regime_multiplier.
             executor.short_regime_size_multiplier = _short_regime_multiplier(config, _label)
+            # HARD MUTUAL EXCLUSION (explicit user instruction, 2026-09-27):
+            # "there SHOULD NEVER BE SHORTS AND LONGS MIXING IN A SPECIFIC
+            # REGIME WINDOW. its always, either one or the other." This is
+            # enforced HERE, unconditionally, rather than trusted to the two
+            # multiplier tables happening to agree - if the long side is
+            # taking ANY new positions this poll (regime_size_multiplier >
+            # 0, including its default 1.0 "no opinion yet" reading before
+            # check_time, and the provisional burst-close read), shorts are
+            # forced to exactly 0 regardless of what short_strategy's own
+            # table says. This also closes the one real gap the mirrored
+            # table left open on its own: before check_time, the long side
+            # defaults to 1.0 (full size, "no opinion yet") and the short
+            # side's table would ALSO default to 1.0 with no label yet -
+            # without this line, both sides could take positions in the
+            # same opening minutes. Only ever narrows the short side; never
+            # widens it back once zeroed.
+            if executor.regime_size_multiplier > 0:
+                executor.short_regime_size_multiplier = 0.0
 
         # Sector scoreboard, logged with the breadth check and again at the halt
         # decision. sector_strength already feeds the signal journal per signal
@@ -4829,30 +4841,40 @@ def reconcile_existing_positions(broker, strategy, executor):
             if qty <= 0:
                 continue
 
-            # REFUSE to adopt a short. This used to read
-            # int(abs(float(position.qty))), which silently turned a short into
-            # a long of the same size - and then every downstream rule ran
-            # backwards on it. On 2026-08-28 CRWD at -39 @ 212.74 against a
-            # ~228 market was read as +7.2% PROFIT and would have fired a
-            # take-profit SELL, which shorts 39 more; worse, submit_exit_order
-            # cancels working orders for the symbol first, so that sell would
-            # also have cancelled the buy-to-cover queued against it.
+            # A negative quantity used to always mean the phantom-entry bug -
+            # this used to read int(abs(float(position.qty))), which silently
+            # turned a short into a long of the same size and then ran every
+            # downstream rule backwards on it. On 2026-08-28 CRWD at -39 @
+            # 212.74 against a ~228 market was read as +7.2% PROFIT and would
+            # have fired a take-profit SELL, which shorts 39 MORE; worse,
+            # submit_exit_order cancels working orders for the symbol first,
+            # so that sell would also have cancelled the buy-to-cover queued
+            # against it.
             #
-            # Refusing rather than managing it: this bot has no intent to be
-            # short, so a short in the account is already evidence of a
-            # different bug, and adopting it would mean silently running
-            # long-only exit logic against a position it does not fit. The
-            # 16:00 flatten is now side-aware (Executor.flatten_all_positions)
-            # and will close it correctly, and no_shorting on the account
-            # blocks new ones - so this is loud, visible, and still safe.
-            if raw_qty < 0:
+            # trading.short_strategy.enabled (2026-09-27) changes what a
+            # negative quantity MEANS here, not whether it gets handled
+            # correctly - both branches build the right-direction
+            # TradeManager; the only question is whether this bot currently
+            # has any legitimate reason to be short at all.
+            _short_enabled = (strategy.config.get("trading") or {}).get("short_strategy", {}).get("enabled", False)
+            side = "short" if raw_qty < 0 else "long"
+            if raw_qty < 0 and not _short_enabled:
+                # Refusing rather than adopting: with shorting off, this can
+                # only be the old phantom-entry bug, not something this bot
+                # intended - adopting it would silently run SHORT exit logic
+                # (which does not exist yet in this code path) against a
+                # position that should never have existed. The 16:00 flatten
+                # is side-aware (Executor.flatten_all_positions) and closes
+                # it correctly regardless, and no_shorting on the account
+                # blocks new ones - so leaving it loud and unmanaged here is
+                # still safe, just not silent.
                 logger.error(
                     f"{symbol}: REFUSING to adopt a SHORT position ({raw_qty:g} shares) "
-                    f"on startup - this bot is long-only and its exit rules would run "
-                    f"backwards on it. Left untracked and unmanaged; the 16:00 flatten "
-                    f"closes it side-correctly. Investigate how a short was opened at all "
-                    f"(phantom-entry path is the known cause), and close it by hand from "
-                    f"the Alpaca dashboard if it should not be held."
+                    f"on startup - short_strategy is disabled, so this can only be the "
+                    f"phantom-entry bug, not something intended. Left untracked and "
+                    f"unmanaged; the 16:00 flatten closes it side-correctly. Investigate "
+                    f"how a short was opened at all, and close it by hand from the "
+                    f"Alpaca dashboard if it should not be held."
                 )
                 continue
 
@@ -4869,21 +4891,37 @@ def reconcile_existing_positions(broker, strategy, executor):
                 )
                 continue
 
-            trade = TradeManager(symbol, entry_price, qty, strategy.config)
-            if current_price and current_price > trade.highest_price:
+            trade = TradeManager(symbol, entry_price, qty, strategy.config, side=side)
+            # "favorable extreme" seeding: current_price only overrides the
+            # entry-seeded default when it is MORE favorable for this
+            # position's own direction - current_price > highest_price
+            # (unchanged) for a long, current_price < highest_price for a
+            # short, since highest_price tracks the low for a short (see
+            # TradeManager.update_trailing_stop).
+            if current_price and trade.direction * current_price > trade.direction * trade.highest_price:
                 trade.highest_price = current_price
                 trade.highest_since_entry = current_price
+                trade.lowest_since_entry = current_price
                 trade.price_history = [entry_price, current_price]
 
-            prior_sells = broker.get_filled_sell_orders_since(symbol, today_start)
-            if prior_sells:
-                trade.first_exit_done = True
+            # get_filled_sell_orders_since only makes sense for a LONG's
+            # first-exit tranche (a sell trims a long); a short's first exit
+            # is trimmed by a BUY-to-cover instead, which this broker method
+            # does not look for - skip it for a short rather than mislabel
+            # a cover as a scale-out.
+            if side == "long":
+                prior_sells = broker.get_filled_sell_orders_since(symbol, today_start)
+                if prior_sells:
+                    trade.first_exit_done = True
+            else:
+                prior_sells = []
 
             strategy.trades[symbol] = trade
             executor.open_entries[symbol] = entry_price
-            executor.record_entry_meta(symbol, method="RECONCILED", rsi=None, entry_time=None)
+            executor.record_entry_meta(symbol, method="RECONCILED", rsi=None, entry_time=None, side=side)
+            side_note = " SHORT" if side == "short" else ""
             logger.info(
-                f"{symbol}: adopted pre-existing position on startup - {qty} shares "
+                f"{symbol}: adopted pre-existing{side_note} position on startup - {qty} shares "
                 f"@ {entry_price:.2f} (broker avg_entry_price) - resuming stop-loss/"
                 f"trailing-stop management"
                 + (f" (first_exit already fired today, {len(prior_sells)} prior sell(s) - won't re-arm it)" if prior_sells else "")
@@ -4902,6 +4940,32 @@ def main():
         broker = AlpacaBroker(paper=config["broker"]["paper_trading"])
         account = broker.get_account()
         logger.info(f"Connected to broker. Cash: ${account.cash}")
+
+        # SHORTING PERMISSION CHECK (2026-09-27). trading.short_strategy.enabled
+        # is a CODE-level switch; Alpaca separately enforces its OWN
+        # account-level `no_shorting` configuration, which this account has
+        # relied on since before shorts were ever intended (see
+        # PHANTOM_EXIT's comment and reconcile_existing_positions - it is
+        # precisely what turned the 2026-09-01 phantom-entry bug into log
+        # noise instead of a real short). If that account setting is still
+        # on, every short entry this bot attempts will be silently rejected
+        # by the broker, one order at a time, and short_strategy will look
+        # "enabled" while doing nothing. account.shorting_enabled reports
+        # the account's actual permission with the get_account() call
+        # already made above - no extra API call needed - so this is
+        # checked loudly ONCE at startup rather than discovered slowly
+        # across dozens of individually-rejected orders.
+        if (config.get("trading", {}).get("short_strategy") or {}).get("enabled"):
+            if not getattr(account, "shorting_enabled", True):
+                logger.error(
+                    "===== short_strategy.enabled is TRUE in config, but this "
+                    "Alpaca account still has shorting DISABLED (no_shorting is "
+                    "on) - every short entry will be rejected by the broker "
+                    "until this is changed in the Alpaca account configuration. "
+                    "Longs are unaffected. ====="
+                )
+            else:
+                logger.info("short_strategy is enabled and the account permits shorting.")
 
         # Real-time price stream. Alpaca's free tier delays the REST
         # historical endpoint ~15 minutes but carries live IEX data over the

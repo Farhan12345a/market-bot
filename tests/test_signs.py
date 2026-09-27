@@ -167,6 +167,42 @@ check("...with the right positive qty", st9.trades["NVDA"].entry_qty == 12, st9.
 check("the refused short leaves no half-written executor state either",
       "CRWD" not in ex9.open_entries, ex9.open_entries)
 
+print("\n=== 7b. RECONCILE ADOPTS A LEGIT SHORT WHEN short_strategy IS ENABLED ===")
+SHORT_CFG = copy.deepcopy(CFG)
+SHORT_CFG["trading"]["short_strategy"] = {"enabled": True}
+
+
+class Strat2:
+    def __init__(self): self.trades = {}; self.config = copy.deepcopy(SHORT_CFG)
+
+
+b9b = Broker({"CRWD": Pos("CRWD", -39, avg=212.74, cur=200.0)})
+ex9b = Executor(b9b, copy.deepcopy(SHORT_CFG))
+st9b = Strategy(copy.deepcopy(SHORT_CFG))
+M.reconcile_existing_positions(b9b, st9b, ex9b)
+check("with short_strategy enabled, the short IS adopted, not refused",
+      "CRWD" in st9b.trades, list(st9b.trades))
+check("...built with side=short, so its exit rules run the right direction",
+      st9b.trades["CRWD"].side == "short")
+check("...with the POSITIVE magnitude as entry_qty (qty is always positive, "
+      "side says which way)", st9b.trades["CRWD"].entry_qty == 39)
+check("entry_meta records it as a short RECONCILE too",
+      ex9b.entry_meta["CRWD"]["side"] == "short")
+check("current_price BELOW avg_entry (favorable for a short) becomes the "
+      "seeded trailing anchor", st9b.trades["CRWD"].highest_price == 200.0,
+      st9b.trades["CRWD"].highest_price)
+
+# A short that's already RISEN (adverse) since the broker's avg_entry must
+# NOT get its anchor dragged to the worse price - same monotonic-safety
+# property the long path already had.
+b9c = Broker({"CRWD": Pos("CRWD", -39, avg=212.74, cur=220.0)})
+ex9c = Executor(b9c, copy.deepcopy(SHORT_CFG))
+st9c = Strategy(copy.deepcopy(SHORT_CFG))
+M.reconcile_existing_positions(b9c, st9c, ex9c)
+check("a current_price ABOVE avg_entry (adverse for a short) does NOT "
+      "override the seeded anchor", st9c.trades["CRWD"].highest_price == 212.74,
+      st9c.trades["CRWD"].highest_price)
+
 print("\n=== 8. THE OLD abs() IS GONE FROM BOTH SITES ===")
 msrc = open(repo_file("src", "main.py")).read()
 esrc = open(repo_file("src", "executor", "executor.py")).read()

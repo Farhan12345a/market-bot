@@ -294,31 +294,63 @@ behind a demonstrated edge and is deliberately not in this ranking.
 ---
 
 
-## A real answer for bearish tape (TODO - the halt is a bandaid)
+## A real answer for bearish tape — option 1 SHIPPED 2026-09-27, ENABLED same day
 
-`breadth_halt` (added 2026-08-30) stops new entries when the watchlist mean move
-since the open is below -0.3% at 09:40. That is damage control, not a way to
-profit. It rests on an ASSUMPTION nobody has measured: that a weak first ten
-minutes implies a weak session. It will sometimes halt a day that recovers, and
-those days leave no row in the P&L to notice them by.
+`breadth_halt` (added 2026-08-30, later superseded by `regime_sizing`) stops new
+LONG entries in a weak tape. That was always damage control, not a way to
+profit - the deeper point from 2026-08-28 stands: `edge` was +1.03pp on both a
+winning and a losing session, so selection adds value in both regimes, and
+what was missing was something to be long OF on a day with no upside in it.
 
-Measure it before trusting it. The signal journal already records every signal
-whether taken or not, so a halted day still has the counterfactual: compare the
-forward returns of signals that fired AFTER the halt against what the halt cost.
-If post-halt signals mostly rose, the assumption is wrong.
+Option 1 from this note ("short the weak side") is now built:
+`trading.short_strategy`, a config-gated mirror of the long side (same entry
+threshold, sizing and risk limits, exit shape inverted) - see strategy.py's
+`TradeManager.direction`, executor.py's `submit_entry_order(side=...)`/
+`retry_unfilled_entries`/`close_orphaned_position`, and main.py's
+`_short_regime_multiplier`/`_attempt_entry(side="short")`. The sign bugs this
+note flagged as a prerequisite were fixed 2026-09-02 (test_signs.py) well
+before this was built on top of them.
 
-Real options, none of them free:
-1. Short the weak side. Needs the sign bugs fixed first, and note no_shorting is
-   being set on the account precisely to prevent accidental shorts - a
-   deliberate short strategy would have to undo that consciously.
-2. Trade an inverse ETF (SQQQ, SH) as a long. No shorting machinery needed and
-   no borrow. Probably the cheapest honest path.
-3. Require positive market breadth as an ENTRY condition rather than a halt, so
-   the size scales with the tape instead of switching off.
+The `no_shorting` account setting this note predicted would need to be
+"consciously undone" is exactly what main() now checks at startup
+(`account.shorting_enabled`) and warns loudly about if short_strategy is
+enabled in config but the Alpaca account itself still blocks it - that
+account-level toggle is OUTSIDE this repo and has to be checked/changed
+directly in the Alpaca account configuration; the code side is done but is not
+sufficient by itself.
 
-The deeper point from 2026-08-28: `edge` was +1.03pp on both a winning and a
-losing session. Selection is adding value in both regimes. What is missing is
-something to be long OF on a day with no upside in it.
+**HARD RULE, explicit user instruction 2026-09-27:** longs and shorts must
+NEVER be active in the same regime window - enforced unconditionally in
+run_trading_day (short_regime_size_multiplier forced to 0 whenever the long
+multiplier is nonzero), not left to the two multiplier tables happening to
+agree. In practice this means shorts only ever fire in a confirmed BEARISH
+read; bullish/neutral/choppy are long-only exactly as before.
+
+**Reported entirely separately from the tracked primary (long) P&L** - its own
+report section (`_short_strategy_html`), excluded from the headline Total
+P&L/win-rate/trade-count and from the push-notification summary, mirroring
+how the extended-hours experiment (below) is also kept out of that same
+headline. Explicit user instruction: "not accounted for for the actual P&L
+that we are tracking which is in the primary long taking window."
+
+**STILL OPEN, now that the mechanism exists:**
+- Only 2 days of short-side observational evidence exist as of 2026-09-27
+  (short_signal_journal.csv, started 2026-09-24) - both showed down-momentum
+  continuing more often than reversing, but that is nowhere near the ~2-week
+  bar this file's own gate sets elsewhere. The user's own call was to enable
+  the mechanism now anyway, specifically BECAUSE it is walled off from the
+  tracked P&L while evidence keeps accumulating in parallel - revisit whether
+  the entry threshold/exit shape (a straight mirror of the long side, not
+  independently tuned) actually fits short-side behavior once real trade data
+  exists.
+- No symmetric "provisional" short-side regime gate exists yet for the
+  opening minutes (unlike the long side's bearish-only burst-close read) -
+  harmless today because the hard mutual-exclusion rule above already closes
+  the one gap this left (both sides defaulting to 1.0/"no opinion" before
+  check_time), but worth a dedicated provisional short gate if opening-minute
+  short entries turn out to matter.
+- Options 2 (inverse ETF long) and 3 (breadth as an entry condition) were not
+  pursued - option 1 was the direction chosen.
 
 ## 0e. Limit orders for streamed symbols only - INVESTIGATE, do not assume
 

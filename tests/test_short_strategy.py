@@ -277,9 +277,50 @@ sc_off["trading"]["short_strategy"] = {"enabled": False}
 check("disabled -> always 1.0 regardless of label",
       M._short_regime_multiplier(sc_off, "bearish") == 1.0)
 
+print("\n=== G1. HARD MUTUAL EXCLUSION: LONGS AND SHORTS NEVER BOTH ACTIVE ===")
+# Explicit user instruction, 2026-09-27: "there SHOULD NEVER BE SHORTS AND
+# LONGS MIXING IN A SPECIFIC REGIME WINDOW. its always, either one or the
+# other." This is enforced unconditionally in run_trading_day, right after
+# both multipliers are computed - checked here as a source-level guarantee
+# since it isn't reachable as a pure function (it runs inline in the poll
+# loop against live executor state each poll).
+check("the hard-exclusion line exists, right after both multipliers are set",
+      "executor.short_regime_size_multiplier = 0.0" in src)
+check("...gated on the LONG side being active this poll, not a config guess",
+      "if executor.regime_size_multiplier > 0:" in src)
+check("it only ever NARROWS the short side (0.0), never the reverse - "
+      "the long side's own multiplier is never touched by this line",
+      "executor.regime_size_multiplier = 0.0" not in src)
+
+# Live-config consequence of the hard rule: neutral/choppy leave LONGS at a
+# nonzero multiplier (0.5 each), so shorts must be zero there too, and only
+# a confirmed bearish read (which zeroes longs) lets shorts through.
+for label, want_long_nonzero in [("bullish", True), ("neutral", True), ("choppy", True), ("bearish", False)]:
+    long_mult = {"bullish": CFG["trading"]["regime_sizing"]["bullish_multiplier"],
+                 "neutral": CFG["trading"]["regime_sizing"]["neutral_multiplier"],
+                 "choppy": CFG["trading"]["regime_sizing"]["choppy_multiplier"],
+                 "bearish": CFG["trading"]["regime_sizing"]["bearish_multiplier"]}[label]
+    if want_long_nonzero:
+        desc = f"{label}: long multiplier is nonzero -> shorts get hard-zeroed here"
+    else:
+        desc = f"{label}: long multiplier is zero - this is the ONE regime shorts may trade in"
+    check(desc, (long_mult > 0) == want_long_nonzero, (label, long_mult))
+
+print("\n=== G2. STARTUP CHECKS THE ACCOUNT'S OWN shorting_enabled FLAG ===")
+src = open(repo_file("src", "main.py")).read()
+check("main() checks account.shorting_enabled when short_strategy.enabled is true",
+      "getattr(account, \"shorting_enabled\", True)" in src)
+check("it warns LOUDLY rather than silently if the account still blocks it "
+      "(no_shorting on the Alpaca account is a SEPARATE switch from this "
+      "code's own config flag)",
+      "still has shorting DISABLED" in src)
+check("this reuses the account object from the get_account() call already "
+      "made at startup - no extra API call", "account = broker.get_account()" in src)
+
 print("\n=== H. LIVE CONFIG ===")
 t_ = CFG["trading"]
-check("short_strategy is shipped OFF by default", t_["short_strategy"]["enabled"] is False)
+check("short_strategy is ENABLED as of 2026-09-27 (explicit user request, "
+      "after the mechanism was built and tested)", t_["short_strategy"]["enabled"] is True)
 check("short exit tiers are the exact inverse magnitudes of the long side",
       t_["short_strategy"]["exits"]["first_exit_loss_pct"] == t_["first_exit_loss_pct"]
       and t_["short_strategy"]["exits"]["final_exit_loss_pct"] == t_["final_exit_loss_pct"]

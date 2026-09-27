@@ -193,7 +193,13 @@ class EmailNotifier:
         read on a lock screen; the full report stays on disk and in email.
         """
         try:
-            closed = [t for t in trades if t.get("exit_price") is not None]
+            all_closed = [t for t in trades if t.get("exit_price") is not None]
+            # Same primary-only filter as the HTML headline (see
+            # _generate_html_summary) - the push notification's P&L must
+            # agree with the report's, or the two disagree about "how did
+            # today go" for no reason a reader could see.
+            closed = [t for t in all_closed
+                     if t.get("side") != "short" and t.get("entry_window") != "extended"]
             pl = sum(float(t.get("pl") or 0) for t in closed)
             wins = sum(1 for t in closed if float(t.get("pl") or 0) > 0)
             n = len(closed)
@@ -217,6 +223,18 @@ class EmailNotifier:
             tp = sum(1 for t in closed if t.get("exit_reason") == "TAKE_PROFIT")
             if tp:
                 lines.append(f"{tp} take-profit scale-out(s) fired")
+
+            # Never silently hidden, just never blended into the figure
+            # above - see the full report for each one's own section.
+            short_closed = [t for t in all_closed if t.get("side") == "short"]
+            if short_closed:
+                short_pl = sum(float(t.get("pl") or 0) for t in short_closed)
+                lines.append(f"Short strategy (separate): ${short_pl:+,.2f} on {len(short_closed)} trade(s)")
+            ext_closed = [t for t in all_closed
+                         if t.get("side") != "short" and t.get("entry_window") == "extended"]
+            if ext_closed:
+                ext_pl = sum(float(t.get("pl") or 0) for t in ext_closed)
+                lines.append(f"Extended hours (separate): ${ext_pl:+,.2f} on {len(ext_closed)} trade(s)")
 
             if open_positions:
                 unreal = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
@@ -663,7 +681,12 @@ class EmailNotifier:
         experiment is already reported in its own separate section rather
         than folded into the session total.
         """
-        eh = [t for t in (trades or []) if (t.get("entry_window") or "") == "extended"]
+        # side != "short" excluded here too - a short traded during the
+        # extended-hours window belongs in the Short Strategy section
+        # instead (see _short_strategy_html), so each section stays a
+        # single, unambiguous axis (window OR side, never both at once).
+        eh = [t for t in (trades or [])
+             if (t.get("entry_window") or "") == "extended" and t.get("side") != "short"]
         if not eh:
             return ""
 
@@ -681,9 +704,8 @@ class EmailNotifier:
         for t in sorted(eh, key=lambda x: x.get("entry_time") or ""):
             pl = t.get("pl", 0) or 0
             c = "#10b981" if pl >= 0 else "#ef4444"
-            side_tag = " (SHORT)" if t.get("side") == "short" else ""
             rows.append(
-                f"<tr><td><strong>{t.get('symbol','?')}{side_tag}</strong></td>"
+                f"<tr><td><strong>{t.get('symbol','?')}</strong></td>"
                 f"<td>{(t.get('entry_time') or '')[11:19]}</td>"
                 f"<td>{(t.get('exit_time') or '')[11:19]}</td>"
                 f"<td>${t.get('entry_price', 0):.2f}</td>"
@@ -713,6 +735,87 @@ class EmailNotifier:
             '<table class="trades-table"><thead><tr>'
             '<th>Symbol</th><th>Entry</th><th>Exit</th><th>Entry $</th><th>Exit $</th>'
             '<th>Qty</th><th>P&L</th><th>P&L %</th><th>Exit Reason</th>'
+            '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        )
+
+    def _short_strategy_html(self, trades):
+        """
+        The config-gated short strategy (trading.short_strategy), enabled
+        2026-09-27. Filtered on side == "short" - ANY window (primary,
+        extended, or opening_burst, though the opening burst does not
+        currently open shorts at all) - so this is the single home for
+        every short trade regardless of when it happened, mirroring how
+        _extended_hours_html is the single home for every trade in that
+        window regardless of side. The two sections are mutually exclusive
+        by construction (see the exclusion in each one's own filter).
+
+        Deliberately never combined with the primary (long) window's own
+        P&L - explicit user instruction, 2026-09-27, same standing
+        instruction that keeps the extended-hours experiment separate:
+        "like the extended hour functionality we added, lets keep it as
+        seperate... lets not mix it in the primary P&L."
+
+        Returns "" when no short trades exist (the mechanism took nothing,
+        or the account still has shorting blocked by Alpaca's own
+        no_shorting setting - see main()'s startup check) - same
+        empty-day convention every other optional section uses.
+        """
+        sh = [t for t in (trades or []) if t.get("side") == "short"]
+        if not sh:
+            return ""
+
+        total = sum(t.get("pl", 0) or 0 for t in sh)
+        wins = [t for t in sh if (t.get("pl", 0) or 0) > 0]
+        losses = [t for t in sh if (t.get("pl", 0) or 0) < 0]
+        wr = (len(wins) / len(sh) * 100) if sh else 0
+        pl_color = "#10b981" if total >= 0 else "#ef4444"
+
+        def pct(t):
+            v = t.get("pl_pct")
+            return f"{v:+.2f}%" if isinstance(v, (int, float)) else "N/A"
+
+        window_labels = {"primary": "primary window", "extended": "extended hours",
+                         "opening_burst": "opening burst"}
+
+        rows = []
+        for t in sorted(sh, key=lambda x: x.get("entry_time") or ""):
+            pl = t.get("pl", 0) or 0
+            c = "#10b981" if pl >= 0 else "#ef4444"
+            win_label = window_labels.get(t.get("entry_window"), t.get("entry_window") or "?")
+            rows.append(
+                f"<tr><td><strong>{t.get('symbol','?')}</strong></td>"
+                f"<td>{(t.get('entry_time') or '')[11:19]}</td>"
+                f"<td>{(t.get('exit_time') or '')[11:19]}</td>"
+                f"<td>${t.get('entry_price', 0):.2f}</td>"
+                f"<td>${t.get('exit_price', 0):.2f}</td>"
+                f"<td>{t.get('qty', 0)}</td>"
+                f"<td style='color:{c};font-weight:600;'>${pl:,.2f}</td>"
+                f"<td style='color:{c};font-weight:600;'>{pct(t)}</td>"
+                f"<td>{win_label}</td>"
+                f"<td class='exit-reason'>{t.get('exit_reason','?')}</td></tr>"
+            )
+
+        return (
+            '<h2 style="margin-top:30px;border-bottom:2px solid #7c3aed;'
+            'padding-bottom:10px;">Short Strategy (Bearish Regime)</h2>'
+            '<div style="background:#f5f3ff;border-left:4px solid #7c3aed;'
+            'padding:12px 15px;border-radius:8px;margin-bottom:14px;">'
+            f'<div style="font-size:22px;font-weight:700;color:{pl_color};">'
+            f'${total:,.2f}</div>'
+            f'<div style="font-size:13px;color:#5b21b6;margin-top:4px;">'
+            f'{len(sh)} trade(s) &middot; {len(wins)}W / {len(losses)}L &middot; '
+            f'{wr:.0f}% win rate</div>'
+            '<div style="font-size:11px;color:#4c1d95;margin-top:6px;">'
+            'A mirror of the long side\'s entry/exit logic, only taken when '
+            'the regime reads BEARISH (never alongside a long entry in the '
+            'same regime window - see regime_sizing/short_strategy\'s hard '
+            'mutual exclusion). Reported separately and never summed with '
+            'the primary window\'s own number, per standing instruction.'
+            '</div>'
+            '</div>'
+            '<table class="trades-table"><thead><tr>'
+            '<th>Symbol</th><th>Entry</th><th>Exit</th><th>Entry $</th><th>Exit $</th>'
+            '<th>Qty</th><th>P&L</th><th>P&L %</th><th>Window</th><th>Exit Reason</th>'
             '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
         )
 
@@ -834,10 +937,23 @@ class EmailNotifier:
                                open_positions=None):
         """Generate the HTML report: closed trades, and any still-open positions."""
         open_positions = open_positions or []
-        total_pl = sum(t.get("pl", 0) for t in trades)
-        winning_trades = [t for t in trades if t.get("pl", 0) > 0]
-        losing_trades = [t for t in trades if t.get("pl", 0) < 0]
-        win_rate = (len(winning_trades) / len(trades) * 100) if trades else 0
+        # The headline Total P&L/win-rate/trade-count is the PRIMARY,
+        # long-side number this bot has always been measured on -
+        # deliberately excluding both the short strategy (side=="short")
+        # and the extended-hours experiment (entry_window=="extended"),
+        # each of which gets its own separate section below and must never
+        # be silently folded into this figure. Explicit user instruction,
+        # 2026-09-27, restated for both features: "not accounted for the
+        # actual P&L that we are tracking, which is in the primary long
+        # taking window." The opening-move experiment is NOT excluded here -
+        # it always has been part of this total, unlike the other two, and
+        # nothing has asked for that to change.
+        primary_trades = [t for t in trades
+                          if t.get("side") != "short" and t.get("entry_window") != "extended"]
+        total_pl = sum(t.get("pl", 0) for t in primary_trades)
+        winning_trades = [t for t in primary_trades if t.get("pl", 0) > 0]
+        losing_trades = [t for t in primary_trades if t.get("pl", 0) < 0]
+        win_rate = (len(winning_trades) / len(primary_trades) * 100) if primary_trades else 0
 
         # Color coding
         pl_color = "#10b981" if total_pl >= 0 else "#ef4444"
@@ -854,6 +970,7 @@ class EmailNotifier:
         replay_progress_html = self._replay_progress_html()
         opening_burst_html = self._opening_burst_html(trades)
         extended_hours_html = self._extended_hours_html(trades)
+        short_strategy_html = self._short_strategy_html(trades)
         open_positions_html = self._open_positions_html(open_positions)
         unrealized_pl = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
 
@@ -935,6 +1052,8 @@ class EmailNotifier:
                 {opening_burst_html}
 
                 {extended_hours_html}
+
+                {short_strategy_html}
 
                 {open_positions_html}
 
