@@ -147,9 +147,10 @@ print("\n=== 11. STREAM COVERAGE: UNIQUE-SYMBOL CAP, TICKS FREE ===")
 # within ~70s, so the gap to 26 was the counting model, not IEX sparsity.
 # 2026-09-17: Algo Trader Plus removed the free-tier 30-symbol boundary this
 # margin used to sit under, so there's no vendor bound left to stay clear of.
-check("the cap moved to 60 on 2026-09-24, scaled with the wider watchlist - "
-      "Algo Trader Plus, no free-tier boundary left to sit under",
-      CFG["trading"]["stream_max_subscriptions"] == 60,
+check("the cap reverted to 30 on 2026-09-25 (was 60 on 2026-09-24, scaled "
+      "with the wider watchlist - Algo Trader Plus has no free-tier "
+      "boundary, but the wider universe itself was reverted)",
+      CFG["trading"]["stream_max_subscriptions"] == 30,
       CFG["trading"]["stream_max_subscriptions"])
 check("ticks stay ON - free under the corrected model, not a coverage trade",
       CFG["trading"]["use_trade_ticks_for_entry"] is True)

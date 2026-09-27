@@ -2244,7 +2244,20 @@ trading:
   # breakdown was the reason: qqq-sourced trades were -254 on 5/15 that
   # session, the worst bucket by far, while screener-sourced trades were
   # +70 on 5/18 - the correlated QQQ names did most of the damage.
-  num_stocks_to_trade: 18  # Number of top stocks to select each day
+  #
+  # 18 -> 21 on 2026-09-27, on explicit user request, moving 3 slots from
+  # qqq_list_top_n (7 -> 4, see its own comment) to the general screener.
+  # Evidence: every bullish-regime day tracked so far split the same way -
+  # screener +$115.87 (9/21), +$73.44 (9/22), +$55.49 (9/24), all positive;
+  # qqq_list -$10.31 (9/21), -$7.31 (9/22), -$196.27 (9/24), all negative and
+  # getting worse as qqq_list_top_n was widened. screener has never lost
+  # money in a bullish-regime bucket across 3 measured days; qqq_list has
+  # never made money in one. The one non-bullish (choppy) day, 9/25, saw
+  # qqq_list actually win (+$43.90 vs screener's -$72.49) - so this is not
+  # "qqq_list is bad," it is "qqq_list has looked bad specifically when the
+  # regime is bullish," which is the opposite of gating it TO bullish days.
+  # n=3 bullish days is still a small sample; watch whether this holds.
+  num_stocks_to_trade: 21  # Number of top stocks to select each day
   # ---------------------------------------------------------------------
   # Opening-move history (added 2026-08-21)
   # ---------------------------------------------------------------------
@@ -2384,7 +2397,7 @@ trading:
   # heavily correlated, so adding 10 of them is one bet held ten times rather
   # than ten bets - the trend gate is what keeps that from happening daily.
   use_qqq_list: true
-  qqq_list_top_n: 7  # 10 -> 18 on 2026-09-24, cut to 7 on 2026-09-25 (below the original 10) after qqq-sourced trades were 2026-09-24's worst bucket by far (-254, 5/15) - see num_stocks_to_trade's comment
+  qqq_list_top_n: 4  # 10 -> 18 on 2026-09-24, cut to 7 on 2026-09-25, cut again to 4 on 2026-09-27 (3 slots handed back to the general screener) - see num_stocks_to_trade's comment for the bullish-regime-specific evidence behind this
   qqq_trend_lookback_days: 5
 
   # Default stock universe. Watched EVERY DAY no matter what - merged with

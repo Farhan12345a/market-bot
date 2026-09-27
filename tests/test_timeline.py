@@ -263,8 +263,14 @@ if prev.returncode == 0:
         # (ST.DEFAULT_MAX_SUBSCRIPTIONS, test_cap.py). 25 -> 30 on
         # 2026-09-17: Algo Trader Plus removed that boundary entirely.
         # 30 -> 60 on 2026-09-24, scaled alongside num_stocks_to_trade's
-        # 15 -> 27 below - see config.yaml's comment on this key.
-        "stream_max_subscriptions": 60,
+        # 15 -> 27 below - see config.yaml's comment on this key. Reverted
+        # 60 -> 30 on 2026-09-25 alongside the universe shrink (a different
+        # session, commit 6a1b59c) after the wider universe likely
+        # contributed to 09-24's phantom-fill reconcile pattern. Still 30
+        # as of the 2026-09-27 qqq_list_top_n trim - that change only moves
+        # slots between screener and qqq_list, doesn't touch total breadth
+        # enough to need more headroom.
+        "stream_max_subscriptions": 30,
         # -0.5 -> -0.7 on 2026-09-03. Exit-side (see CLAUDE.md's "NOT an entry
         # change" list), so not subject to the one-variable-at-a-time rule
         # below, but still recorded here rather than silently dropped from
@@ -278,8 +284,13 @@ if prev.returncode == 0:
         # below for the historical record) -> 27 on 2026-09-24, on explicit
         # user request, scaled alongside qqq_list_top_n and
         # earnings_list_top_n (not tracked in this timeline) - see
-        # config.yaml's comment on this key. Tier 5.
-        "num_stocks_to_trade": 27,
+        # config.yaml's comment on this key. Tier 5. Reverted 27 -> 18 on
+        # 2026-09-25 (different session, commit 6a1b59c) after two losing
+        # sessions. Moved again 18 -> 21 on 2026-09-27, on explicit user
+        # request, handing 3 slots from qqq_list_top_n (7 -> 4) back to the
+        # general screener - see config.yaml's comment for the bullish-
+        # regime-specific evidence behind this split.
+        "num_stocks_to_trade": 21,
     }
     for k, want in changed.items():
         check(f"{k} deliberately changed to {want}", t.get(k) == want,
