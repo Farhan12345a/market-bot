@@ -352,6 +352,57 @@ that we are tracking which is in the primary long taking window."
 - Options 2 (inverse ETF long) and 3 (breadth as an entry condition) were not
   pursued - option 1 was the direction chosen.
 
+**2026-09-28 — first live day, two bugs found, NOT YET FIXED:**
+
+Net +$225.02, 18 positions/58 tranches, 14W/4L, all short (regime was bearish
+09:34-13:05 ET, so the mutual-exclusion rule correctly kept longs off all
+day). Full breakdown given to the user in conversation and via the daily
+chart artifact. Two real problems surfaced:
+
+1. **Entry-retry cancel race creates untracked, double-filled positions.**
+   `retry_unfilled_entries` (executor.py ~line 1037) cancels the original
+   marketable-limit order and immediately submits a forced wide-limit retry
+   without confirming the cancel actually landed before the original could
+   fill. On 15 of today's ~22 short entries (COIN, MRNA, MXL, RKLB, RMBS,
+   VIAV, VICR, VKTX, ALAB, DDOG, BE, GRAL, P, QCOM, AVGO) this raced: the
+   "cancelled" original order filled anyway, on top of the retry, leaving a
+   same-size second position the strategy layer never tracked at all - no
+   stop, no trailing, no breakeven, nothing watching it - until the periodic
+   `reconcile_against_broker` found it (sometimes 5+ minutes later) and
+   closed it via `ORPHAN_RECONCILE` at whatever price was showing. Confirmed
+   from service-log.txt: e.g. COIN entered 18 short at 09:35:40, retry fired
+   at 09:35:52 ("cancelled working order c3eaaedf (0/18 filled)"), the
+   strategy's own tracked 18 shares fully exited normally by 09:38:05, and
+   RECONCILE at 09:40:28 still found the broker holding **-36** (double) with
+   the bot "not tracking it" - closed at 09:45:33, -$102.21. These 15
+   ORPHAN_RECONCILE exits netted **-$155.58** against the day's +$225.02 - the
+   day was profitable in spite of this, not because it wasn't happening. This
+   is a structural risk-management gap (positions with zero live stop-loss
+   for minutes at a time), not a P&L curiosity - worth fixing before scaling
+   short size or count. Likely fix: confirm the cancel via order status (or
+   poll broker qty back to 0) before submitting the retry, not just trust the
+   cancel call's return value.
+2. **`trade_paths.csv`'s `gain_pct` is not direction-aware.** main.py's
+   per-poll path sample (~line 3359) computes `(price-entry)/entry`
+   unconditionally - correct for longs, inverted for shorts. Doesn't affect
+   real trading (actual exit P&L is computed correctly elsewhere via
+   `TradeManager.direction`), but it corrupted the daily chart artifact's
+   per-position path line for every short today. Worked around in the
+   chart-build script (`daily_viz/build_data.py`, flips sign when
+   `side=="short"`) rather than the live bot, since it's a reporting-only
+   field with no trading-decision consequence - but the source column itself
+   is still wrong and will bite any other tool that reads `trade_paths.csv`
+   assuming it's already P&L-signed.
+
+Also separately noticed: `max_daily_entries` (50) is ONE counter shared by
+opening burst + normal longs + shorts, charged at order **submission**, not
+fill. Today it capped out at 09:45:45 ET - 28 of the 50 slots went to
+opening-burst/rapid-increase entries that never filled at all. Not a bug
+(matches its own doc comment), but worth knowing: on a day where fills are
+slow, most of the daily entry budget can be spent on orders that never become
+positions, starving the rest of the session of slots that would have gone to
+real trades.
+
 ## 0e. Limit orders for streamed symbols only - INVESTIGATE, do not assume
 
 Proposed 2026-08-25: use LIMIT buys for the ~14 streamed symbols (where the
