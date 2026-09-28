@@ -764,18 +764,58 @@ class EmailNotifier:
         if not sh:
             return ""
 
-        total = sum(t.get("pl", 0) or 0 for t in sh)
-        wins = [t for t in sh if (t.get("pl", 0) or 0) > 0]
-        losses = [t for t in sh if (t.get("pl", 0) or 0) < 0]
-        wr = (len(wins) / len(sh) * 100) if sh else 0
-        pl_color = "#10b981" if total >= 0 else "#ef4444"
-
         def pct(t):
             v = t.get("pl_pct")
             return f"{v:+.2f}%" if isinstance(v, (int, float)) else "N/A"
 
-        window_labels = {"primary": "primary window", "extended": "extended hours",
-                         "opening_burst": "opening burst"}
+        def stat_block(label_html, group, empty_note):
+            """One of the two time-window sub-summaries - explicit user
+            request, 2026-09-28: "I want two categories for the shorting.
+            First category will be from 9:30 to 10:15... second category
+            will be from 10:15 to the end of the day." Each gets its own
+            P&L, trade count, and win rate - a reader should never have to
+            do that arithmetic by hand from the combined table."""
+            if not group:
+                return (
+                    '<div style="background:var(--surface-alt,#f5f3ff);border:1px solid '
+                    '#ddd6fe;border-radius:8px;padding:10px 14px;flex:1;min-width:220px;">'
+                    f'<div style="font-size:12px;font-weight:600;color:#5b21b6;'
+                    f'text-transform:uppercase;letter-spacing:.03em;">{label_html}</div>'
+                    f'<div style="font-size:13px;color:#6b7280;margin-top:6px;">{empty_note}</div>'
+                    '</div>'
+                )
+            gtotal = sum(t.get("pl", 0) or 0 for t in group)
+            gwins = [t for t in group if (t.get("pl", 0) or 0) > 0]
+            glosses = [t for t in group if (t.get("pl", 0) or 0) < 0]
+            gwr = (len(gwins) / len(group) * 100) if group else 0
+            gcolor = "#10b981" if gtotal >= 0 else "#ef4444"
+            return (
+                '<div style="background:#fff;border:1px solid #ddd6fe;border-radius:8px;'
+                'padding:10px 14px;flex:1;min-width:220px;">'
+                f'<div style="font-size:12px;font-weight:600;color:#5b21b6;'
+                f'text-transform:uppercase;letter-spacing:.03em;">{label_html}</div>'
+                f'<div style="font-size:20px;font-weight:700;color:{gcolor};margin-top:4px;">'
+                f'${gtotal:,.2f}</div>'
+                f'<div style="font-size:12.5px;color:#6b7280;margin-top:2px;">'
+                f'{len(group)} trade(s) &middot; {len(gwins)}W / {len(glosses)}L &middot; '
+                f'{gwr:.0f}% win rate</div>'
+                '</div>'
+            )
+
+        # Category 1: 9:30-10:15, the same clock window the primary long
+        # session runs in (entry_window == "primary" - opening_burst is a
+        # separate mechanism that does not currently open shorts at all,
+        # but is included here too on the chance it ever does, since it
+        # also falls inside 9:30-10:15).
+        cat_primary_window = [t for t in sh if t.get("entry_window") in ("primary", "opening_burst")]
+        # Category 2: 10:15 to the close.
+        cat_extended_window = [t for t in sh if t.get("entry_window") == "extended"]
+
+        overall_total = sum(t.get("pl", 0) or 0 for t in sh)
+        overall_color = "#10b981" if overall_total >= 0 else "#ef4444"
+
+        window_labels = {"primary": "9:30-10:15", "extended": "10:15-close",
+                         "opening_burst": "9:30-10:15"}
 
         rows = []
         for t in sorted(sh, key=lambda x: x.get("entry_time") or ""):
@@ -798,21 +838,22 @@ class EmailNotifier:
         return (
             '<h2 style="margin-top:30px;border-bottom:2px solid #7c3aed;'
             'padding-bottom:10px;">Short Strategy (Bearish Regime)</h2>'
-            '<div style="background:#f5f3ff;border-left:4px solid #7c3aed;'
-            'padding:12px 15px;border-radius:8px;margin-bottom:14px;">'
-            f'<div style="font-size:22px;font-weight:700;color:{pl_color};">'
-            f'${total:,.2f}</div>'
-            f'<div style="font-size:13px;color:#5b21b6;margin-top:4px;">'
-            f'{len(sh)} trade(s) &middot; {len(wins)}W / {len(losses)}L &middot; '
-            f'{wr:.0f}% win rate</div>'
-            '<div style="font-size:11px;color:#4c1d95;margin-top:6px;">'
+            '<div style="font-size:11px;color:#4c1d95;margin-bottom:10px;">'
             'A mirror of the long side\'s entry/exit logic, only taken when '
             'the regime reads BEARISH (never alongside a long entry in the '
             'same regime window - see regime_sizing/short_strategy\'s hard '
             'mutual exclusion). Reported separately and never summed with '
             'the primary window\'s own number, per standing instruction.'
             '</div>'
-            '</div>'
+            f'<div style="font-size:15px;font-weight:600;color:{overall_color};'
+            f'margin-bottom:10px;">All shorts combined: ${overall_total:,.2f} '
+            f'({len(sh)} trade(s))</div>'
+            '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;">'
+            + stat_block("9:30 - 10:15 (primary window hours)", cat_primary_window,
+                        "No shorts taken in this window today.")
+            + stat_block("10:15 - close (extended hours)", cat_extended_window,
+                        "No shorts taken in this window today.")
+            + '</div>'
             '<table class="trades-table"><thead><tr>'
             '<th>Symbol</th><th>Entry</th><th>Exit</th><th>Entry $</th><th>Exit $</th>'
             '<th>Qty</th><th>P&L</th><th>P&L %</th><th>Window</th><th>Exit Reason</th>'

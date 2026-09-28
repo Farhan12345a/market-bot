@@ -98,18 +98,44 @@ check("old trades with no entry_window key at all are correctly treated as "
       n._extended_hours_html([{"symbol": "OLD", "pl": 5}]) == "")
 
 print("\n=== D2. SHORT STRATEGY REPORT SECTION ===")
-html_sh = n._short_strategy_html(trades)
+# A second short, tagged "primary" (9:30-10:15), added alongside the
+# existing "extended" TSLA short so BOTH of the requested categories -
+# explicit user instruction, 2026-09-28: "I want two categories for the
+# shorting. First category will be from 9:30 to 10:15... second category
+# will be from 10:15 to the end of the day" - actually get exercised.
+trades_2cat = trades + [
+    {"symbol": "AMD", "entry_window": "primary", "entry_time": "2026-09-27T13:40:00",
+     "exit_time": "2026-09-27T13:50:00", "entry_price": 150.0, "exit_price": 148.5,
+     "qty": 30, "pl": 45.0, "pl_pct": 1.0, "exit_reason": "TAKE_PROFIT_1%", "side": "short"},
+]
+html_sh = n._short_strategy_html(trades_2cat)
 check("section renders when short trades exist", bool(html_sh))
-check("total P&L is ONLY the short trade ($-35.00)", "$-35.00" in html_sh, html_sh[:400])
+check("the OVERALL combined total is both shorts together ($10.00 = 45 - 35)",
+      "$10.00" in html_sh, html_sh[:600])
 check("the long trades are excluded from this section, regardless of window",
       "AAPL" not in html_sh and "MSFT" not in html_sh and "NFLX" not in html_sh)
-check("the short IS shown", "TSLA" in html_sh)
+check("both shorts ARE shown", "TSLA" in html_sh and "AMD" in html_sh)
 check("its window is labeled on the row, so a short from any window is "
-      "still traceable", "extended hours" in html_sh)
+      "still traceable", "10:15-close" in html_sh and "9:30-10:15" in html_sh)
 check("it never claims to be summed with the primary window",
       "never summed" in html_sh.lower())
 check("mentions the mutual-exclusion guarantee",
       "never" in html_sh.lower() and "same regime window" in html_sh.lower())
+
+check("CATEGORY 1 (9:30-10:15) shows AMD's own P&L ($45.00), not the combined total",
+      "$45.00" in html_sh)
+check("CATEGORY 2 (10:15-close) shows TSLA's own P&L ($-35.00), not the combined total",
+      "$-35.00" in html_sh)
+check("both category labels are present as their own headers",
+      "primary window hours" in html_sh and "extended hours" in html_sh)
+
+# A day with shorts in only ONE window - the other category must say so
+# plainly rather than silently disappearing or showing a stale number.
+one_cat = [t for t in trades_2cat if t.get("symbol") == "AMD"]
+html_one = n._short_strategy_html(one_cat)
+check("a category with nothing in it says so explicitly rather than "
+      "vanishing", "No shorts taken in this window today." in html_one)
+
 check("no short trades -> no section at all",
       n._short_strategy_html([{"symbol": "X", "side": "long", "pl": 1}]) == "")
 check("empty input -> no section", n._short_strategy_html([]) == "")
