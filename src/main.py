@@ -3129,6 +3129,22 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     # how many extended-hours entries actually happened, the number the user
     # asked to keep watching after the 2026-09-29 rate-cap/ranking changes.
     extended_entries_today = 0
+    # A colored 9:30-16:00 strip for the email report (email_notifier's
+    # _regime_timeline_html), added 2026-09-29 on explicit user request - one
+    # row per CONFIRMED regime transition (not one per poll; see the write
+    # below, gated on the label actually changing), so a reader can see when
+    # the tape favored longs vs shorts without reading the log. Reset to
+    # empty and stamped with TODAY's date immediately, so a report built
+    # before the first regime read (or on a day regime_sizing never fires)
+    # renders nothing rather than showing yesterday's stale timeline.
+    regime_timeline = []
+    regime_timeline_last_label = "__unset__"
+    try:
+        import json as _json
+        with open("logs/regime_timeline.json", "w") as _f:
+            _json.dump({"date": datetime.now(et).strftime("%Y-%m-%d"), "events": regime_timeline}, _f)
+    except Exception as e:
+        logger.debug(f"regime timeline reset skipped: {e}")
     poll_state = {"last": None}   # remembers the interval, to log transitions only
     # Session VWAP per symbol, accumulated from bars the loop already reads.
     # symbol -> [sum(typical_price * volume), sum(volume)]. Costs nothing extra:
@@ -3893,6 +3909,22 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             # widens it back once zeroed.
             if executor.regime_size_multiplier > 0:
                 executor.short_regime_size_multiplier = 0.0
+
+            # REGIME TIMELINE, for the email report's colored 9:30-16:00
+            # strip (email_notifier._regime_timeline_html). One row per
+            # CONFIRMED transition, not per poll - _label only changes here
+            # once _regime_multiplier's own hysteresis has already decided,
+            # so this file never shows a flip the report reader could not
+            # also see reflected in what actually traded.
+            if _label is not None and _label != regime_timeline_last_label:
+                regime_timeline_last_label = _label
+                regime_timeline.append({"time": now.strftime("%H:%M:%S"), "label": _label})
+                try:
+                    import json as _json
+                    with open("logs/regime_timeline.json", "w") as _f:
+                        _json.dump({"date": now.strftime("%Y-%m-%d"), "events": regime_timeline}, _f)
+                except Exception as e:
+                    logger.debug(f"regime timeline write skipped: {e}")
 
         # Sector scoreboard, logged with the breadth check and again at the halt
         # decision. sector_strength already feeds the signal journal per signal

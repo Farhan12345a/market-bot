@@ -197,9 +197,10 @@ class EmailNotifier:
             # Same primary-only filter as the HTML headline (see
             # _generate_html_summary) - the push notification's P&L must
             # agree with the report's, or the two disagree about "how did
-            # today go" for no reason a reader could see.
-            closed = [t for t in all_closed
-                     if t.get("side") != "short" and t.get("entry_window") != "extended"]
+            # today go" for no reason a reader could see. As of 2026-09-29
+            # this includes primary-window shorts, same as the headline -
+            # only entry_window == "extended" is still excluded.
+            closed = [t for t in all_closed if t.get("entry_window") != "extended"]
             pl = sum(float(t.get("pl") or 0) for t in closed)
             wins = sum(1 for t in closed if float(t.get("pl") or 0) > 0)
             n = len(closed)
@@ -224,17 +225,24 @@ class EmailNotifier:
             if tp:
                 lines.append(f"{tp} take-profit scale-out(s) fired")
 
-            # Never silently hidden, just never blended into the figure
-            # above - see the full report for each one's own section.
-            short_closed = [t for t in all_closed if t.get("side") == "short"]
-            if short_closed:
-                short_pl = sum(float(t.get("pl") or 0) for t in short_closed)
-                lines.append(f"Short strategy (separate): ${short_pl:+,.2f} on {len(short_closed)} trade(s)")
-            ext_closed = [t for t in all_closed
-                         if t.get("side") != "short" and t.get("entry_window") == "extended"]
+            # Primary-window shorts are already inside `pl` above (see the
+            # filter comment) - break them out here too so the split is
+            # visible without a separate email. Only EXTENDED-hours trades
+            # (either side) are still genuinely excluded from `pl`, so only
+            # those get the "(separate)" framing.
+            short_in_pl = [t for t in closed if t.get("side") == "short"]
+            if short_in_pl:
+                short_pl = sum(float(t.get("pl") or 0) for t in short_in_pl)
+                lines.append(f"Of which, shorts: ${short_pl:+,.2f} on {len(short_in_pl)} trade(s)")
+            ext_closed = [t for t in all_closed if t.get("entry_window") == "extended"]
             if ext_closed:
                 ext_pl = sum(float(t.get("pl") or 0) for t in ext_closed)
-                lines.append(f"Extended hours (separate): ${ext_pl:+,.2f} on {len(ext_closed)} trade(s)")
+                ext_shorts = sum(1 for t in ext_closed if t.get("side") == "short")
+                lines.append(
+                    f"Extended hours (separate, NOT in P&L above): "
+                    f"${ext_pl:+,.2f} on {len(ext_closed)} trade(s), "
+                    f"{ext_shorts} short/{len(ext_closed) - ext_shorts} long"
+                )
 
             if open_positions:
                 unreal = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
@@ -664,6 +672,86 @@ class EmailNotifier:
             '</div>'
         )
 
+    def _regime_timeline_html(self, timeline_file="logs/regime_timeline.json"):
+        """
+        A colored 09:30-16:00 strip showing which regime (bullish/bearish/
+        neutral/choppy) was in force through the session - explicit user
+        request, 2026-09-29, to see at a glance when the tape favored longs
+        vs shorts without reading the log.
+
+        Reads timeline_file, written by run_trading_day every time the
+        CONFIRMED regime label actually changes (not every poll - see
+        main.py's regime_timeline list and _regime_multiplier's hysteresis).
+        A table of proportionally-widthed <td> cells, not CSS gradients or
+        flex - the one horizontal-bar technique that renders consistently
+        across email clients including Outlook.
+
+        Returns "" when the file is missing, unreadable, empty, or stamped
+        for a different day (stale data left over from a prior session) -
+        same never-guess-from-old-data convention every optional section
+        here uses.
+        """
+        try:
+            with open(timeline_file) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return ""
+        events = data.get("events") or []
+        if not events or data.get("date") != datetime.now().strftime("%Y-%m-%d"):
+            return ""
+
+        colors = {"bullish": "#10b981", "bearish": "#ef4444",
+                  "neutral": "#9ca3af", "choppy": "#f59e0b"}
+
+        day_start = datetime.strptime("09:30:00", "%H:%M:%S")
+        day_end = datetime.strptime("16:00:00", "%H:%M:%S")
+        total_minutes = (day_end - day_start).total_seconds() / 60
+
+        cells = []
+        # Anything before the FIRST recorded label (typically the first few
+        # minutes before check_time) has no opinion yet - a neutral gray gap
+        # rather than a guess.
+        first_t = datetime.strptime(events[0]["time"], "%H:%M:%S")
+        lead_pct = max(0.0, (first_t - day_start).total_seconds() / 60 / total_minutes * 100)
+        if lead_pct > 0.05:
+            cells.append((lead_pct, "#e5e7eb", f"9:30 - {first_t:%H:%M}: no read yet"))
+
+        for i, ev in enumerate(events):
+            t0 = max(datetime.strptime(ev["time"], "%H:%M:%S"), day_start)
+            t1 = (datetime.strptime(events[i + 1]["time"], "%H:%M:%S")
+                  if i + 1 < len(events) else day_end)
+            t1 = min(t1, day_end)
+            if t1 <= t0:
+                continue
+            width_pct = (t1 - t0).total_seconds() / 60 / total_minutes * 100
+            label = ev.get("label", "")
+            color = colors.get(label, "#e5e7eb")
+            cells.append((width_pct, color, f"{t0:%H:%M} ET: {label.upper()}"))
+
+        bar_cells = "".join(
+            f'<td style="width:{w:.2f}%;background:{c};" title="{t}"></td>'
+            for w, c, t in cells
+        )
+        legend = "".join(
+            f'<span style="display:inline-block;margin-right:14px;font-size:11px;'
+            f'color:#374151;"><span style="display:inline-block;width:10px;height:10px;'
+            f'background:{c};border-radius:2px;margin-right:4px;"></span>{l.upper()}</span>'
+            for l, c in colors.items()
+        )
+
+        return (
+            '<div style="margin-bottom:20px;">'
+            '<h3 style="margin:0 0 8px 0;font-size:13px;color:#6b7280;'
+            'text-transform:uppercase;letter-spacing:.04em;">Regime Timeline '
+            '(9:30 - 16:00)</h3>'
+            '<table style="width:100%;border-collapse:collapse;height:22px;" '
+            f'cellpadding="0" cellspacing="0"><tr>{bar_cells}</tr></table>'
+            '<div style="display:flex;justify-content:space-between;font-size:10px;'
+            'color:#9ca3af;margin-top:2px;"><span>9:30</span><span>16:00</span></div>'
+            f'<div style="margin-top:8px;">{legend}</div>'
+            '</div>'
+        )
+
     def _extended_hours_html(self, trades):
         """
         Extended-hours measurement (trading.extended_hours_experiment),
@@ -675,18 +763,19 @@ class EmailNotifier:
         section is simply empty (returns "") on any older trade and on a
         day where extended_hours_experiment is off.
 
-        Deliberately never combined with the primary window's own P&L
-        figure above - that was the explicit point of tagging trades by
-        window in the first place, mirroring how the opening-move
-        experiment is already reported in its own separate section rather
-        than folded into the session total.
+        Shows BOTH longs and shorts together (as of 2026-09-29 - previously
+        this section was long-only and redirected any extended-hours short
+        to _short_strategy_html instead). The same short trades still ALSO
+        appear in _short_strategy_html's own extended-hours category - that
+        overlap is deliberate, two different lenses on the same trades (by
+        window here, by side there), not a double-count of any total: this
+        section's own total below is display-only and, like every extended-
+        hours trade regardless of side, is NEVER folded into the headline
+        Total P&L above. Explicit user instruction, 2026-09-29: "nothing at
+        all is going to be included in the total P&L from the extended time
+        period."
         """
-        # side != "short" excluded here too - a short traded during the
-        # extended-hours window belongs in the Short Strategy section
-        # instead (see _short_strategy_html), so each section stays a
-        # single, unambiguous axis (window OR side, never both at once).
-        eh = [t for t in (trades or [])
-             if (t.get("entry_window") or "") == "extended" and t.get("side") != "short"]
+        eh = [t for t in (trades or []) if (t.get("entry_window") or "") == "extended"]
         if not eh:
             return ""
 
@@ -704,8 +793,10 @@ class EmailNotifier:
         for t in sorted(eh, key=lambda x: x.get("entry_time") or ""):
             pl = t.get("pl", 0) or 0
             c = "#10b981" if pl >= 0 else "#ef4444"
+            side_label = "SHORT" if t.get("side") == "short" else "LONG"
             rows.append(
                 f"<tr><td><strong>{t.get('symbol','?')}</strong></td>"
+                f"<td>{side_label}</td>"
                 f"<td>{(t.get('entry_time') or '')[11:19]}</td>"
                 f"<td>{(t.get('exit_time') or '')[11:19]}</td>"
                 f"<td>${t.get('entry_price', 0):.2f}</td>"
@@ -725,15 +816,15 @@ class EmailNotifier:
             f'${total:,.2f}</div>'
             f'<div style="font-size:13px;color:#0e7490;margin-top:4px;">'
             f'{len(eh)} trade(s) &middot; {len(wins)}W / {len(losses)}L &middot; '
-            f'{wr:.0f}% win rate</div>'
+            f'{wr:.0f}% win rate &middot; longs and shorts both</div>'
             '<div style="font-size:11px;color:#155e75;margin-top:6px;">'
-            'Same signal, sizing and exit rules as the primary 09:33-10:15 '
-            'window - just left running the rest of the day. Reported '
-            'separately and never summed with the primary window\'s own '
-            'number, per standing instruction.</div>'
+            'Same signal, sizing and exit rules as the primary window, '
+            'whichever side the regime favored, just left running the rest '
+            'of the day. Reported separately and NEVER summed into the '
+            'Total P&L above, per standing instruction.</div>'
             '</div>'
             '<table class="trades-table"><thead><tr>'
-            '<th>Symbol</th><th>Entry</th><th>Exit</th><th>Entry $</th><th>Exit $</th>'
+            '<th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Entry $</th><th>Exit $</th>'
             '<th>Qty</th><th>P&L</th><th>P&L %</th><th>Exit Reason</th>'
             '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
         )
@@ -744,16 +835,22 @@ class EmailNotifier:
         2026-09-27. Filtered on side == "short" - ANY window (primary,
         extended, or opening_burst, though the opening burst does not
         currently open shorts at all) - so this is the single home for
-        every short trade regardless of when it happened, mirroring how
-        _extended_hours_html is the single home for every trade in that
-        window regardless of side. The two sections are mutually exclusive
-        by construction (see the exclusion in each one's own filter).
+        every short trade regardless of when it happened, a side-specific
+        breakdown alongside _extended_hours_html's window-specific one
+        (the two now deliberately overlap on extended-hours shorts - see
+        that method's docstring for why that overlap is fine).
 
-        Deliberately never combined with the primary (long) window's own
-        P&L - explicit user instruction, 2026-09-27, same standing
-        instruction that keeps the extended-hours experiment separate:
-        "like the extended hour functionality we added, lets keep it as
-        seperate... lets not mix it in the primary P&L."
+        STATUS CHANGED 2026-09-29. Originally shorts were entirely excluded
+        from the primary P&L ("lets not mix it in the primary P&L", 2026-
+        09-27) - the user revisited that once real short P&L existed and
+        asked for PRIMARY-WINDOW shorts (category 1 below) to be folded
+        into the headline Total P&L above, same as longs, with this section
+        kept as a dedicated detail view rather than the only place the
+        money shows up. EXTENDED-HOURS shorts (category 2) are NOT part of
+        that reversal - they stay excluded from the headline exactly as
+        before, same as every other extended-hours trade regardless of
+        side: "nothing at all is going to be included in the total P&L
+        from the extended time period."
 
         Returns "" when no short trades exist (the mechanism took nothing,
         or the account still has shorting blocked by Alpaca's own
@@ -842,16 +939,18 @@ class EmailNotifier:
             'A mirror of the long side\'s entry/exit logic, only taken when '
             'the regime reads BEARISH (never alongside a long entry in the '
             'same regime window - see regime_sizing/short_strategy\'s hard '
-            'mutual exclusion). Reported separately and never summed with '
-            'the primary window\'s own number, per standing instruction.'
+            'mutual exclusion). The 9:30-10:15 category below is already '
+            'included in the Total P&amp;L above - shown here as a side-'
+            'specific breakdown. The extended-hours category is NOT '
+            'included in the Total P&amp;L, shown here for reference only.'
             '</div>'
             f'<div style="font-size:15px;font-weight:600;color:{overall_color};'
             f'margin-bottom:10px;">All shorts combined: ${overall_total:,.2f} '
             f'({len(sh)} trade(s))</div>'
             '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;">'
-            + stat_block("9:30 - 10:15 (primary window hours)", cat_primary_window,
+            + stat_block("9:30 - 10:15 (in Total P&amp;L above)", cat_primary_window,
                         "No shorts taken in this window today.")
-            + stat_block("10:15 - close (extended hours)", cat_extended_window,
+            + stat_block("10:15 - close (NOT in Total P&amp;L)", cat_extended_window,
                         "No shorts taken in this window today.")
             + '</div>'
             '<table class="trades-table"><thead><tr>'
@@ -978,23 +1077,45 @@ class EmailNotifier:
                                open_positions=None):
         """Generate the HTML report: closed trades, and any still-open positions."""
         open_positions = open_positions or []
-        # The headline Total P&L/win-rate/trade-count is the PRIMARY,
-        # long-side number this bot has always been measured on -
-        # deliberately excluding both the short strategy (side=="short")
-        # and the extended-hours experiment (entry_window=="extended"),
-        # each of which gets its own separate section below and must never
-        # be silently folded into this figure. Explicit user instruction,
-        # 2026-09-27, restated for both features: "not accounted for the
-        # actual P&L that we are tracking, which is in the primary long
-        # taking window." The opening-move experiment is NOT excluded here -
-        # it always has been part of this total, unlike the other two, and
-        # nothing has asked for that to change.
-        primary_trades = [t for t in trades
-                          if t.get("side") != "short" and t.get("entry_window") != "extended"]
+        # The headline Total P&L/win-rate/trade-count is everything from the
+        # PRIMARY trading window (09:30-10:15, or opening_burst) - LONGS AND
+        # SHORTS BOTH, as of 2026-09-29. This is a reversal of the original
+        # 2026-09-27 instruction that excluded shorts entirely: the user
+        # revisited it once real short P&L existed and asked for shorts to
+        # be folded into the actual total, same as longs, with a dedicated
+        # breakdown section (_short_strategy_html) alongside for detail -
+        # not instead of being in the headline.
+        #
+        # entry_window == "extended" is STILL excluded, unconditionally,
+        # regardless of side. Explicit user instruction, 2026-09-29: "the
+        # total P&L should only be for 9:30 to 10:15... nothing at all is
+        # going to be included in the total P&L from the extended time
+        # period." That part of the original 2026-09-27 instruction stands.
+        primary_trades = [t for t in trades if t.get("entry_window") != "extended"]
         total_pl = sum(t.get("pl", 0) for t in primary_trades)
         winning_trades = [t for t in primary_trades if t.get("pl", 0) > 0]
         losing_trades = [t for t in primary_trades if t.get("pl", 0) < 0]
         win_rate = (len(winning_trades) / len(primary_trades) * 100) if primary_trades else 0
+
+        # Long/short split of the SAME headline total, at a glance - the
+        # full side-specific detail lives in _short_strategy_html below,
+        # this is just enough to see the mix without scrolling.
+        primary_longs = [t for t in primary_trades if t.get("side") != "short"]
+        primary_shorts = [t for t in primary_trades if t.get("side") == "short"]
+        long_short_split_html = ""
+        if primary_shorts:
+            pl_longs = sum(t.get("pl", 0) for t in primary_longs)
+            pl_shorts = sum(t.get("pl", 0) for t in primary_shorts)
+            lc = "#10b981" if pl_longs >= 0 else "#ef4444"
+            sc = "#10b981" if pl_shorts >= 0 else "#ef4444"
+            long_short_split_html = (
+                '<div style="font-size:12.5px;color:#6b7280;margin:-8px 0 18px 2px;">'
+                f'Of the total above: <strong>longs</strong> '
+                f'<span style="color:{lc};font-weight:600;">${pl_longs:,.2f}</span> '
+                f'({len(primary_longs)}) &middot; <strong>shorts</strong> '
+                f'<span style="color:{sc};font-weight:600;">${pl_shorts:,.2f}</span> '
+                f'({len(primary_shorts)}) - full short breakdown below.</div>'
+            )
 
         # Color coding
         pl_color = "#10b981" if total_pl >= 0 else "#ef4444"
@@ -1006,6 +1127,7 @@ class EmailNotifier:
         performance_timeline_html = (
             render_performance_timeline_html() if label != "Midday Status" else ""
         )
+        regime_timeline_html = self._regime_timeline_html()
         after_exit_ratio_html = self._after_exit_ratio_html(trades)
         run_context_html = self._run_context_html()
         replay_progress_html = self._replay_progress_html()
@@ -1079,6 +1201,8 @@ class EmailNotifier:
                         <div class="value">{len(winning_trades)} / {len(losing_trades)}</div>
                     </div>
                 </div>
+                {long_short_split_html}
+                {regime_timeline_html}
                 {performance_timeline_html}
                 {after_exit_ratio_html}
                 {run_context_html}
@@ -1103,6 +1227,7 @@ class EmailNotifier:
                     <thead>
                         <tr>
                             <th>Symbol</th>
+                            <th>Side</th>
                             <th>Entry</th>
                             <th>Entry Method</th>
                             <th>Signal %</th>
@@ -1151,6 +1276,7 @@ class EmailNotifier:
             entry_rsi_str = f"{entry_rsi:.1f}" if isinstance(entry_rsi, (int, float)) else "N/A"
             exit_rsi_str = f"{exit_rsi:.1f}" if isinstance(exit_rsi, (int, float)) else "N/A"
             stop_loss_str = "Yes" if trade.get("stop_loss_used") else "No"
+            side_label = "SHORT" if trade.get("side") == "short" else "LONG"
 
             pl_class = "profit" if pl >= 0 else "loss"
             pl_sign = "+" if pl >= 0 else ""
@@ -1158,6 +1284,7 @@ class EmailNotifier:
             html += f"""
                         <tr>
                             <td class="symbol">{symbol}</td>
+                            <td>{side_label}</td>
                             <td>${entry_price:.2f}</td>
                             <td><span class="exit-reason">{entry_method}</span></td>
                             <td>{signal_str}</td>

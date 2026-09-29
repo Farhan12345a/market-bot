@@ -69,8 +69,9 @@ trades = [
      "exit_time": "2026-09-27T15:41:00", "entry_price": 230.0, "exit_price": 232.3,
      "qty": 40, "pl": 92.0, "pl_pct": 1.0, "exit_reason": "TAKE_PROFIT_1%", "side": "long"},
     # A SHORT that also happened to trade during the extended-hours window -
-    # this must land in the Short Strategy section, NOT here, so the two
-    # sections stay a single, unambiguous axis each (window vs. side).
+    # as of 2026-09-29 this belongs HERE too (both sides shown together),
+    # AND still separately in the Short Strategy section's own extended
+    # category - the two deliberately overlap now, see each docstring.
     {"symbol": "TSLA", "entry_window": "extended", "entry_time": "2026-09-27T15:25:00",
      "exit_time": "2026-09-27T15:30:00", "entry_price": 250.0, "exit_price": 248.25,
      "qty": 20, "pl": -35.0, "pl_pct": -0.7, "exit_reason": "FIRST_EXIT_-0.7%", "side": "short"},
@@ -80,17 +81,17 @@ trades = [
 ]
 html = n._extended_hours_html(trades)
 check("section renders when extended-hours trades exist", bool(html))
-check("total P&L is ONLY the extended LONG trade ($92.00) - the short is excluded",
-      "$92.00" in html, html[:400])
+check("total P&L is BOTH extended trades combined ($57.00 = 92 - 35), long "
+      "and short together", "$57.00" in html, html[:400])
 check("the primary-window and opening-burst trades are excluded from this section",
       "MSFT" not in html and "NFLX" not in html)
-check("the extended-window SHORT is also excluded - it belongs in the Short "
-      "Strategy section instead", "TSLA" not in html, html)
-check("only the one extended long trade is shown", "AAPL" in html)
-check("it never claims to be summed with the primary window",
+check("the extended-window SHORT is now INCLUDED here too, tagged by side",
+      "TSLA" in html and "SHORT" in html, html)
+check("the extended-window LONG is shown, tagged by side",
+      "AAPL" in html and "LONG" in html)
+check("it never claims to be summed into the Total P&L above",
       "never summed" in html.lower())
-check("no extended-hours (long) trades -> no section at all (a quiet day, "
-      "the feature is off, or every extended trade that day was a short)",
+check("no extended-hours trades at all -> no section",
       n._extended_hours_html([{"symbol": "X", "entry_window": "primary", "pl": 1}]) == "")
 check("empty input -> no section", n._extended_hours_html([]) == "")
 check("old trades with no entry_window key at all are correctly treated as "
@@ -117,8 +118,10 @@ check("the long trades are excluded from this section, regardless of window",
 check("both shorts ARE shown", "TSLA" in html_sh and "AMD" in html_sh)
 check("its window is labeled on the row, so a short from any window is "
       "still traceable", "10:15-close" in html_sh and "9:30-10:15" in html_sh)
-check("it never claims to be summed with the primary window",
-      "never summed" in html_sh.lower())
+check("says plainly which category is in the headline and which is not, "
+      "now that the two categories are no longer treated the same way",
+      "already included in the Total P&amp;L above" in html_sh
+      and "NOT included in the Total P&amp;L" in html_sh)
 check("mentions the mutual-exclusion guarantee",
       "never" in html_sh.lower() and "same regime window" in html_sh.lower())
 
@@ -126,8 +129,9 @@ check("CATEGORY 1 (9:30-10:15) shows AMD's own P&L ($45.00), not the combined to
       "$45.00" in html_sh)
 check("CATEGORY 2 (10:15-close) shows TSLA's own P&L ($-35.00), not the combined total",
       "$-35.00" in html_sh)
-check("both category labels are present as their own headers",
-      "primary window hours" in html_sh and "extended hours" in html_sh)
+check("both category labels are present as their own headers, marked with "
+      "whether they're in the headline total",
+      "in Total P&amp;L above" in html_sh and "NOT in Total P&amp;L" in html_sh)
 
 # A day with shorts in only ONE window - the other category must say so
 # plainly rather than silently disappearing or showing a stale number.
@@ -140,22 +144,45 @@ check("no short trades -> no section at all",
       n._short_strategy_html([{"symbol": "X", "side": "long", "pl": 1}]) == "")
 check("empty input -> no section", n._short_strategy_html([]) == "")
 
-print("\n=== D3. THE HEADLINE EXCLUDES BOTH SHORTS AND EXTENDED-HOURS TRADES ===")
+print("\n=== D3. THE HEADLINE INCLUDES PRIMARY SHORTS, EXCLUDES EXTENDED (2026-09-29) ===")
 esrc = open(repo_file("src", "notifications", "email_notifier.py")).read()
-check("primary_trades filters out side==short AND entry_window==extended "
-      "before the headline Total P&L/win-rate/trade-count are computed",
-      'if t.get("side") != "short" and t.get("entry_window") != "extended"' in esrc)
+check("primary_trades filters OUT entry_window==extended only - side is no "
+      "longer part of this filter, so primary-window shorts now count "
+      "toward the headline Total P&L/win-rate/trade-count, same as longs",
+      'primary_trades = [t for t in trades if t.get("entry_window") != "extended"]'
+      in esrc)
+check("...and does NOT still exclude by side anywhere in that filter line",
+      'side' not in esrc.split('primary_trades = [t for t in trades')[1][:5])
 check("opening_burst trades are explicitly NOT excluded from the headline - "
-      "that has always been part of the tracked total, only the two NEW "
-      "features (shorts, extended hours) are pulled out",
-      "The opening-move experiment is NOT excluded here" in esrc)
+      "that has always been part of the tracked total",
+      "The opening-move experiment" in esrc)
 check("the push-notification summary (_plain_text_summary) applies the "
       "SAME filter, so the phone alert and the report never disagree",
-      'if t.get("side") != "short" and t.get("entry_window") != "extended"'
-      in esrc.split("def _plain_text_summary")[1][:800])
-check("...and still mentions short/extended P&L separately rather than "
-      "hiding it from the push notification entirely",
-      "Short strategy (separate)" in esrc and "Extended hours (separate)" in esrc)
+      'closed = [t for t in all_closed if t.get("entry_window") != "extended"]'
+      in esrc.split("def _plain_text_summary")[1][:1200])
+check("...and still breaks out short/extended P&L separately for detail, "
+      "rather than hiding the split from the push notification entirely",
+      "Of which, shorts" in esrc and "Extended hours (separate" in esrc)
+
+n.run_context = {}   # _plain_text_summary reads self.run_context; __new__ skips __init__'s default
+trades_headline = [
+    {"symbol": "MSFT", "entry_window": "primary", "side": "long", "pl": 20.0,
+     "exit_price": 1, "entry_price": 1},
+    {"symbol": "AMD", "entry_window": "primary", "side": "short", "pl": 45.0,
+     "exit_price": 1, "entry_price": 1},
+    {"symbol": "TSLA", "entry_window": "extended", "side": "short", "pl": -35.0,
+     "exit_price": 1, "entry_price": 1},
+]
+check("end-to-end: the plain-text P&L is longs+shorts in primary ($65), "
+      "excluding the extended short entirely",
+      "P&L $+65.00" in n._plain_text_summary(trades_headline),
+      n._plain_text_summary(trades_headline))
+check("...and still surfaces the short-within-primary split",
+      "Of which, shorts: $+45.00" in n._plain_text_summary(trades_headline))
+check("...and the excluded extended short is broken out separately, "
+      "explicitly marked as not in the P&L figure above",
+      "Extended hours (separate, NOT in P&L above): $-35.00"
+      in n._plain_text_summary(trades_headline))
 
 print("\n=== E. LIVE CONFIG ===")
 eh = CFG["trading"].get("extended_hours_experiment") or {}
@@ -238,6 +265,75 @@ check("...and the enrichment pass (computing cf_score) still runs BEFORE "
       "computed yet would just be ranking by None for everyone",
       _short_side_src.index('cand["cont"] = _continuation_fields(') <
       _short_side_src.index("short_candidates, _short_rank_note = _rank_burst"))
+
+print("\n=== G. REGIME TIMELINE (2026-09-29) ===")
+# The colored 9:30-16:00 strip in the email report showing which regime was
+# in force when - explicit user request, so a reader can see at a glance
+# when the tape favored longs vs shorts without reading the log.
+check("main.py resets logs/regime_timeline.json at the start of every day, "
+      "stamped with today's date, so a report built before the first "
+      "regime read never shows yesterday's stale timeline",
+      'json.dump({"date": datetime.now(et).strftime("%Y-%m-%d"), "events": regime_timeline}, _f)'
+      in src)
+check("a row is appended (and the file rewritten) only when the label "
+      "actually CHANGES - not every poll, matching _regime_multiplier's "
+      "own hysteresis rather than a second, noisier source of truth",
+      "if _label is not None and _label != regime_timeline_last_label:" in src)
+
+import json, tempfile, os as _os
+
+n2 = EmailNotifier.__new__(EmailNotifier)
+tf = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+try:
+    json.dump({
+        "date": __import__("datetime").datetime.now().strftime("%Y-%m-%d"),
+        "events": [
+            {"time": "09:41:00", "label": "bullish"},
+            {"time": "11:15:00", "label": "bearish"},
+            {"time": "13:02:00", "label": "choppy"},
+        ],
+    }, tf)
+    tf.close()
+    html_rt = n2._regime_timeline_html(timeline_file=tf.name)
+    check("renders a non-empty timeline for today's data", bool(html_rt))
+    check("one colored cell per label, using the SAME colors main.py's own "
+          "log lines imply (green=bullish, red=bearish)",
+          "#10b981" in html_rt and "#ef4444" in html_rt and "#f59e0b" in html_rt)
+    check("a gray lead-in segment covers 9:30 up to the first recorded read "
+          "(09:41) - unknown is shown honestly, not guessed at",
+          "#e5e7eb" in html_rt and "no read yet" in html_rt)
+    check("the legend names all four regime labels",
+          all(w in html_rt.upper() for w in ("BULLISH", "BEARISH", "NEUTRAL", "CHOPPY")))
+    check("segment tooltips carry the actual start time and label, so "
+          "hovering tells a reader exactly when a transition happened",
+          "11:15 ET: BEARISH" in html_rt)
+
+    # Stale-date guard: same file, but dated yesterday.
+    tf2 = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    import datetime as _dt
+    json.dump({"date": (_dt.datetime.now() - _dt.timedelta(days=1)).strftime("%Y-%m-%d"),
+               "events": [{"time": "09:41:00", "label": "bullish"}]}, tf2)
+    tf2.close()
+    check("a timeline stamped for a DIFFERENT day is refused, not shown as "
+          "if it were today's", n2._regime_timeline_html(timeline_file=tf2.name) == "")
+    _os.unlink(tf2.name)
+
+    check("missing file -> no section, not an exception",
+          n2._regime_timeline_html(timeline_file="/tmp/does-not-exist-regime.json") == "")
+
+    tf3 = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    json.dump({"date": __import__("datetime").datetime.now().strftime("%Y-%m-%d"),
+               "events": []}, tf3)
+    tf3.close()
+    check("empty events list -> no section", n2._regime_timeline_html(timeline_file=tf3.name) == "")
+    _os.unlink(tf3.name)
+finally:
+    _os.unlink(tf.name)
+
+check("wired into the assembled report", "regime_timeline_html" in esrc)
+check("shown on every send, not just end-of-day - a partial-day timeline "
+      "is still informative on a midday send, unlike performance_timeline_html",
+      "regime_timeline_html = self._regime_timeline_html()" in esrc)
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

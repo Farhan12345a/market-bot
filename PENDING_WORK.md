@@ -461,6 +461,66 @@ window) will stop new shorts and switch to longs from that point on, still
 inside the same extended-hours bucket. A smaller short count on a flip day
 is regime working correctly, not a rate-cap or quality-filter artifact.
 
+**2026-09-29, same conversation - shorts join the headline P&L:**
+
+Reversal of the original 2026-09-27 instruction. Explicit user request:
+"I want to enable shorts, have it be part of the total P&L... Include it in
+the extended hours as well." Shipped in `email_notifier.py`:
+
+- The headline Total P&L/win-rate/trade-count filter changed from
+  `side != "short" and entry_window != "extended"` to just
+  `entry_window != "extended"` - primary-window shorts (and opening_burst,
+  unchanged) now count in the real total, same as longs. Applied identically
+  in `_generate_html_summary` and `_plain_text_summary` (push notification),
+  so the two never disagree - this was the whole reason the original filter
+  was ever duplicated in two places.
+- **Extended hours is UNCHANGED and still fully excluded from the headline,
+  regardless of side** - explicit user instruction, restated: "nothing at
+  all is going to be included in the total P&L from the extended time
+  period." Only WHAT'S EXCLUDED changed (side dropped from the condition),
+  not the fact that `entry_window == "extended"` is excluded.
+- `_short_strategy_html` kept as a dedicated side-specific breakdown
+  (explicit user request: "a separate section... exactly how you do it for
+  the long trading") - reworded so it no longer claims BOTH its categories
+  are excluded from the headline, since category 1 (9:30-10:15) no longer
+  is. Category 2 (extended) still is.
+- `_extended_hours_html` now shows BOTH longs and shorts together (it used
+  to redirect shorts to the Short Strategy section instead) - a genuine
+  "how did the whole extended window do" glance. This means an extended-
+  hours short now appears in BOTH sections (by window here, by side in
+  Short Strategy) - deliberate, not a double-count of any total, since
+  neither section's own total feeds the headline.
+- Added a `Side` column to the master Closed Trades table and a small
+  longs/shorts split line under the summary grid - needed now that longs
+  and shorts are mixed together in what used to be a longs-only view.
+
+**2026-09-29 - Regime Timeline in the report:**
+
+New section, explicit user request: a colored 9:30-16:00 strip showing
+which regime (bullish/bearish/neutral/choppy) was in force when, so a
+reader can see at a glance when the tape favored longs vs shorts without
+reading the log.
+
+- `main.py`: `regime_timeline` list, appended to (and `logs/regime_timeline.
+  json` rewritten) only when the CONFIRMED label actually changes - not
+  every poll, riding on `_regime_multiplier`'s own hysteresis rather than
+  being a second, noisier source of truth. Reset to empty and stamped with
+  today's date at the start of every `run_trading_day` call, so a report
+  built before the first read (or on a day regime_sizing never fires) shows
+  nothing rather than yesterday's stale timeline.
+- `email_notifier.py`: `_regime_timeline_html` reads that file and renders
+  a table of proportionally-widthed `<td>` cells (not CSS gradients/flex -
+  the one horizontal-bar technique that renders consistently across email
+  clients including Outlook), colored per label, with a gray "no read yet"
+  lead-in for anything before the first recorded transition. Shown on every
+  send (including Midday Status), unlike `performance_timeline_html` -
+  a partial day's regime history is still informative, not confusing.
+- Not yet done, worth considering later: exporting `regime_timeline.json`
+  into `logs/daily/<date>/` alongside the other per-day exports, so a
+  historical day's regime timeline is analyzable after the fact rather than
+  only visible in that day's own report. Small addition to
+  `ops/export-daily-logs.sh` if wanted.
+
 ## 0e. Limit orders for streamed symbols only - INVESTIGATE, do not assume
 
 Proposed 2026-08-25: use LIMIT buys for the ~14 streamed symbols (where the
