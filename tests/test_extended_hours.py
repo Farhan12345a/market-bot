@@ -164,5 +164,80 @@ check("end_time reaches to the close", eh.get("end_time") == "16:00")
 check("entry_window_end (the PRIMARY window) is unchanged at 10:15",
       CFG["trading"]["entry_window_end"] == "10:15")
 
+print("\n=== F. EXTENDED-HOURS PER-HOUR CAP + QUALITY RANKING (2026-09-29) ===")
+# 2026-09-28's max_daily_entries bug (fixed separately, see test_phantom_exit.py
+# 12b-12e and test_timeline.py's changed-settings list) meant extended hours
+# never got a real sample. Once that was fixed, the user asked for a SEPARATE
+# dial scoped to just this window: no daily cap, but a per-hour rate limit,
+# PLUS picking the best-scored candidates first when an hour's slots run
+# scarce - reusing the SAME continuation-score ranking the long side's burst
+# throttle already uses, rather than inventing a new quality gate.
+check("_extended_hourly_due exists and resets on the hour, not the day",
+      "def _extended_hourly_due(state, now):" in src
+      and 'bucket = now.replace(minute=0, second=0, microsecond=0)' in src)
+check("...and resets its own 'already logged the cap' flag on rollover too, "
+      "so the cap-reached message logs once per HOUR, not once ever",
+      'state["cap_logged"] = False' in src)
+
+# Exercise the real function directly. Importing main.py wholesale has heavy
+# top-level side effects elsewhere in this suite's environment, so pull just
+# this pure function out of source and exec it in an isolated namespace -
+# cheap, and it is real behavioural coverage rather than another string match.
+import re as _re
+_m = _re.search(
+    r"def _extended_hourly_due\(state, now\):.*?(?=\n\ndef )", src, _re.S)
+_ns = {}
+exec(compile(_m.group(0), "<_extended_hourly_due>", "exec"), _ns)
+_extended_hourly_due = _ns["_extended_hourly_due"]
+
+import datetime as _dt
+st = {"bucket": None, "count": 3, "cap_logged": True}
+_extended_hourly_due(st, _dt.datetime(2026, 9, 29, 14, 12))
+check("first call this hour adopts the 14:00 bucket and resets count/cap_logged",
+      st == {"bucket": _dt.datetime(2026, 9, 29, 14, 0), "count": 0, "cap_logged": False},
+      st)
+st["count"] = 20
+st["cap_logged"] = True
+_extended_hourly_due(st, _dt.datetime(2026, 9, 29, 14, 47))
+check("still inside the same hour -> state is left alone (not reset mid-hour)",
+      st == {"bucket": _dt.datetime(2026, 9, 29, 14, 0), "count": 20, "cap_logged": True}, st)
+_extended_hourly_due(st, _dt.datetime(2026, 9, 29, 15, 3))
+check("the hour rolls over -> count and cap_logged both reset for the fresh hour",
+      st == {"bucket": _dt.datetime(2026, 9, 29, 15, 0), "count": 0, "cap_logged": False}, st)
+
+check("config carries the new per-hour cap, separate from max_daily_entries",
+      (CFG["trading"].get("extended_hours_experiment") or {}).get("max_entries_per_hour") == 20)
+check("max_daily_entries itself was raised well past the old 50 - it is no "
+      "longer sized for the pre-fix count-every-submission model",
+      CFG["trading"]["max_daily_entries"] >= 200)
+
+check("the extended-hourly cap is checked in BOTH the long burst_candidates "
+      "loop and the short_candidates loop - it must gate whichever side is "
+      "actually active that afternoon, not just one",
+      src.count('skip_reason = "extended_hourly_cap"') >= 2)
+check("hitting the cap logs once per hour, naming the hour and the cap",
+      'Reached the extended-hours per-hour cap' in src)
+check("a filled extended-hours entry increments the SAME cumulative "
+      "day-long counter the day-complete log line reports",
+      "extended_entries_today += 1" in src
+      and "extended_hours_entries={extended_entries_today}" in src)
+check("a phantom-dropped extended-hours entry refunds BOTH the hourly bucket "
+      "and the cumulative day counter, mirroring max_daily_entries' own "
+      "refund exactly - a never-filled order must not count against either",
+      src.count('extended_hourly_state["count"] = max(0, extended_hourly_state["count"] - 1)') >= 2
+      and src.count("extended_entries_today = max(0, extended_entries_today - 1)") >= 2)
+
+check("the short-candidates loop is now ranked best-first by the SAME "
+      "continuation score the long side's burst throttle already uses - "
+      "previously it had NO ranking at all, taking whatever order the "
+      "screener happened to sort in",
+      "short_candidates, _short_rank_note = _rank_burst(config, short_candidates)" in src)
+_short_side_src = src.split("# SHORT-SIDE, requested by the user")[1]
+check("...and the enrichment pass (computing cf_score) still runs BEFORE "
+      "ranking, in its own loop - ranking on a score that has not been "
+      "computed yet would just be ranking by None for everyone",
+      _short_side_src.index('cand["cont"] = _continuation_fields(') <
+      _short_side_src.index("short_candidates, _short_rank_note = _rank_burst"))
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

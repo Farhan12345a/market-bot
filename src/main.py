@@ -2157,6 +2157,18 @@ def _short_exit_config(config):
     return out
 
 
+def _extended_hourly_due(state, now):
+    """Resets the extended-hours per-hour counter (and its own "already
+    logged the cap this hour" flag) when the wall-clock hour rolls over.
+    Mutates state in place; state is
+    {"bucket": ..., "count": ..., "cap_logged": ...}."""
+    bucket = now.replace(minute=0, second=0, microsecond=0)
+    if state.get("bucket") != bucket:
+        state["bucket"] = bucket
+        state["count"] = 0
+        state["cap_logged"] = False
+
+
 def _burst_rank_multifactor(config, measured, market_data, spy_pct, price_history,
                             volume_history, vwap_acc, sector_returns):
     """
@@ -3103,6 +3115,20 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     symbol_open_price = {}  # symbol -> first observed price this window, purely for the log message - only tracked when use_opening_reversal_entry is on
     symbol_price_log = {symbol: [] for symbol in symbols}  # full (untrimmed) history, for _write_price_log
     entries_triggered = 0
+    # A SEPARATE, hourly-resetting cap that only applies during extended
+    # hours (entry_window_label == "extended") - 2026-09-29, user request:
+    # "no cap [daily] for extended hours, but lower the rate per hour" once
+    # the max_daily_entries fix removed the accidental early-cap that had
+    # been suppressing the whole window. Same refund-on-phantom philosophy
+    # as entries_triggered (see extended_hourly_cap_logged below and the
+    # refund call sites) - only entries that actually fill count against it.
+    extended_hourly_state = {"bucket": None, "count": 0, "cap_logged": False}
+    # Cumulative, day-long count of FILLED extended-hours entries - separate
+    # from extended_hourly_state["count"], which resets every hour for the
+    # cap check above. This one only exists so the day-end log line can say
+    # how many extended-hours entries actually happened, the number the user
+    # asked to keep watching after the 2026-09-29 rate-cap/ranking changes.
+    extended_entries_today = 0
     poll_state = {"last": None}   # remembers the interval, to log transitions only
     # Session VWAP per symbol, accumulated from bars the loop already reads.
     # symbol -> [sum(typical_price * volume), sum(volume)]. Costs nothing extra:
@@ -3135,7 +3161,8 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
         _write_price_log(symbol_price_log, et)
         logger.info(f"Burst logic for the day: {executor.day_burst_summary}")
         logger.info(f"Signal journal: {signal_journal.stats()}")
-        logger.info(f"Daily session complete: entries_triggered={entries_triggered}, reason={reason}")
+        logger.info(f"Daily session complete: entries_triggered={entries_triggered}, "
+                    f"extended_hours_entries={extended_entries_today}, reason={reason}")
 
         # The alert layer's whole point: EmailNotifier.send_alert has existed,
         # wired to both channels and tested, with zero call sites - so no alert
@@ -3427,6 +3454,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         # (including the whole extended-hours window) of
                         # entries that would have gone to real trades.
                         entries_triggered = max(0, entries_triggered - 1)
+                        if (executor.entry_meta.get(symbol) or {}).get("entry_window") == "extended":
+                            extended_hourly_state["count"] = max(0, extended_hourly_state["count"] - 1)
+                            extended_entries_today = max(0, extended_entries_today - 1)
                     elif order is not None:
                         # The executor may have corrected the qty down from
                         # what was requested (a broker-side partial fill it
@@ -3633,6 +3663,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 # at submission - it never became a real trade. See the
                 # matching PHANTOM_EXIT refund above for the full reasoning.
                 entries_triggered = max(0, entries_triggered - 1)
+                if (executor.entry_meta.get(_sym) or {}).get("entry_window") == "extended":
+                    extended_hourly_state["count"] = max(0, extended_hourly_state["count"] - 1)
+                    extended_entries_today = max(0, extended_entries_today - 1)
         except Exception as e:
             logger.debug(f"retry_unfilled_entries skipped: {e}")
 
@@ -4278,6 +4311,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
             # no ranking, no throttle, no _attempt_entry call, ever,
             # taken/skip_reason recorded as fixed, honest constants.
             _short_enabled = (config.get("trading", {}).get("short_strategy") or {}).get("enabled", False)
+            _short_burst_width = len(short_candidates)
             for cand in short_candidates:
                 cand["spread_pct"] = _spread_pct(market_data, cand["symbol"], cand["price"])
                 cand["rvol"] = _compute_rvol(cand["bar"], volume_history[cand["symbol"]])
@@ -4293,6 +4327,19 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     sector_returns=sector_returns,
                 )
 
+            # Best-first by the SAME continuation score the long side already
+            # ranks bursts by (see _rank_burst) - 2026-09-29. The short side
+            # never had this at all: multiple simultaneous short candidates
+            # were attempted in whatever order the screener happened to sort
+            # them. This matters more now that extended_hours_experiment's
+            # per-hour cap (below) can make slots genuinely scarce - ranking
+            # first means a scarce hour's remaining slots go to the best-
+            # scored candidates, not an accident of list order.
+            short_candidates, _short_rank_note = _rank_burst(config, short_candidates)
+            if _short_rank_note:
+                logger.info(f"SHORT {_short_rank_note}")
+
+            for cand in short_candidates:
                 taken, skip_reason = False, "short_side_not_traded_evidence_only"
                 if _short_enabled:
                     symbol, price = cand["symbol"], cand["price"]
@@ -4313,8 +4360,25 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     except Exception as e:
                         logger.debug(f"correlation check skipped for {symbol}: {e}")
 
+                    _ext_cap = None
+                    if entry_window_label == "extended":
+                        _extended_hourly_due(extended_hourly_state, now)
+                        _ext_cap = (config["trading"].get("extended_hours_experiment") or {}).get(
+                            "max_entries_per_hour")
+
                     if max_daily_entries and entries_triggered >= max_daily_entries:
                         skip_reason = "max_daily_entries"
+                    elif _ext_cap and extended_hourly_state["count"] >= _ext_cap:
+                        skip_reason = "extended_hourly_cap"
+                        if not extended_hourly_state["cap_logged"]:
+                            logger.info(
+                                f"Reached the extended-hours per-hour cap "
+                                f"({extended_hourly_state['count']}/{_ext_cap} "
+                                f"for the {extended_hourly_state['bucket']:%H:%M} ET "
+                                f"hour) - no new extended-hours entries until "
+                                f"the hour rolls over; exits continue as normal"
+                            )
+                            extended_hourly_state["cap_logged"] = True
                     elif _corr_blocked:
                         skip_reason = "correlation_limit"
                         logger.info(f"{symbol}: entry skipped - {_corr_reason}")
@@ -4338,6 +4402,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         )
                         if taken:
                             entries_triggered += 1
+                            if entry_window_label == "extended":
+                                extended_hourly_state["count"] += 1
+                                extended_entries_today += 1
                             had_any_trades = True
                         else:
                             skip_reason = "rejected_by_pre_entry_checks"
@@ -4351,7 +4418,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                                        if sig_pct is not None and spy_pct is not None else None),
                     rvol=cand["rvol"],
                     spread_pct=cand["spread_pct"],
-                    burst_width=len(short_candidates),
+                    burst_width=_short_burst_width,
                     **_opening_move_fields(screener_details, cand["symbol"]),
                     **cand["cont"],
                     taken=taken, skip_reason=skip_reason,
@@ -4392,8 +4459,25 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 except Exception as e:
                     logger.debug(f"correlation check skipped for {symbol}: {e}")
 
+                _ext_cap = None
+                if entry_window_label == "extended":
+                    _extended_hourly_due(extended_hourly_state, now)
+                    _ext_cap = (config["trading"].get("extended_hours_experiment") or {}).get(
+                        "max_entries_per_hour")
+
                 if max_daily_entries and entries_triggered >= max_daily_entries:
                     skip_reason = "max_daily_entries"
+                elif _ext_cap and extended_hourly_state["count"] >= _ext_cap:
+                    skip_reason = "extended_hourly_cap"
+                    if not extended_hourly_state["cap_logged"]:
+                        logger.info(
+                            f"Reached the extended-hours per-hour cap "
+                            f"({extended_hourly_state['count']}/{_ext_cap} "
+                            f"for the {extended_hourly_state['bucket']:%H:%M} ET "
+                            f"hour) - no new extended-hours entries until "
+                            f"the hour rolls over; exits continue as normal"
+                        )
+                        extended_hourly_state["cap_logged"] = True
                 elif burst_max is not None and index >= burst_max:
                     skip_reason = "burst_throttle"
                 elif _corr_blocked:
@@ -4418,6 +4502,9 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     )
                     if taken:
                         entries_triggered += 1
+                        if entry_window_label == "extended":
+                            extended_hourly_state["count"] += 1
+                            extended_entries_today += 1
                         had_any_trades = True
                         pending_pullbacks.pop(symbol, None)
                     else:

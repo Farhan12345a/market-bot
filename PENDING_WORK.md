@@ -421,6 +421,46 @@ count-everything-including-phantoms model; 200 is a runaway-loop backstop,
 not a real constraint given max_concurrent_positions/correlation_limit/
 reentry_cooldown/rate_limits already bound real throughput far below it.
 
+**2026-09-29 follow-on, same conversation - extended-hours rate + quality:**
+
+Two more explicit user requests, both shipped:
+
+- `trading.extended_hours_experiment.max_entries_per_hour: 20` - a SEPARATE
+  cap from `max_daily_entries`, scoped to `entry_window_label == "extended"`
+  only. Tracked in `extended_hourly_state` (resets on the wall-clock hour via
+  `_extended_hourly_due`), refunded on phantom drop the same way
+  `entries_triggered` is. `extended_entries_today` is the cumulative,
+  never-reset day total, logged in the "Daily session complete" line - this
+  is "the number to keep watching" per the user's instruction. **Started at
+  20/hour** - the busiest FULL DAY on record is ~37 fills across 6.5 hours,
+  so this is meant to bite only during genuine clusters, not ordinary
+  pacing. Report back after a real day of extended-hours data (2026-09-28
+  had zero, due to the bug above) before deciding whether to move it.
+- `short_candidates` now ranked best-first via `_rank_burst` (the SAME
+  continuation-score mechanism the long side's burst throttle already used)
+  before the entry decision loop - previously the short side had NO ranking
+  at all. Combined with the hourly cap: when a scarce hour's remaining slots
+  can't cover everyone in a poll, the best-scored candidates get attempted
+  first, so quality decides who gets the last slots rather than list order.
+  Deliberately RANKING, not a hard minimum-score gate - see `_rank_burst`'s
+  own docstring for why (a floor would remove trades on the strength of
+  weights that are still one day of evidence; ranking only reorders a cut
+  that would have been arbitrary anyway).
+- Explicitly NOT done: a live minimum-`cf_score` entry filter for extended
+  hours. That changes WHICH signals convert to trades (Tier 1/2), and
+  CLAUDE.md's entry-change protocol wants its own held measurement window
+  before something like that ships, not a same-day bolt-on alongside the
+  rate cap - bundling both would make it impossible to tell which one moved
+  tomorrow's numbers.
+
+Regime note for reading tomorrow's extended-hours sample: the mutual-
+exclusion rule means a regime flip mid-afternoon (needs 6 consecutive
+confirming reads at the 300s afternoon cadence = 30 minutes minimum once
+past 10:00 ET, vs. as fast as ~18-20 seconds during the 09:30-09:40 fast-poll
+window) will stop new shorts and switch to longs from that point on, still
+inside the same extended-hours bucket. A smaller short count on a flip day
+is regime working correctly, not a rate-cap or quality-filter artifact.
+
 ## 0e. Limit orders for streamed symbols only - INVESTIGATE, do not assume
 
 Proposed 2026-08-25: use LIMIT buys for the ~14 streamed symbols (where the

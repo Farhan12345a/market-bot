@@ -2105,6 +2105,20 @@ trading:
   extended_hours_experiment:
     enabled: true
     end_time: "16:00"   # how late new entries are taken; exits/time-stop unchanged
+    # Added 2026-09-29, on explicit user request: max_daily_entries (below)
+    # is effectively uncapped for the day now that it counts fills instead
+    # of submissions, but the user specifically wants extended hours (not
+    # the primary window) rate-limited PER HOUR so one concentrated cluster
+    # can't dominate the afternoon's sample. Same refund-on-phantom
+    # philosophy as max_daily_entries - only fills count. Combined with
+    # use_continuation_score (already on) ranking each poll's candidates
+    # best-first, this means when the hourly cap is scarce, the highest cf_
+    # score candidates get the remaining slots, not whichever sorted first.
+    # Start at 20/hour - well above any hour on record (the busiest FULL DAY
+    # on file is ~37 real fills across 6.5 hours) so it mainly catches
+    # genuine clusters, not ordinary pacing. Report back after a real day of
+    # data before moving it.
+    max_entries_per_hour: 20
 
   # Total positions OPENED over the whole day, regardless of how many are held
   # at once - a different limit from max_concurrent_positions above. On
