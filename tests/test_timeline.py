@@ -271,6 +271,19 @@ if prev.returncode == 0:
         # slots between screener and qqq_list, doesn't touch total breadth
         # enough to need more headroom.
         "stream_max_subscriptions": 30,
+        # 50 -> 200 on 2026-09-29. Sized for the OLD counting model, where
+        # every SUBMITTED entry charged the budget whether it filled or not.
+        # main.py's entries_triggered now refunds a slot when an entry is
+        # phantom-dropped (never filled) - see the PHANTOM_EXIT/abandoned-
+        # entry refunds in run_trading_day - so 50 stopped being a measure of
+        # real trades and started being a measure of how many orders failed
+        # to fill. On 2026-09-28, 28 of the 50 slots went to entries that
+        # never filled, capping the day's real entries at 09:46 ET and
+        # starving the whole extended-hours window of trades. 200 is a
+        # runaway-loop backstop; max_concurrent_positions, correlation_limit
+        # and the per-symbol/per-minute limits already bound real throughput
+        # far below it.
+        "max_daily_entries": 200,
         # -0.5 -> -0.7 on 2026-09-03. Exit-side (see CLAUDE.md's "NOT an entry
         # change" list), so not subject to the one-variable-at-a-time rule
         # below, but still recorded here rather than silently dropped from
@@ -298,7 +311,7 @@ if prev.returncode == 0:
 
     same = ["entry_window_start", "rapid_increase_pct",
             "rapid_increase_max_pct", "rapid_increase_lookback_minutes",
-            "max_concurrent_positions", "max_daily_entries",
+            "max_concurrent_positions",
             "final_exit_loss_pct", "trailing_stop_pct",
             "breakeven_tiers", "use_resistance_exit",
             "use_breakeven_floor", "reentry_cooldown_minutes",

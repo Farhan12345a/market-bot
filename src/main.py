@@ -3350,13 +3350,20 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     if _tr is not None and _px:
                         _meta = executor.entry_meta.get(symbol) or {}
                         _entry_px = getattr(_tr, "entry_price", None)
+                        # direction-aware: a raw (price-entry)/entry move is
+                        # backwards for a short, where a FALLING price is the
+                        # win. Found 2026-09-28 - trade_paths.csv recorded
+                        # every short's path inverted relative to its own
+                        # exit P&L, which corrupted the daily chart artifact
+                        # for the whole first live short session.
+                        _direction = getattr(_tr, "direction", 1)
                         _path_buffer.append({
                             "trade_id": TR.make_trade_id(symbol, _meta.get("entry_time")),
                             "symbol": symbol,
                             "date": now.strftime("%Y-%m-%d"),
                             "timestamp": now.isoformat(),
                             "price": _px,
-                            "gain_pct": (round((_px - _entry_px) / _entry_px * 100, 4)
+                            "gain_pct": (round(_direction * (_px - _entry_px) / _entry_px * 100, 4)
                                          if _entry_px else ""),
                         })
                 except Exception as _pe:
@@ -3411,6 +3418,15 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         # 2026-09-01 shape: NOW/PLTR/MSTR/RGTI/SOXL, 45+
                         # minutes of identical retries).
                         strategy.drop_phantom(symbol)
+                        # This symbol was charged against max_daily_entries at
+                        # SUBMISSION time (below), but it never became a real
+                        # trade - refund the slot. 2026-09-28: 28 of that
+                        # day's 50 max_daily_entries slots went to entries
+                        # that never filled at all, capping the budget at
+                        # 09:46 ET and starving the rest of the session
+                        # (including the whole extended-hours window) of
+                        # entries that would have gone to real trades.
+                        entries_triggered = max(0, entries_triggered - 1)
                     elif order is not None:
                         # The executor may have corrected the qty down from
                         # what was requested (a broker-side partial fill it
@@ -3613,6 +3629,10 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                 grace_seconds=_grace)
             for _sym in _abandoned_entries:
                 strategy.drop_phantom(_sym)
+                # Refund the max_daily_entries slot this symbol was charged
+                # at submission - it never became a real trade. See the
+                # matching PHANTOM_EXIT refund above for the full reasoning.
+                entries_triggered = max(0, entries_triggered - 1)
         except Exception as e:
             logger.debug(f"retry_unfilled_entries skipped: {e}")
 

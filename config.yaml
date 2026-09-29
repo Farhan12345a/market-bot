@@ -2113,15 +2113,20 @@ trading:
   # place. This caps that churn. Set to 0 (or remove) for unlimited.
   # Only entries are blocked once the cap is hit - exit monitoring continues,
   # so open positions are never left unprotected.
-  # Raised 25 -> 50 for data collection. 2026-08-19 ran UNCAPPED and took 54
-  # entries, so 25 would have collected less than half of a day that was
-  # already considered too small a sample. 50 gives a comparable sample while
-  # still cutting the tail of pure churn.
-  # NOTE: this is very unlikely to be the binding constraint - see
-  # max_daily_loss_usd. The loss limit now actually fires (it never once did
-  # before), and on 2026-08-19 numbers it would have ended the session around
-  # entry 40, before this cap was ever reached.
-  max_daily_entries: 50
+  # Raised 50 -> 200, 2026-09-29. main.py's entries_triggered now only counts
+  # entries that actually FILLED (a phantom that never fills is refunded, see
+  # the PHANTOM_EXIT/abandoned-entry refunds in run_trading_day) - but 50 was
+  # sized for the OLD counting, where every submission charged the budget
+  # whether it filled or not. On 2026-09-28, 28 of that day's 50 slots went to
+  # entries that never filled, capping real entries at 09:46 ET and starving
+  # the whole extended-hours window (10:15-16:00) of trades. 200 is a
+  # runaway-loop backstop, not a real constraint - max_concurrent_positions
+  # (10), correlation_limit, reentry_cooldown_minutes and
+  # max_entry_attempts_per_symbol_per_day already bound real throughput far
+  # below this, and max_orders_per_minute (rate_limits) independently guards
+  # against a genuine runaway-submission bug. No day on record has come close
+  # to 200 real filled positions.
+  max_daily_entries: 200
 
   # ---------------------------------------------------------------------
   # Sizing mode (added 2026-09-02)

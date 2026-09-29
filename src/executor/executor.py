@@ -1043,6 +1043,45 @@ class Executor:
             except Exception as e:
                 logger.debug(f"{symbol}: pre-retry cancel failed, retrying anyway: {e}")
 
+            # cancel_open_orders only confirms Alpaca ACCEPTED the cancel
+            # request, not that the order actually died before it could
+            # fill - the fill and the cancel are two independent things in
+            # flight at once. 2026-09-28: this exact race let 15 short
+            # entries fill from BOTH the "cancelled" original order and the
+            # forced retry below, doubling the position and leaving the
+            # extra shares completely untracked (no stop, no trailing) until
+            # the periodic reconcile caught them, sometimes 5+ minutes
+            # later, closing at whatever price was showing - COIN alone lost
+            # $102.21 that way. Re-check what the broker actually holds right
+            # after the cancel call returns, before ever submitting a second
+            # order for the same intended entry - if the "cancelled" order
+            # turns out to have filled anyway, this is now a real fill, not
+            # an unfilled entry, and must be treated like one rather than
+            # doubled up on.
+            try:
+                _recheck = self.broker.get_positions()
+                _recheck_qty = int(float(getattr(_recheck.get(symbol), "qty", 0) or 0))
+            except Exception as e:
+                logger.debug(
+                    f"{symbol}: post-cancel re-check failed ({e}) - "
+                    f"proceeding with the forced retry anyway"
+                )
+                _recheck_qty = 0
+
+            if expect_sign * _recheck_qty > 0:
+                logger.info(
+                    f"{symbol}: filled during the cancel race - the order "
+                    f"this was about to cancel-and-retry had already gone "
+                    f"through, so no second order is being submitted"
+                )
+                # Re-arm rather than pop: the NEXT poll's held>0 branch at
+                # the top of this loop is what actually confirms and clears
+                # it, the same path a clean first-try fill takes. Doing it
+                # here too would duplicate that logic for no reason.
+                info["ts"] = time.monotonic()
+                info["retried"] = True
+                continue
+
             order, route = self._submit_forced_entry_retry(
                 symbol, info["qty"], decision_price=info.get("decision_price"),
                 side=info.get("side", "buy"),

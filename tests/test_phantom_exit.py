@@ -290,6 +290,68 @@ check("nothing forced yet - still well inside the grace window",
 check("still pending for the next poll", "MRVL" in e12._pending_entry_verify)
 check("no order submitted prematurely", b12.sell_calls == [], b12.sell_calls)
 
+print("\n=== 12b. THE CANCEL/RETRY RACE (2026-09-28): a 'cancelled' order can "
+      "still fill - do not blindly stack a second order on top of it ===")
+# The real incident: cancel_open_orders only confirms Alpaca ACCEPTED the
+# cancel request, not that the order died before it could fill. On
+# 2026-09-28 this let 15 short entries fill from BOTH the "cancelled"
+# original order and the forced retry below, doubling the position and
+# leaving the extra shares completely untracked until the periodic reconcile
+# caught them minutes later (COIN: -$102.21). This broker simulates the
+# race by having cancel_open_orders ITSELF be the moment the original order
+# fills - modelling "the fill and the cancel were both in flight, and the
+# fill won."
+class RaceBroker(Broker):
+    def cancel_open_orders(self, symbol):
+        self.cancelled.append(symbol)
+        self.holdings[symbol] = self.holdings.get(symbol, 0) + self._fills_during_cancel.get(symbol, 0)
+        return 1
+
+b12b = RaceBroker(holdings={})
+b12b._fills_during_cancel = {"COIN": 18}   # the "cancelled" order fills anyway
+e12b = mk_executor(b12b, "COIN", tracked_qty=18)
+e12b._pending_entry_verify["COIN"] = {"ts": time.monotonic() - 999, "qty": 18}
+filled12b, abandoned12b = e12b.retry_unfilled_entries(grace_seconds=15)
+check("the stuck order is still cancelled first, as always",
+      "COIN" in b12b.cancelled, b12b.cancelled)
+check("NO second order is submitted once the re-check sees it already filled",
+      b12b.sell_calls == [] and b12b.limit_calls == [],
+      (b12b.sell_calls, b12b.limit_calls))
+check("reported as filled (via re-arm), not abandoned and not double-ordered",
+      filled12b == [] and abandoned12b == [], (filled12b, abandoned12b))
+check("re-armed so the next poll's ordinary held>0 path confirms and clears it",
+      "COIN" in e12b._pending_entry_verify
+      and e12b._pending_entry_verify["COIN"].get("retried") is True,
+      e12b._pending_entry_verify.get("COIN"))
+filled12c, abandoned12c = e12b.retry_unfilled_entries(grace_seconds=15)
+check("next poll clears it through the normal fill path, exactly like any "
+      "other confirmed entry", "COIN" not in e12b._pending_entry_verify)
+check("...without ever having stacked a second order on top of the first",
+      b12b.sell_calls == [] and b12b.limit_calls == [],
+      (b12b.sell_calls, b12b.limit_calls))
+
+print("\n=== 12c. SHORT SIDE OF THE SAME RACE ===")
+b12d = RaceBroker(holdings={})
+b12d._fills_during_cancel = {"VIAV": -82}   # short: broker holds negative
+e12d = mk_executor(b12d, "VIAV", tracked_qty=82)
+e12d._pending_entry_verify["VIAV"] = {"ts": time.monotonic() - 999, "qty": 82, "side": "sell"}
+filled12d, abandoned12d = e12d.retry_unfilled_entries(grace_seconds=15)
+check("a short's cancel-race fill is recognised too (negative qty, not just positive)",
+      b12d.sell_calls == [] and b12d.limit_calls == [] and abandoned12d == [],
+      (b12d.sell_calls, b12d.limit_calls, abandoned12d))
+
+print("\n=== 12e. THE RACE CHECK NEVER SUPPRESSES A GENUINE STILL-UNFILLED RETRY ===")
+# Section 9 already proves the ordinary forced-retry path still fires when
+# the broker genuinely shows 0 held after the cancel (the default Broker
+# leaves holdings untouched) - this just makes that non-regression explicit
+# for the new re-check specifically.
+b12f = Broker(holdings={})
+e12f = mk_executor(b12f, "RKLB", tracked_qty=47)
+e12f._pending_entry_verify["RKLB"] = {"ts": time.monotonic() - 999, "qty": 47}
+filled12f, abandoned12f = e12f.retry_unfilled_entries(grace_seconds=15)
+check("a genuinely still-unfilled entry still gets its forced retry",
+      filled12f == [("RKLB", 47)] and abandoned12f == [], (filled12f, abandoned12f))
+
 print("\n=== 13. main.py IS WIRED TO THE ENTRY-SIDE SAFETY NET TOO ===")
 check("retry_unfilled_entries is actually called from the poll loop",
       "executor.retry_unfilled_entries(" in src)
@@ -299,6 +361,14 @@ check("...with its grace period sourced from config, not hardcoded "
       "retry_grace_seconds" in src and "grace_seconds=_grace" in src)
 check("an abandoned entry is dropped from Strategy, not left half-tracked",
       "strategy.drop_phantom(_sym)" in src)
+check("an abandoned (never-filled) entry refunds its max_daily_entries slot "
+      "(2026-09-28: 28 of 50 slots went to entries that never filled, "
+      "capping real entries before extended hours even opened)",
+      "entries_triggered = max(0, entries_triggered - 1)" in src)
+check("...and the SAME refund applies to a PHANTOM_EXIT (an entry the "
+      "exit-side guard discovers never filled), not just the retry-side "
+      "abandon path - both are 'this never became a real trade'",
+      src.count("entries_triggered = max(0, entries_triggered - 1)") >= 2)
 
 print("\n=== 14. DEFAULT GRACE PERIOD IS NOW 12s, NOT 15s (2026-09-09) ===")
 b14 = Broker(holdings={})

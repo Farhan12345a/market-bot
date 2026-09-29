@@ -108,7 +108,7 @@ window_min=22
 polls=window_min*60/t_["entry_check_interval_seconds"]
 check(f"entry window is now {polls:.0f} polls (was {window_min} at 60s)", polls==132)
 check("concurrent cap still bounds exposure", t_["max_concurrent_positions"]==10)
-check("daily entry cap still bounds churn", t_["max_daily_entries"]==50)
+check("daily entry cap still bounds churn", t_["max_daily_entries"]==200)
 check("re-entry cooldown still gates the same symbol", t_["reentry_cooldown_minutes"]==5)
 
 print("\n=== 8. CONTINUATION SCORING ===")

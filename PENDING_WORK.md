@@ -352,7 +352,7 @@ that we are tracking which is in the primary long taking window."
 - Options 2 (inverse ETF long) and 3 (breadth as an entry condition) were not
   pursued - option 1 was the direction chosen.
 
-**2026-09-28 — first live day, two bugs found, NOT YET FIXED:**
+**2026-09-28 — first live day, two bugs found, FIXED 2026-09-29:**
 
 Net +$225.02, 18 positions/58 tranches, 14W/4L, all short (regime was bearish
 09:34-13:05 ET, so the mutual-exclusion rule correctly kept longs off all
@@ -378,30 +378,48 @@ chart artifact. Two real problems surfaced:
    ORPHAN_RECONCILE exits netted **-$155.58** against the day's +$225.02 - the
    day was profitable in spite of this, not because it wasn't happening. This
    is a structural risk-management gap (positions with zero live stop-loss
-   for minutes at a time), not a P&L curiosity - worth fixing before scaling
-   short size or count. Likely fix: confirm the cancel via order status (or
-   poll broker qty back to 0) before submitting the retry, not just trust the
-   cancel call's return value.
+   for minutes at a time), not a P&L curiosity.
+
+   **FIX (executor.py's `retry_unfilled_entries`, ~line 1032):** after
+   calling `cancel_open_orders`, re-fetch the broker's live position for the
+   symbol before ever submitting the forced retry. If it already shows a
+   fill matching the intended direction (`expect_sign * qty > 0`), the
+   "cancelled" order won the race - re-arm tracking (`retried=True`, fresh
+   `ts`) instead of submitting a second order, and let the ordinary
+   held>0 path on the next poll confirm and clear it, exactly like any other
+   fill. Does not fully eliminate the race in theory (Alpaca's cancel is not
+   synchronous), but closes the window this incident actually walked
+   through. Covered by tests/test_phantom_exit.py sections 12b-12e (race on
+   both long/short, and a non-regression check that a genuinely still-
+   unfilled entry still gets its forced retry).
 2. **`trade_paths.csv`'s `gain_pct` is not direction-aware.** main.py's
-   per-poll path sample (~line 3359) computes `(price-entry)/entry`
+   per-poll path sample (~line 3359) computed `(price-entry)/entry`
    unconditionally - correct for longs, inverted for shorts. Doesn't affect
    real trading (actual exit P&L is computed correctly elsewhere via
    `TradeManager.direction`), but it corrupted the daily chart artifact's
-   per-position path line for every short today. Worked around in the
-   chart-build script (`daily_viz/build_data.py`, flips sign when
-   `side=="short"`) rather than the live bot, since it's a reporting-only
-   field with no trading-decision consequence - but the source column itself
-   is still wrong and will bite any other tool that reads `trade_paths.csv`
-   assuming it's already P&L-signed.
+   per-position path line for every short on 2026-09-28.
 
-Also separately noticed: `max_daily_entries` (50) is ONE counter shared by
-opening burst + normal longs + shorts, charged at order **submission**, not
-fill. Today it capped out at 09:45:45 ET - 28 of the 50 slots went to
-opening-burst/rapid-increase entries that never filled at all. Not a bug
-(matches its own doc comment), but worth knowing: on a day where fills are
-slow, most of the daily entry budget can be spent on orders that never become
-positions, starving the rest of the session of slots that would have gone to
-real trades.
+   **FIX:** multiply by `TradeManager.direction` (already available via
+   `strategy.trades.get(symbol)` at the sample site). One-line change, no
+   effect on any trading decision - this field is analytics-only. Also
+   corrected in `daily_viz/build_data.py` for the already-published
+   2026-09-28 chart (that script isn't part of this repo, so it needed its
+   own fix regardless of the live-bot one).
+
+Also fixed, same day: `max_daily_entries` was ONE counter shared by opening
+burst + normal longs + shorts, charged at order **submission**, not fill. On
+2026-09-28 it capped out at 09:45:45 ET - 28 of the 50 slots went to
+opening-burst/rapid-increase entries that never filled at all, starving the
+rest of the session (including the whole extended-hours window) of slots
+that would have gone to real trades. **FIX:** `entries_triggered` is now
+refunded (`max(0, entries_triggered - 1)`) whenever a submitted entry is
+phantom-dropped - either via the exit-side `PHANTOM_EXIT` guard or via
+`retry_unfilled_entries`'s own abandon path - so the budget only ever counts
+entries that actually became positions. `max_daily_entries` raised 50 -> 200
+alongside this (config.yaml) since it's no longer sized for the old
+count-everything-including-phantoms model; 200 is a runaway-loop backstop,
+not a real constraint given max_concurrent_positions/correlation_limit/
+reentry_cooldown/rate_limits already bound real throughput far below it.
 
 ## 0e. Limit orders for streamed symbols only - INVESTIGATE, do not assume
 
