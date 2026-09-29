@@ -352,7 +352,66 @@ that we are tracking which is in the primary long taking window."
 - Options 2 (inverse ETF long) and 3 (breadth as an entry condition) were not
   pursued - option 1 was the direction chosen.
 
-**2026-09-28 — first live day, two bugs found, FIXED 2026-09-29:**
+**2026-09-29 UPDATE - the 2026-09-28 fix was NECESSARY BUT NOT SUFFICIENT.
+ORPHAN_RECONCILE recurred WORSE, not better, the day after shipping it. Real
+root cause identified below. short_strategy should be considered for a pause
+until this is actually fixed - flagged to the user, awaiting their call.**
+
+2026-09-29: 27 ORPHAN_RECONCILE exits (up from 15 on 09-28), netting
+**-$567.84**, against +$211.12 from every other short exit that day - the
+short strategy's real edge (+$211) is being more than eaten alive by this
+one mechanism (net day: -$356.72 across 90 short tranches / 36 positions).
+19 distinct symbols hit it, several (COIN, MXL, IONQ) hit it TWICE in the
+same day, growing each time (COIN: 36 shares orphaned at 13:45, then a FRESH
+18-share entry at 14:17, then 72 shares orphaned at 14:36).
+
+**Actual root cause, traced through today's service-log.txt (COIN as the
+worked example, same shape confirmed on MXL/IONQ/others):**
+
+09-28's fix (re-check broker position right after cancel, before the forced
+retry) is CORRECT but only closes the millisecond-scale race at that one
+instant. It does not help when a forced-retry order fills SLOWLY, in many
+small pieces, over 30-90+ seconds - which is exactly what these particular
+symbols do (they are the SAME symbols the opening-burst fill-rate check
+already knows are slow/illiquid: AAON, BRKR, CDNS, DDOG, FORM, GRAL, MRNA,
+P, TEM, TWST, VIAV, VICR all appear on BOTH today's "never filled" opening-
+burst list AND today's ORPHAN_RECONCILE list). Today's COIN trace: entry
+confirmed 18 shares at 13:33:11, retried at 13:33:24 (my fix's re-check
+correctly found 0 held at that instant, so no race caught, forced retry
+correctly submitted) - then SIX separate "entry price corrected" events
+between 13:33:30 and 13:35:08 as the retry order filled in pieces.
+
+**The actual gap: `refresh_account_snapshot`'s entry-price reconciliation
+(executor.py ~line 312) rebases the tracked PRICE to the broker's
+avg_entry_price on every poll, but never validates or corrects the tracked
+QUANTITY.** If the real fill ends up larger than the originally-intended
+qty (whether from this multi-tranche trickle, or any other race), nothing
+ever notices. FIRST_EXIT/TRAILING_STOP then compute their sell qty from the
+STRATEGY's tracked qty (the smaller, wrong number) - a "full" exit sells
+only the tracked amount and leaves the real excess held at the broker,
+genuinely orphaned. Once the strategy believes the symbol is flat, a LATER
+signal on the same symbol is treated as an unrelated fresh entry (nothing
+blocks it - the symbol is gone from `_open_symbols`), so the untracked
+excess just sits there, compounding, until the periodic reconcile eventually
+notices the broker-vs-tracking mismatch and force-closes it at whatever
+price is showing - which is what ORPHAN_RECONCILE is doing, correctly, as a
+safety net. The safety net firing 27 times in one day is a symptom, not
+the disease.
+
+**Candidate fix, NOT YET BUILT - needs its own review before shipping:**
+`refresh_account_snapshot` should reconcile QUANTITY the same way it already
+reconciles price - if `abs(broker_qty) > abs(tracked_qty)` for an open
+symbol, widen the tracked qty (and the TradeManager's own qty_remaining) to
+match, so the NEXT exit sells the true full amount rather than leaving a
+remainder. This is a bigger, more careful change than last night's (it
+touches the strategy/executor quantity-of-record, not just an order-
+submission sequencing race), and deserves its own test pass covering
+multi-tranche fills specifically - not something to ship same-day without
+review, especially right after the first attempt at this turned out to be
+incomplete.
+
+**2026-09-28 — first live day, two bugs found, FIXED 2026-09-29 (see the
+2026-09-29 update above - INCOMPLETE, the same class of bug recurred worse):**
 
 Net +$225.02, 18 positions/58 tranches, 14W/4L, all short (regime was bearish
 09:34-13:05 ET, so the mutual-exclusion rule correctly kept longs off all
