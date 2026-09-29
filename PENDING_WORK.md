@@ -354,8 +354,7 @@ that we are tracking which is in the primary long taking window."
 
 **2026-09-29 UPDATE - the 2026-09-28 fix was NECESSARY BUT NOT SUFFICIENT.
 ORPHAN_RECONCILE recurred WORSE, not better, the day after shipping it. Real
-root cause identified below. short_strategy should be considered for a pause
-until this is actually fixed - flagged to the user, awaiting their call.**
+root cause identified and FIXED the same day - see below.**
 
 2026-09-29: 27 ORPHAN_RECONCILE exits (up from 15 on 09-28), netting
 **-$567.84**, against +$211.12 from every other short exit that day - the
@@ -381,34 +380,60 @@ correctly found 0 held at that instant, so no race caught, forced retry
 correctly submitted) - then SIX separate "entry price corrected" events
 between 13:33:30 and 13:35:08 as the retry order filled in pieces.
 
-**The actual gap: `refresh_account_snapshot`'s entry-price reconciliation
-(executor.py ~line 312) rebases the tracked PRICE to the broker's
-avg_entry_price on every poll, but never validates or corrects the tracked
-QUANTITY.** If the real fill ends up larger than the originally-intended
-qty (whether from this multi-tranche trickle, or any other race), nothing
-ever notices. FIRST_EXIT/TRAILING_STOP then compute their sell qty from the
-STRATEGY's tracked qty (the smaller, wrong number) - a "full" exit sells
-only the tracked amount and leaves the real excess held at the broker,
-genuinely orphaned. Once the strategy believes the symbol is flat, a LATER
-signal on the same symbol is treated as an unrelated fresh entry (nothing
-blocks it - the symbol is gone from `_open_symbols`), so the untracked
-excess just sits there, compounding, until the periodic reconcile eventually
-notices the broker-vs-tracking mismatch and force-closes it at whatever
-price is showing - which is what ORPHAN_RECONCILE is doing, correctly, as a
-safety net. The safety net firing 27 times in one day is a symptom, not
-the disease.
+**The actual gap - a QUANTITY reconciliation mechanism already existed and
+was already correctly wired (executor.py's `refresh_account_snapshot` ->
+`on_entry_qty_corrected` -> strategy.py's `correct_entry_qty`, built
+2026-08-24 for a LONG partial-fill case, HOOD), but had two long-only/
+shrink-only assumptions baked in from before shorts existed:**
 
-**Candidate fix, NOT YET BUILT - needs its own review before shipping:**
-`refresh_account_snapshot` should reconcile QUANTITY the same way it already
-reconciles price - if `abs(broker_qty) > abs(tracked_qty)` for an open
-symbol, widen the tracked qty (and the TradeManager's own qty_remaining) to
-match, so the NEXT exit sells the true full amount rather than leaving a
-remainder. This is a bigger, more careful change than last night's (it
-touches the strategy/executor quantity-of-record, not just an order-
-submission sequencing race), and deserves its own test pass covering
-multi-tranche fills specifically - not something to ship same-day without
-review, especially right after the first attempt at this turned out to be
-incomplete.
+1. `refresh_account_snapshot` (executor.py ~line 363, pre-fix) skipped the
+   reconciliation call entirely whenever `held <= 0` - a negative broker qty
+   (any short) was read as "something is wrong, don't touch it" and never
+   even reached `correct_entry_qty`. Shorts got ZERO quantity reconciliation,
+   ever.
+2. `correct_entry_qty` (strategy.py, pre-fix) explicitly refused to GROW the
+   tracked qty at all - "a broker count HIGHER than tracked usually means an
+   exit has been submitted but not yet settled, and trusting that number
+   would resurrect shares the strategy has already sold." True for the exit-
+   in-flight case this was built for, but exactly backwards for a slow
+   multi-tranche ENTRY that lands more shares than intended before any exit
+   has fired - which is what actually happened to COIN/MXL/IONQ/etc today.
+
+FIRST_EXIT/TRAILING_STOP compute their sell qty from the STRATEGY's tracked
+qty, so with quantity reconciliation silently disabled for shorts, a "full"
+exit sold only the originally-intended amount and left the real excess held
+at the broker, genuinely unprotected. Once the strategy believed the symbol
+was flat, a LATER signal on the same symbol opened a fresh, unrelated
+position on top of the still-real leftover - compounding until the periodic
+reconcile noticed the mismatch and force-closed it via ORPHAN_RECONCILE,
+correctly, as a safety net. The safety net firing 27 times in one day was
+a symptom, not the disease.
+
+**FIXED 2026-09-29 (executor.py's `refresh_account_snapshot`, strategy.py's
+`correct_entry_qty`):**
+- The `held <= 0: continue` skip is now `held == 0: continue` - only a
+  truly flat broker reading is skipped; shorts get reconciled exactly like
+  longs.
+- Added a defer-not-refuse guard: a symbol with an exit still pending
+  (`self._pending_exit_verify`) is skipped for THIS poll only, since the
+  broker's count is genuinely ambiguous in that exact window (a sell that
+  hasn't settled yet looks identical to a position that grew). This is
+  where the "exit may be in flight" protection now actually lives, instead
+  of `correct_entry_qty` refusing to grow unconditionally forever.
+- `correct_entry_qty` now reconciles on MAGNITUDE (`abs(actual_qty)`) in
+  BOTH directions - growing and shrinking both flow through the same
+  proportional-scaling logic that previously only ran on shrink. A new
+  guard refuses the correction outright (logged as an error, left for the
+  orphan/reconcile path) when the broker's SIGN disagrees with the
+  position's own tracked direction - that is a real long/short mismatch,
+  not ordinary fill drift, and this function should not paper over it.
+
+New tests: test_safety.py sections B2-B4 and C2 (both directions for both
+long and short, the sign-mismatch refusal, the exit-in-flight deferral
+working end to end via a real `refresh_account_snapshot` call against a
+fake broker, and a direct reproduction of the COIN shape proving a full
+exit now sells the TRUE corrected quantity instead of leaving a remainder).
+Full suite green (2802 pass, 0 fail).
 
 **2026-09-28 — first live day, two bugs found, FIXED 2026-09-29 (see the
 2026-09-29 update above - INCOMPLETE, the same class of bug recurred worse):**

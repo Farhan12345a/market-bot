@@ -347,11 +347,24 @@ class Executor:
                                 f"Could not rebase {symbol} onto its fill price: {e}"
                             )
 
-            # Reconcile SHARE COUNT as well as price. A market order can fill
-            # partially, and the bot would otherwise keep believing it holds the
-            # quantity it asked for. Skipped inside the entry grace window,
-            # where the broker's list is simply lagging a fill rather than
-            # reporting a short one.
+            # Reconcile SHARE COUNT as well as price. An order can fill
+            # partially, and the bot would otherwise keep believing it holds
+            # the quantity it asked for. Skipped inside the entry grace
+            # window, where the broker's list is simply lagging a fill
+            # rather than reporting a short one.
+            #
+            # `held <= 0: continue` used to sit here, silently exempting
+            # every SHORT position from this reconciliation entirely (a
+            # negative qty read as "something is wrong, don't touch it"
+            # from the no-shorting era). 2026-09-29: that gap, combined with
+            # Strategy.correct_entry_qty's old "only ever shrinks" rule,
+            # meant a slow multi-tranche short entry that filled MORE
+            # shares than intended was never caught - the excess sat
+            # genuinely unprotected until the periodic reconcile found it
+            # minutes later and force-closed it via ORPHAN_RECONCILE (27
+            # times that day, -$567.84). Only `held == 0` is skipped now -
+            # nothing to reconcile a symbol against if the broker shows
+            # nothing held.
             if self.on_entry_qty_corrected is not None:
                 for symbol, position in positions.items():
                     if now - self._entry_recorded_at.get(symbol, 0.0) < ENTRY_CONFIRM_GRACE_SECONDS:
@@ -360,7 +373,18 @@ class Executor:
                         held = int(float(getattr(position, "qty", 0) or 0))
                     except (TypeError, ValueError):
                         continue
-                    if held <= 0:
+                    if held == 0:
+                        continue
+                    # An exit still in flight for this symbol makes the
+                    # broker's count ambiguous in this exact window - it can
+                    # look "higher than tracked" simply because the sell
+                    # has not settled yet, and correcting UP into that
+                    # would resurrect shares the strategy already believes
+                    # it sold. Deferred, not refused: the next poll re-
+                    # checks once the exit has settled one way or the
+                    # other. See Strategy.correct_entry_qty's own docstring
+                    # for the reasoning this preserves.
+                    if symbol in self._pending_exit_verify:
                         continue
                     try:
                         self.on_entry_qty_corrected(symbol, held)

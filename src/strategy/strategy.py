@@ -886,11 +886,11 @@ class Strategy:
         """
         Rebase an open position onto the share count the broker ACTUALLY holds.
 
-        submit_entry_order records the quantity it ASKED for. A market order can
-        fill partially - it happened repeatedly on 2026-08-24, where HOOD's
-        average entry price moved across four consecutive polls as the order
-        filled in pieces - and until now nothing reconciled the count. The bot
-        would then believe it held 79 shares while the broker held 40.
+        submit_entry_order records the quantity it ASKED for. An order can fill
+        partially - it happened repeatedly on 2026-08-24, where HOOD's average
+        entry price moved across four consecutive polls as the order filled in
+        pieces - and until now nothing reconciled the count. The bot would then
+        believe it held 79 shares while the broker held 40.
 
         Two concrete harms that fixes. Exit orders sized to a position that does
         not exist get rejected or partially filled, leaving shares stranded. And
@@ -898,9 +898,29 @@ class Strategy:
         sizes off entry_qty, so a 33% tranche of a phantom position is wrong in
         the same proportion.
 
-        Only ever reduces. A broker count HIGHER than tracked usually means an
-        exit has been submitted but not yet settled, and trusting that number
-        would resurrect shares the strategy has already sold.
+        `actual_qty` arrives SIGNED from the broker (negative for a short);
+        qty_remaining/entry_qty are always plain positive counts regardless of
+        side, so this reconciles on MAGNITUDE - trade.direction already says
+        which way the position faces, this function does not need to care.
+
+        BOTH directions since 2026-09-29. Originally this only ever shrank -
+        "a broker count HIGHER than tracked usually means an exit has been
+        submitted but not yet settled, and trusting that number would
+        resurrect shares the strategy has already sold" - and the caller
+        additionally skipped every short entirely (a negative qty read as
+        "something is wrong, don't touch it" from the no-shorting era). Both
+        of those left a real hole open: a marketable-limit entry that fills
+        in many small pieces over 30-90+ seconds can land MORE shares than
+        originally intended, and nothing ever widened the tracked amount to
+        match. A "full" exit then sold only the smaller tracked number,
+        leaving the real excess genuinely unprotected at the broker until the
+        periodic reconcile found it minutes later and force-closed it via
+        ORPHAN_RECONCILE - 27 of those on 2026-09-29 alone, -$567.84, more
+        than twice what the short strategy's clean trades made that day.
+        The "resurrect shares already sold" risk this guarded against is
+        still real, so growing is refused here when the caller reports an
+        exit still in flight for this symbol - see refresh_account_snapshot's
+        _pending_exit_verify check, which is where that state actually lives.
         """
         if symbol not in self.trades:
             return False
@@ -908,25 +928,45 @@ class Strategy:
             actual_qty = int(actual_qty)
         except (TypeError, ValueError):
             return False
-        if actual_qty < 0:
-            return False
 
         trade = self.trades[symbol]
-        if actual_qty >= trade.qty_remaining:
+        # A sign that disagrees with the position's own tracked direction is
+        # a bigger problem than ordinary fill drift - it means the broker
+        # thinks this symbol is on the OPPOSITE side from what the strategy
+        # believes, which this function should not paper over as if it were
+        # just a magnitude change. Left for the orphan/reconcile path.
+        if actual_qty != 0:
+            broker_direction = 1 if actual_qty > 0 else -1
+            if broker_direction != trade.direction:
+                logger.error(
+                    f"{symbol}: broker reports {actual_qty} share(s) "
+                    f"({'long' if broker_direction == 1 else 'short'}) but "
+                    f"this position is tracked "
+                    f"{'long' if trade.direction == 1 else 'short'} - "
+                    f"refusing to reconcile a quantity that disagrees on "
+                    f"SIDE, not just size."
+                )
+                return False
+
+        actual_abs = abs(actual_qty)
+        if actual_abs == trade.qty_remaining:
             return False
 
         old_remaining, old_entry = trade.qty_remaining, trade.entry_qty
-        # Shrink the original size by the same proportion, so fraction-based
-        # rules keep sizing off something real.
+        # Scale the original size by the same proportion, so fraction-based
+        # rules keep sizing off something real - symmetric for growing or
+        # shrinking, and reduces to actual_abs itself when no tiers have
+        # fired yet (old_remaining == old_entry).
         if old_remaining > 0:
-            trade.entry_qty = max(1, int(trade.entry_qty * actual_qty / old_remaining))
-        trade.qty_remaining = actual_qty
+            trade.entry_qty = max(1, int(trade.entry_qty * actual_abs / old_remaining))
+        trade.qty_remaining = actual_abs
 
+        direction = "grew" if actual_abs > old_remaining else "shrank"
         logger.warning(
-            f"{symbol}: PARTIAL FILL reconciled - tracking said {old_remaining} "
-            f"shares, broker holds {actual_qty}. Original size {old_entry} -> "
-            f"{trade.entry_qty} so tiers and the first exit size off what is "
-            f"actually held."
+            f"{symbol}: FILL QTY {direction.upper()} - tracking said "
+            f"{old_remaining} shares, broker holds {actual_abs}. Original "
+            f"size {old_entry} -> {trade.entry_qty} so tiers and the first "
+            f"exit size off what is actually held."
         )
         return True
 
