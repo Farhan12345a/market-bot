@@ -349,9 +349,7 @@ class Executor:
 
             # Reconcile SHARE COUNT as well as price. An order can fill
             # partially, and the bot would otherwise keep believing it holds
-            # the quantity it asked for. Skipped inside the entry grace
-            # window, where the broker's list is simply lagging a fill
-            # rather than reporting a short one.
+            # the quantity it asked for.
             #
             # `held <= 0: continue` used to sit here, silently exempting
             # every SHORT position from this reconciliation entirely (a
@@ -365,10 +363,28 @@ class Executor:
             # times that day, -$567.84). Only `held == 0` is skipped now -
             # nothing to reconcile a symbol against if the broker shows
             # nothing held.
+            #
+            # NOT gated on ENTRY_CONFIRM_GRACE_SECONDS (removed 2026-09-30,
+            # same review pass as the fix above). That guard exists for a
+            # DIFFERENT, narrower problem - a symbol this bot tracks as open
+            # but that is still ABSENT from the broker's position list
+            # entirely (see `unconfirmed` above, keyed off `self._open_symbols
+            # - broker_symbols`). This loop only ever runs over
+            # `positions.items()` - symbols the broker IS already reporting a
+            # real quantity for - so "the list is lagging" does not apply
+            # here; the qty being reported is real the instant it is
+            # reported. Keeping the 120s grace on this loop left a genuine
+            # gap: re-checked against 2026-09-29's own COIN trace, the
+            # broker already showed -23 (vs 18 tracked) by 13:35:08 - only
+            # 117s after the 13:33:11 entry, still inside the old 120s
+            # window - so a FULL exit firing that early (GAP_EXIT or
+            # FINAL_EXIT can, even if FIRST_EXIT/TRAILING_STOP's partial
+            # scale-outs that day happened not to) would have sold only the
+            # stale tracked amount regardless of this fix, with nothing
+            # left running to catch the excess afterward once the position
+            # believed itself closed.
             if self.on_entry_qty_corrected is not None:
                 for symbol, position in positions.items():
-                    if now - self._entry_recorded_at.get(symbol, 0.0) < ENTRY_CONFIRM_GRACE_SECONDS:
-                        continue
                     try:
                         held = int(float(getattr(position, "qty", 0) or 0))
                     except (TypeError, ValueError):

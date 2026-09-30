@@ -435,6 +435,38 @@ fake broker, and a direct reproduction of the COIN shape proving a full
 exit now sells the TRUE corrected quantity instead of leaving a remainder).
 Full suite green (2802 pass, 0 fail).
 
+**2026-09-30, final review pass before deploy - ONE MORE real gap found and
+fixed.** Explicit user request to look through the logic one more time
+before giving a greenlight. Re-checked the qty-correction loop's own
+`ENTRY_CONFIRM_GRACE_SECONDS` gate (inherited unchanged from the original
+2026-08-24 mechanism, not something introduced by the 09-29 fix) against
+2026-09-29's actual COIN trace: the broker already showed -23 held (vs 18
+tracked) by 13:35:08 - only 117 seconds after the 13:33:11 entry, still
+inside the 120s grace window. A FULL exit (GAP_EXIT, FINAL_EXIT) firing
+that early would have sold only the stale tracked amount regardless of the
+09-29 fix, because qty correction would still have been sitting out the
+clock - the fix only helped COIN specifically because its full close
+(TRAILING_STOP) happened to fire at 13:39:02, well after grace expired.
+
+**Root cause of the gate being wrong for this loop:** `ENTRY_CONFIRM_GRACE_
+SECONDS` exists for a genuinely different problem - a symbol this bot
+tracks as open but that is still ABSENT from the broker's position list
+entirely (the earlier `unconfirmed` logic in the same function, keyed off
+`self._open_symbols - broker_symbols`). The qty-correction loop only ever
+runs over `positions.items()` - symbols the broker is ALREADY reporting a
+real quantity for - so "the list is lagging" does not apply to it at all;
+the reported qty is real the instant it is reported. The grace check on
+this specific loop was inherited/misapplied from the nearby-but-distinct
+concern, not a deliberate design choice for the qty case.
+
+**FIXED:** removed the `ENTRY_CONFIRM_GRACE_SECONDS` check from the qty-
+correction loop specifically. The earlier `unconfirmed`-symbol grace check
+(the one it actually protects) is untouched. New test: test_safety.py C3,
+reproducing the exact gap - a symbol entered 0 seconds ago now still
+reconciles its qty immediately rather than waiting up to 120s. Verified
+with 2 consecutive fresh full-suite runs after this change: 2814 pass, 0
+fail both times.
+
 **2026-09-30 follow-on, explicit user request: "everything needs to be
 replicated... that we had for the shorts, like we had for the longs. The
 same issues cant continuously be coming up." Audited the rest of the

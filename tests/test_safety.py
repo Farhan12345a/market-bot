@@ -127,8 +127,25 @@ e=Executor(types.SimpleNamespace(), CFG)
 check("callback defaults to None (executor usable alone)", e.on_entry_qty_corrected is None)
 esrc=open(repo_file("src", "executor", "executor.py")).read()
 check("reconciliation invokes the callback", "self.on_entry_qty_corrected(symbol, held)" in esrc)
-check("skipped inside the entry grace window (broker list lags a fill)",
-      "ENTRY_CONFIRM_GRACE_SECONDS" in esrc.split("on_entry_qty_corrected(symbol, held)")[0][-1200:])
+# NOT gated on ENTRY_CONFIRM_GRACE_SECONDS - removed 2026-09-30, same review
+# pass as the fix itself. Re-checked directly against 2026-09-29's own COIN
+# trace: the broker already showed -23 (vs 18 tracked) just 117s after
+# entry, inside the old 120s grace window - so a FULL exit firing that
+# early would have sold only the stale amount regardless of the fix,
+# because qty correction would still have been sitting out the clock. The
+# grace period's real purpose (a symbol still ABSENT from the broker's
+# list entirely) is a different, earlier check in this same function
+# (`unconfirmed`) - this loop only ever runs over symbols the broker
+# ALREADY reports a real quantity for, so there is nothing to wait out.
+_qty_loop_body = esrc.split("if self.on_entry_qty_corrected is not None:")[1].split(
+    "self.daily_pnl = self._compute_daily_pnl")[0]
+check("the qty-correction loop no longer waits out ENTRY_CONFIRM_GRACE_SECONDS "
+      "before reconciling a symbol the broker already reports a real qty for",
+      "ENTRY_CONFIRM_GRACE_SECONDS" not in _qty_loop_body, _qty_loop_body[:300])
+check("...while the EARLIER, genuinely-different grace check (a symbol still "
+      "absent from the broker's list at all) is untouched",
+      "if now - self._entry_recorded_at.get(symbol, 0.0) < ENTRY_CONFIRM_GRACE_SECONDS"
+      in esrc.split("def refresh_account_snapshot")[1].split("# Reconcile entry prices")[0])
 check("only a truly FLAT broker reading is skipped now - held <= 0 used to "
       "exempt every short position from this reconciliation entirely",
       "if held == 0:" in esrc.split("on_entry_qty_corrected(symbol, held)")[0][-900:]
@@ -184,6 +201,27 @@ e2._pending_exit_verify.pop("COIN", None)
 e2.refresh_account_snapshot()
 check("...and runs normally once the exit is no longer pending",
       calls == [("COIN", -54)], calls)
+
+print("\n=== C3. RECONCILES IMMEDIATELY, NOT AFTER A GRACE DELAY "
+      "(2026-09-30) ===")
+# The exact residual gap found on this final review pass: 2026-09-29's own
+# COIN trace showed the broker already reporting -23 (vs 18 tracked) only
+# 117 seconds after entry - still inside the OLD 120s grace window this
+# loop used to wait out. A full exit (GAP_EXIT, FINAL_EXIT) firing that
+# early would have sold only the stale tracked amount no matter what this
+# fix does, because qty correction would still have been sitting on the
+# sidelines. Reproduced directly: entry recorded THIS INSTANT (0s ago, as
+# far inside the old grace window as a symbol can be) must still reconcile.
+calls3 = []
+e3 = Executor(FakeBroker({"VIAV": Pos(-36)}), copy.deepcopy(CFG))
+e3._open_symbols.add("VIAV")
+e3._entry_recorded_at["VIAV"] = time.monotonic()   # AS RECENT AS POSSIBLE
+e3.open_entries["VIAV"] = 40.0
+e3.on_entry_qty_corrected = lambda sym, held: calls3.append((sym, held))
+e3.refresh_account_snapshot()
+check("a symbol entered THIS INSTANT still reconciles its qty immediately - "
+      "no waiting for ENTRY_CONFIRM_GRACE_SECONDS to elapse",
+      calls3 == [("VIAV", -36)], calls3)
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)
