@@ -1,5 +1,5 @@
 """PDT equity floor + partial-fill reconciliation."""
-import sys, copy, types, yaml
+import sys, copy, types, yaml, time
 from datetime import datetime
 from _repo import REPO, CONFIG, repo_file, sandbox_cwd
 import src.strategy.strategy as S
@@ -163,7 +163,15 @@ def Pos(qty, avg=100.0):
 calls = []
 e2 = Executor(FakeBroker({"COIN": Pos(-54)}), copy.deepcopy(CFG))
 e2._open_symbols.add("COIN")
-e2._entry_recorded_at["COIN"] = 0.0   # well outside ENTRY_CONFIRM_GRACE_SECONDS
+e2._entry_recorded_at["COIN"] = time.monotonic() - 999   # well outside ENTRY_CONFIRM_GRACE_SECONDS
+# (NOT 0.0 - time.monotonic()'s epoch is process/system start, not some
+# fixed point far in the past. On a freshly-started container it can
+# itself be under ENTRY_CONFIRM_GRACE_SECONDS (120s), which made this
+# test genuinely flaky: it passed once this process had been up 120s+,
+# and failed - silently, since refresh_account_snapshot's own grace-
+# window skip looks identical to the deferral this test means to prove -
+# on a fresh one. Found 2026-09-30 by re-running the full suite fresh
+# rather than trusting a prior green run.)
 e2.open_entries["COIN"] = 100.0
 e2.on_entry_qty_corrected = lambda sym, held: calls.append((sym, held))
 e2._pending_exit_verify["COIN"] = {"ts": 0.0, "qty": 5, "side": "buy"}

@@ -92,7 +92,7 @@ def mk_executor(broker, symbol, tracked_qty, price=100.0):
     e = Executor(broker, copy.deepcopy(CFG))
     e.open_entries[symbol] = price
     e._open_symbols.add(symbol)
-    e._entry_recorded_at[symbol] = 0.0
+    e._entry_recorded_at[symbol] = time.monotonic() - 999
     e._pending_cost[symbol] = tracked_qty * price
     return e
 
@@ -386,7 +386,7 @@ b15 = Broker(holdings={}, quote={"bid": 99.9, "ask": 100.0, "spread": 0.1})
 e15 = Executor(b15, CFG_RETRY)
 e15.open_entries["NBIS"] = 95.0
 e15._open_symbols.add("NBIS")
-e15._entry_recorded_at["NBIS"] = 0.0
+e15._entry_recorded_at["NBIS"] = time.monotonic() - 999
 e15._pending_entry_verify["NBIS"] = {"ts": time.monotonic() - 999, "qty": 6}
 filled15, abandoned15 = e15.retry_unfilled_entries(grace_seconds=12)
 check("routes through the wide marketable-limit, not straight to market",
@@ -402,7 +402,7 @@ b16 = Broker(holdings={}, quote=None)   # configured for wide-limit, but no quot
 e16 = Executor(b16, CFG_RETRY)
 e16.open_entries["IONQ"] = 40.0
 e16._open_symbols.add("IONQ")
-e16._entry_recorded_at["IONQ"] = 0.0
+e16._entry_recorded_at["IONQ"] = time.monotonic() - 999
 e16._pending_entry_verify["IONQ"] = {"ts": time.monotonic() - 999, "qty": 10}
 filled16, abandoned16 = e16.retry_unfilled_entries(grace_seconds=12)
 check("no quote -> no limit order was attempted", b16.limit_calls == [], b16.limit_calls)
@@ -419,7 +419,7 @@ b17 = RejectsLimitOnly(holdings={}, quote={"bid": 49.9, "ask": 50.0, "spread": 0
 e17 = Executor(b17, CFG_RETRY)
 e17.open_entries["AXTI"] = 48.0
 e17._open_symbols.add("AXTI")
-e17._entry_recorded_at["AXTI"] = 0.0
+e17._entry_recorded_at["AXTI"] = time.monotonic() - 999
 e17._pending_entry_verify["AXTI"] = {"ts": time.monotonic() - 999, "qty": 7}
 filled17, abandoned17 = e17.retry_unfilled_entries(grace_seconds=12)
 check("the wide-limit order was attempted and rejected",
@@ -501,7 +501,7 @@ b20 = Broker(holdings={"BE": 1})
 e20 = Executor(b20, CFG_EXIT_RETRY)
 e20.open_entries["BE"] = 269.80
 e20._open_symbols.add("BE")
-e20._entry_recorded_at["BE"] = 0.0
+e20._entry_recorded_at["BE"] = time.monotonic() - 999
 e20._pending_cost["BE"] = 1 * 269.80
 
 r1 = e20.submit_exit_order("BE", 1, "GAP_EXIT", price=263.87)
@@ -531,7 +531,7 @@ b21 = Broker(holdings={"CRWD": 2})
 e21 = Executor(b21, CFG_EXIT_RETRY)
 e21.open_entries["CRWD"] = 200.0
 e21._open_symbols.add("CRWD")
-e21._entry_recorded_at["CRWD"] = 0.0
+e21._entry_recorded_at["CRWD"] = time.monotonic() - 999
 e21._pending_cost["CRWD"] = 4 * 200.0
 # Simulate a prior pending exit for MORE shares than are now held (i.e. some
 # of it already sold for real) without going through a first live call.
@@ -755,7 +755,7 @@ b28 = Broker(holdings={}, quote={"bid": 87.70, "ask": 87.85, "spread": 0.15})
 e28 = Executor(b28, CFG_DEV)
 e28.open_entries["TXG"] = 76.56
 e28._open_symbols.add("TXG")
-e28._entry_recorded_at["TXG"] = 0.0
+e28._entry_recorded_at["TXG"] = time.monotonic() - 999
 e28._pending_entry_verify["TXG"] = {
     "ts": time.monotonic() - 999, "qty": 6, "decision_price": 76.56,
 }
@@ -774,7 +774,7 @@ b29 = Broker(holdings={}, quote={"bid": 79.9, "ask": 80.0, "spread": 0.1})  # +4
 e29 = Executor(b29, CFG_DEV)
 e29.open_entries["ORCL"] = 76.56
 e29._open_symbols.add("ORCL")
-e29._entry_recorded_at["ORCL"] = 0.0
+e29._entry_recorded_at["ORCL"] = time.monotonic() - 999
 e29._pending_entry_verify["ORCL"] = {
     "ts": time.monotonic() - 999, "qty": 6, "decision_price": 76.56,
 }
@@ -789,7 +789,7 @@ b30 = Broker(holdings={}, quote={"bid": 99.9, "ask": 100.0, "spread": 0.1})
 e30 = Executor(b30, CFG_DEV)
 e30.open_entries["NVDA"] = 40.0
 e30._open_symbols.add("NVDA")
-e30._entry_recorded_at["NVDA"] = 0.0
+e30._entry_recorded_at["NVDA"] = time.monotonic() - 999
 e30._pending_entry_verify["NVDA"] = {"ts": time.monotonic() - 999, "qty": 3}  # no decision_price key
 filled30, abandoned30 = e30.retry_unfilled_entries(grace_seconds=12)
 check("missing decision_price -> guard is a no-op, retries as before",

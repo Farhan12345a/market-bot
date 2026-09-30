@@ -121,7 +121,7 @@ QTY = {"IMMEDIATE": 10, "GRACE_FILL": 8, "RETRY_THEN_FILLS": 6,
 for s in SYMBOLS:
     e.open_entries[s] = 100.0
     e._open_symbols.add(s)
-    e._entry_recorded_at[s] = 0.0
+    e._entry_recorded_at[s] = time.monotonic() - 999
     e._pending_cost[s] = QTY[s] * 100.0
     # Fresh timestamp - "just submitted", not yet past any grace period.
     e._pending_entry_verify[s] = {"ts": time.monotonic(), "qty": QTY[s]}
