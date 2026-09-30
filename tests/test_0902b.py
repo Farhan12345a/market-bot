@@ -611,7 +611,7 @@ check("the burst still runs its own tighter final exit than the session",
       (t["opening_burst"]["exits"]["final_exit_loss_pct"], t["final_exit_loss_pct"]))
 check("multifactor_rank still OFF (it inverted move order)",
       t["opening_burst"]["multifactor_rank"] is False)
-check("max_daily_entries unchanged", t["max_daily_entries"] == 200)
+check("max_daily_entries unchanged", t["max_daily_entries"] == 100)
 check("PDT floor still enforced", "25,000" in esrc or "25000" in esrc)
 
 print(f"\n{P} passed, {F} failed")

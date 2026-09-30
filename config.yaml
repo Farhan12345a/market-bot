@@ -2133,14 +2133,17 @@ trading:
   # sized for the OLD counting, where every submission charged the budget
   # whether it filled or not. On 2026-09-28, 28 of that day's 50 slots went to
   # entries that never filled, capping real entries at 09:46 ET and starving
-  # the whole extended-hours window (10:15-16:00) of trades. 200 is a
-  # runaway-loop backstop, not a real constraint - max_concurrent_positions
-  # (10), correlation_limit, reentry_cooldown_minutes and
+  # the whole extended-hours window (10:15-16:00) of trades.
+  # Lowered 200 -> 100, 2026-09-30, explicit user request to tighten the
+  # backstop now that real usage data exists: 2026-09-29's first day under
+  # the fixed counting model used 38 of 200. 100 is still a runaway-loop
+  # backstop, not a real constraint - max_concurrent_positions (10),
+  # correlation_limit, reentry_cooldown_minutes and
   # max_entry_attempts_per_symbol_per_day already bound real throughput far
   # below this, and max_orders_per_minute (rate_limits) independently guards
-  # against a genuine runaway-submission bug. No day on record has come close
-  # to 200 real filled positions.
-  max_daily_entries: 200
+  # against a genuine runaway-submission bug - but it is meaningfully
+  # tighter than 200 while still ~2.6x above the busiest day on record.
+  max_daily_entries: 100
 
   # ---------------------------------------------------------------------
   # Sizing mode (added 2026-09-02)

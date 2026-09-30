@@ -283,7 +283,10 @@ if prev.returncode == 0:
         # runaway-loop backstop; max_concurrent_positions, correlation_limit
         # and the per-symbol/per-minute limits already bound real throughput
         # far below it.
-        "max_daily_entries": 200,
+        # 200 -> 100 on 2026-09-30, explicit user request to tighten the
+        # backstop now that real usage data exists - 2026-09-29 used 38 of
+        # 200. Still comfortably above any day on record.
+        "max_daily_entries": 100,
         # -0.5 -> -0.7 on 2026-09-03. Exit-side (see CLAUDE.md's "NOT an entry
         # change" list), so not subject to the one-variable-at-a-time rule
         # below, but still recorded here rather than silently dropped from

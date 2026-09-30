@@ -236,7 +236,7 @@ check("config carries the new per-hour cap, separate from max_daily_entries",
       (CFG["trading"].get("extended_hours_experiment") or {}).get("max_entries_per_hour") == 20)
 check("max_daily_entries itself was raised well past the old 50 - it is no "
       "longer sized for the pre-fix count-every-submission model",
-      CFG["trading"]["max_daily_entries"] >= 200)
+      CFG["trading"]["max_daily_entries"] >= 100)
 
 check("the extended-hourly cap is checked in BOTH the long burst_candidates "
       "loop and the short_candidates loop - it must gate whichever side is "
