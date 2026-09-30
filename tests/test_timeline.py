@@ -305,8 +305,17 @@ if prev.returncode == 0:
         # sessions. Moved again 18 -> 21 on 2026-09-27, on explicit user
         # request, handing 3 slots from qqq_list_top_n (7 -> 4) back to the
         # general screener - see config.yaml's comment for the bullish-
-        # regime-specific evidence behind this split.
-        "num_stocks_to_trade": 21,
+        # regime-specific evidence behind this split. 21 -> 24 on 2026-09-30,
+        # on explicit user request ("increase the universe by two to three
+        # symbols"), added only to the general screener's own count -
+        # qqq_list_top_n and earnings_list_top_n both unchanged.
+        "num_stocks_to_trade": 24,
+        # 3 -> 5 on 2026-09-30, on explicit user request, after the
+        # 2026-09-29 extended-hours analysis found ~12 symbols exhausting
+        # all 3 attempts by midday. Tier 3 - not in this timeline's
+        # tracked-keys list (max_entry_attempts_per_symbol_per_day isn't one
+        # of `same` either), so nothing else here needs updating for it.
+        "max_entry_attempts_per_symbol_per_day": 5,
     }
     for k, want in changed.items():
         check(f"{k} deliberately changed to {want}", t.get(k) == want,

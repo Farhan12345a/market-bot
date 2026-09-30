@@ -1007,7 +1007,18 @@ trading:
   # Hard backstop on re-entry loops, independent of every cooldown above.
   # Counts entry SUBMISSIONS, not fills, so a symbol that never fills still
   # burns its attempts.
-  max_entry_attempts_per_symbol_per_day: 3
+  # Raised 3 -> 5, 2026-09-30, explicit user request after the 2026-09-29
+  # extended-hours analysis found ~12 symbols exhausting all 3 attempts by
+  # midday and getting refused the rest of the afternoon. Flagged before
+  # making this change: pooled across all 7 days on record, a symbol's 2nd
+  # same-day attempt has UNDERPERFORMED its 1st (n=53, mean -$3.05 vs n=137,
+  # mean -$0.17) - this counts SUBMISSIONS though, and that pooled analysis
+  # was done from trade_history.csv (fills only), so it likely understates
+  # the true attempt number for symbols with unfilled submissions in
+  # between. Worth specifically re-checking attempt #4/#5 performance once
+  # real data exists under this setting, rather than assuming the pattern
+  # continues or reverses.
+  max_entry_attempts_per_symbol_per_day: 5
 
   # How far a name may already have travelled from the OPEN and still be
   # bought by the normal window. Distinct from rapid_increase_max_pct, which
@@ -2392,7 +2403,20 @@ trading:
   # "qqq_list is bad," it is "qqq_list has looked bad specifically when the
   # regime is bullish," which is the opposite of gating it TO bullish days.
   # n=3 bullish days is still a small sample; watch whether this holds.
-  num_stocks_to_trade: 21  # Number of top stocks to select each day
+  # 21 -> 24 on 2026-09-30, explicit user request ("increase the universe by
+  # two to three symbols") after the 2026-09-29 extended-hours analysis
+  # found the afternoon constrained mostly by the same ~12 symbols
+  # exhausting max_entry_attempts_per_symbol_per_day, not by a shortage of
+  # momentum in general. Added ONLY to the general screener's own count,
+  # not qqq_list_top_n (4, unchanged) or earnings_list_top_n (3, unchanged) -
+  # every bullish-regime day measured so far has favored the general
+  # screener over qqq_list (see above), so the extra 3 slots go where the
+  # evidence points, not split evenly. Total watched symbols (24 + 4 + 3 =
+  # 31, before benchmarks) now exceeds stream_max_subscriptions (30) - not
+  # changed here since this account's tier reportedly removed that ceiling
+  # (see the 2026-09-17 note elsewhere in this file), but flagged in case
+  # it turns out to still bind in practice.
+  num_stocks_to_trade: 24  # Number of top stocks to select each day
   # ---------------------------------------------------------------------
   # Opening-move history (added 2026-08-21)
   # ---------------------------------------------------------------------
