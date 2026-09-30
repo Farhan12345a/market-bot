@@ -307,6 +307,14 @@ try:
     check("segment tooltips carry the actual start time and label, so "
           "hovering tells a reader exactly when a transition happened",
           "11:15 ET: BEARISH" in html_rt)
+    check("every transition has a visible tick (border-left) on the bar "
+          "itself, not just a hover title a phone can't reach - "
+          "2026-09-30 explicit user request",
+          "border-left:1px solid" in html_rt)
+    check("a plain-text chronological line lists every transition's exact "
+          "time and label, readable without hovering anything",
+          "09:41 BULLISH" in html_rt and "11:15 BEARISH" in html_rt
+          and "13:02 CHOPPY" in html_rt)
 
     # Stale-date guard: same file, but dated yesterday.
     tf2 = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)

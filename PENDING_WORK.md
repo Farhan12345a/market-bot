@@ -1280,3 +1280,80 @@ loss would grow with it, and nobody ever decided that.
 When the edge is established: drop `pct_of_equity` to 0.75 (the number
 actually intended for live risk) and raise `ceiling_usd` deliberately, as its
 own decision, recorded here with the evidence that justified it.
+
+## 5. 2026-09-30 — regime gating tightened to directional-only, Tier 4
+
+Explicit user request, verbatim: "I want to have no trades occurring at all
+when the regime is choppy. Wait until the regime is bullish to do long or
+it's bearish to do shorts, but nothing should be executed at all whether
+[the] regime is choppy or neutral."
+
+**What changed**: `trading.regime_sizing.neutral_multiplier` and
+`choppy_multiplier` went 0.5 -> 0.0 (config.yaml). Longs now trade ONLY on a
+confirmed BULLISH read. Nothing else needed to change - `short_strategy`
+already had `neutral_multiplier: 0.0` and `choppy_multiplier: 0.0` (shorts
+were already bearish-only, by the hard mutual-exclusion rule plus their own
+table), so this was a one-sided fix: bring the long side's gating up to the
+same all-or-nothing standard the short side already had.
+
+**Mechanism reused, not built**: `mult == 0` was already a distinct,
+logged stand-down at the entry-skip site (main.py, ~line 2788 - "the regime
+says stand down" vs. a zero-share sizing rounding error), because
+`bearish_multiplier: 0.0` already relied on it. Extending that same path to
+neutral and choppy required no code change, only the two config numbers.
+
+**This is a Tier 4 entry change** (`regime_sizing`, including `chop` and the
+multipliers - see CLAUDE.md). It silently changes the sample: every trade
+that would have gone out at 0.5x size in a neutral or choppy read simply will
+not exist going forward. Two multipliers moved together rather than one at a
+time - normally against the "one entry variable at a time" discipline - but
+they are one coherent policy decision (directional-only trading), not two
+independent tunings, and the user's instruction was explicit and covered
+both in the same sentence.
+
+**What this predicts, to check against next week's data**: fewer total
+trades (today, 2026-09-30, had a mostly-choppy session per the Regime
+Timeline - a meaningful fraction of today's 97 trades would not have fired
+under this rule), and the long side should stop absorbing the chop losses
+that `_chop_reading`'s own docstring describes (2026-08-28: 19 of 30
+positions peaked under +0.5% and lost $484 together). The predicted
+trade-off is fewer opportunities taken during the (historically common)
+neutral/choppy stretches in exchange for not paying the 08-28-style cost.
+Revisit after a week of trades under this config change, per the standard
+`ops/session-metrics.py` comparison-to-prior-week methodology.
+
+**Tests updated**: `tests/test_short_strategy.py`'s G1 section (hard mutual
+exclusion) asserted "neutral/choppy leave longs nonzero" as a documented
+consequence of the OLD config - rewritten to check both long AND short
+multiplier per label against the new all-zero-outside-its-own-direction
+policy. `tests/test_regime.py` and `tests/test_integration_0902.py`'s live
+config coherence checks (`bullish > neutral >= bearish`, ordering-only,
+non-strict at the bottom) still pass unchanged since bearish was already 0.
+
+## 6. 2026-09-30 — Regime Timeline: visible ticks, not just hover tooltips
+
+Explicit user request, in response to the 09-29/09-30 Regime Timeline
+screenshots: "make this timeline more descriptive. Add ticks throughout the
+bar so i know the exact time the regime was and when it was changing."
+
+The original bar (`email_notifier._regime_timeline_html`, shipped
+2026-09-29) only exposed each segment's start time via an HTML `title`
+attribute - a desktop hover tooltip, invisible on the phone screenshots the
+user was actually reading from.
+
+Two additions, both kept as plain `<td>`/border/text (no `position:absolute`
+or flex on the bar itself) for the same Outlook-compatibility reason the
+original docstring gives for using a `<td>`-width bar instead of a CSS
+gradient:
+  - a 1px `border-left` on every bar cell after the first, so each
+    transition is a visible line ON the bar, not only a color change;
+  - a chronological text line underneath - `09:41 BULLISH -> 11:15 BEARISH
+    -> 13:02 CHOPPY -> ...` - one entry per transition, in order. Rejected
+    alternative: positioning each time label under its own segment via
+    `position:absolute`, which breaks down on segments too narrow to hold
+    their own text and is exactly the technique the bar itself avoids for
+    Outlook.
+
+Tests: `tests/test_extended_hours.py` extended with checks for the new
+`border-left` tick styling and the new chronological text line, alongside
+the existing coverage for colors/legend/tooltip/stale-data handling.

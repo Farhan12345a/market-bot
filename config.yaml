@@ -1970,9 +1970,18 @@ trading:
       trailing_stop_pct: 0.4
       breakeven_trigger_pct: 0.1
     bullish_multiplier: 1.0
-    neutral_multiplier: 0.5
+    # 0.5 -> 0.0 on 2026-09-30, explicit user request: "I want to have no
+    # trades occurring at all when the regime is choppy... nothing should be
+    # executed at all whether regime is choppy or neutral." Longs now trade
+    # ONLY in a confirmed bullish read, the mirror of how short_strategy
+    # below already only trades in a confirmed bearish read. mult == 0 is
+    # already a distinct, logged stand-down (not a sizing rounding error) -
+    # see the "regime says stand down" check at the entry-skip site in
+    # main.py - so this reuses the exact mechanism bearish_multiplier: 0.0
+    # already relies on, just extended to two more labels.
+    neutral_multiplier: 0.0
     bearish_multiplier: 0.0    # 0 = no new longs. 0.25 = quarter size instead.
-    choppy_multiplier: 0.5     # see the chop block below
+    choppy_multiplier: 0.0     # see the chop block below; 0.5 -> 0.0 2026-09-30, same request as neutral_multiplier above
 
     # ---------------------------------------------------------------------
     # CHOP - the fourth regime label (added 2026-09-02)
