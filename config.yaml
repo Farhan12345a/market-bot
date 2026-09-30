@@ -2425,7 +2425,16 @@ trading:
   # not changed here since this account's tier reportedly removed that
   # ceiling (see the 2026-09-17 note elsewhere in this file), but flagged in
   # case it turns out to still bind in practice.
-  num_stocks_to_trade: 23  # Number of top stocks to select each day
+  #
+  # 23 -> 25 on 2026-09-30 (second change same day), explicit user request
+  # ("trim a bit more, add more stocks to screener from qqq"), moving 2 more
+  # slots from qqq_list_top_n (4 -> 2, see its own comment) to the general
+  # screener. Evidence: a FOURTH bullish-regime day (9-30) split the same
+  # way as the prior three - screener +$153.24 (n=79) vs qqq_list -$213.90
+  # (n=27) - via ops/qqq-list-origin.py's source x regime breakdown. n=4
+  # bullish days now, same direction every time since tracking started;
+  # still not the 2-week bar, but a 4/4 streak in one direction.
+  num_stocks_to_trade: 25  # Number of top stocks to select each day
   # ---------------------------------------------------------------------
   # Opening-move history (added 2026-08-21)
   # ---------------------------------------------------------------------
@@ -2565,7 +2574,7 @@ trading:
   # heavily correlated, so adding 10 of them is one bet held ten times rather
   # than ten bets - the trend gate is what keeps that from happening daily.
   use_qqq_list: true
-  qqq_list_top_n: 4  # 10 -> 18 on 2026-09-24, cut to 7 on 2026-09-25, cut again to 4 on 2026-09-27 (3 slots handed back to the general screener) - see num_stocks_to_trade's comment for the bullish-regime-specific evidence behind this
+  qqq_list_top_n: 2  # 10 -> 18 on 2026-09-24, cut to 7 on 2026-09-25, cut again to 4 on 2026-09-27, cut again to 2 on 2026-09-30 (2 more slots handed back to the general screener, a 4th bullish day in the same direction) - see num_stocks_to_trade's comment for the bullish-regime-specific evidence behind this
   qqq_trend_lookback_days: 5
 
   # Default stock universe. Watched EVERY DAY no matter what - merged with

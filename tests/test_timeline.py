@@ -309,7 +309,11 @@ if prev.returncode == 0:
         # 2026-09-30, on explicit user request ("increase the universe by
         # two to three symbols"), added only to the general screener's own
         # count - qqq_list_top_n and earnings_list_top_n both unchanged.
-        "num_stocks_to_trade": 23,
+        # 23 -> 25 later the same day, on explicit user request ("trim a
+        # bit more, add more stocks to screener from qqq"), moving 2 more
+        # slots from qqq_list_top_n (4 -> 2) - a 4th bullish day in the same
+        # direction. See config.yaml's comment on this key.
+        "num_stocks_to_trade": 25,
         # 3 -> 5 -> 4 on 2026-09-30, on explicit user request, after the
         # 2026-09-29 extended-hours analysis found ~12 symbols exhausting
         # all 3 attempts by midday. Tier 3 - not in this timeline's
