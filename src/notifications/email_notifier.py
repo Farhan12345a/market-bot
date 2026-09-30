@@ -686,6 +686,26 @@ class EmailNotifier:
         flex - the one horizontal-bar technique that renders consistently
         across email clients including Outlook.
 
+        TICKS (added 2026-09-30, explicit user request - "add ticks
+        throughout the bar so i know the exact time the regime was and when
+        it was changing"): the original bar only exposed transition times via
+        a hover `title` attribute, which does nothing on a phone. Two
+        additions, both still plain <td>/border so they survive Outlook:
+          - a 1px border-left on every cell after the first, marking each
+            transition as a visible line ON the bar itself, not just a color
+            change (color alone is hard to place a time against);
+          - a chronological "HH:MM LABEL -> HH:MM LABEL -> ..." text line
+            underneath, one entry per transition, so every regime-change
+            timestamp is readable as text instead of needing to eyeball
+            where along the bar a color started. Proportional label
+            PLACEMENT under the bar (each time positioned at its own x
+            offset) was considered and rejected: narrow segments (a regime
+            that held for a few minutes) would need overlapping text, which
+            position:absolute could solve but Outlook's engine mangles -
+            see the class docstring's reason for avoiding it on the bar
+            itself. A sequential list reads cleanly regardless of segment
+            width.
+
         Returns "" when the file is missing, unreadable, empty, or stamped
         for a different day (stale data left over from a prior session) -
         same never-guess-from-old-data convention every optional section
@@ -708,6 +728,13 @@ class EmailNotifier:
         total_minutes = (day_end - day_start).total_seconds() / 60
 
         cells = []
+        # One entry per transition, in order, for the text line under the
+        # bar: (HH:MM the segment started, its label). Kept separate from
+        # `cells` (which also carries the synthetic "no read yet" lead-in
+        # and gets clipped to day_start/day_end) since the tick line should
+        # show only REAL regime reads, not the gray gap.
+        ticks = []
+
         # Anything before the FIRST recorded label (typically the first few
         # minutes before check_time) has no opinion yet - a neutral gray gap
         # rather than a guess.
@@ -727,16 +754,32 @@ class EmailNotifier:
             label = ev.get("label", "")
             color = colors.get(label, "#e5e7eb")
             cells.append((width_pct, color, f"{t0:%H:%M} ET: {label.upper()}"))
+            ticks.append((t0.strftime("%H:%M"), label))
 
+        # A thin light line on the LEADING edge of every cell after the
+        # first marks each transition as a visible tick on the bar itself -
+        # border-left on a <td>, not position:absolute, so it survives
+        # Outlook the same way the colored cells already do.
         bar_cells = "".join(
-            f'<td style="width:{w:.2f}%;background:{c};" title="{t}"></td>'
-            for w, c, t in cells
+            f'<td style="width:{w:.2f}%;background:{c};'
+            f'{"border-left:1px solid rgba(255,255,255,0.85);" if idx > 0 else ""}" '
+            f'title="{t}"></td>'
+            for idx, (w, c, t) in enumerate(cells)
         )
         legend = "".join(
             f'<span style="display:inline-block;margin-right:14px;font-size:11px;'
             f'color:#374151;"><span style="display:inline-block;width:10px;height:10px;'
             f'background:{c};border-radius:2px;margin-right:4px;"></span>{l.upper()}</span>'
             for l, c in colors.items()
+        )
+
+        # Every transition, in order, as plain text - the exact-time detail
+        # a hover title can't give on a phone. "9:34 CHOPPY -> 9:41 BEARISH
+        # -> ..." rather than positioning each label under its own tick,
+        # which breaks down on segments too narrow to hold their own text.
+        ticks_html = " &rarr; ".join(
+            f'<span style="color:{colors.get(lab, "#6b7280")};">{tm} {lab.upper()}</span>'
+            for tm, lab in ticks
         )
 
         return (
@@ -749,6 +792,8 @@ class EmailNotifier:
             '<div style="display:flex;justify-content:space-between;font-size:10px;'
             'color:#9ca3af;margin-top:2px;"><span>9:30</span><span>16:00</span></div>'
             f'<div style="margin-top:8px;">{legend}</div>'
+            '<div style="margin-top:6px;font-size:10px;color:#6b7280;line-height:1.6;">'
+            f'{ticks_html}</div>'
             '</div>'
         )
 

@@ -292,19 +292,38 @@ check("it only ever NARROWS the short side (0.0), never the reverse - "
       "the long side's own multiplier is never touched by this line",
       "executor.regime_size_multiplier = 0.0" not in src)
 
-# Live-config consequence of the hard rule: neutral/choppy leave LONGS at a
-# nonzero multiplier (0.5 each), so shorts must be zero there too, and only
-# a confirmed bearish read (which zeroes longs) lets shorts through.
-for label, want_long_nonzero in [("bullish", True), ("neutral", True), ("choppy", True), ("bearish", False)]:
+# Live-config consequence, updated 2026-09-30 (explicit user request: "no
+# trades occurring at all when the regime is choppy... nothing should be
+# executed at all whether regime is choppy or neutral" - longs now trade
+# ONLY in a confirmed bullish read, shorts ONLY in a confirmed bearish one,
+# neutral_multiplier/choppy_multiplier dropped 0.5 -> 0.0 for longs
+# alongside this). The hard-exclusion rule above is now only ever
+# load-bearing at "bullish" - that's the one label where the long side is
+# nonzero and the short side needs forcing to 0.0 on top of its own table
+# value. Elsewhere (neutral, choppy, bearish) both sides already agree
+# without it: one side's own config number is already 0.
+for label, want_long_nonzero, want_short_nonzero in [
+    ("bullish", True, False),
+    ("neutral", False, False),
+    ("choppy", False, False),
+    ("bearish", False, True),
+]:
     long_mult = {"bullish": CFG["trading"]["regime_sizing"]["bullish_multiplier"],
                  "neutral": CFG["trading"]["regime_sizing"]["neutral_multiplier"],
                  "choppy": CFG["trading"]["regime_sizing"]["choppy_multiplier"],
                  "bearish": CFG["trading"]["regime_sizing"]["bearish_multiplier"]}[label]
-    if want_long_nonzero:
-        desc = f"{label}: long multiplier is nonzero -> shorts get hard-zeroed here"
-    else:
-        desc = f"{label}: long multiplier is zero - this is the ONE regime shorts may trade in"
-    check(desc, (long_mult > 0) == want_long_nonzero, (label, long_mult))
+    short_mult = {"bullish": CFG["trading"]["short_strategy"]["bullish_multiplier"],
+                  "neutral": CFG["trading"]["short_strategy"]["neutral_multiplier"],
+                  "choppy": CFG["trading"]["short_strategy"]["choppy_multiplier"],
+                  "bearish": CFG["trading"]["short_strategy"]["bearish_multiplier"]}[label]
+    check(f"{label}: long multiplier is "
+          f"{'nonzero' if want_long_nonzero else 'zero - no longs this regime'}",
+          (long_mult > 0) == want_long_nonzero, (label, long_mult))
+    check(f"{label}: short multiplier is "
+          f"{'nonzero' if want_short_nonzero else 'zero - no shorts this regime'}",
+          (short_mult > 0) == want_short_nonzero, (label, short_mult))
+    check(f"{label}: never both sides nonzero at once - one direction or nothing",
+          not (long_mult > 0 and short_mult > 0), (label, long_mult, short_mult))
 
 print("\n=== G2. STARTUP CHECKS THE ACCOUNT'S OWN shorting_enabled FLAG ===")
 src = open(repo_file("src", "main.py")).read()
