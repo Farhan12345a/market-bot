@@ -559,7 +559,7 @@ class Executor:
         except (TypeError, ValueError):
             self._order_times.append((time.monotonic(), 0.0))
 
-    def reconcile_against_broker(self, tracked_symbols):
+    def reconcile_against_broker(self, tracked_symbols, short_symbols=None):
         """
         (mismatches, detail) - what the bot thinks it holds vs what the broker
         actually holds. The BROKER IS TRUTH; this reports, it does not repair.
@@ -581,7 +581,25 @@ class Executor:
         unexpected short must never be silently adopted. Silently "fixing" a
         divergence would also destroy the evidence of what caused it, and this
         codebase has needed that evidence every time.
+
+        `short_symbols`, added 2026-09-30: which of `tracked_symbols` are
+        TRACKED AS A SHORT (TradeManager.direction == -1), not which way the
+        broker happens to read right now - that distinction is exactly the
+        bug this parameter fixes. Before short_symbols existed, this function
+        had no way to tell "a short we opened on purpose, matching the
+        broker" from "something unexpected happened to a long" - it read ANY
+        negative qty on a tracked symbol as the latter, unconditionally,
+        firing a false 'this bot never opens shorts' mismatch (and a real
+        _AL.degraded() alert) on every single poll a legitimate short was
+        open. This is why 2026-09-29's logs showed COIN flip between "not
+        tracking it" and "SHORT position... never opens shorts" for the SAME
+        symbol across consecutive polls - neither the tracked-short case NOR
+        the untracked-orphan case were being told apart correctly. Omitting
+        it (None) preserves the OLD behavior for any caller that has not been
+        updated - every negative qty on a tracked symbol still reads as
+        unexpected, exactly as it did before shorts existed.
         """
+        short_symbols = short_symbols or set()
         out = []
         try:
             live = self.broker.get_positions() or {}
@@ -599,12 +617,20 @@ class Executor:
         tracked = set(tracked_symbols or [])
         for sym in sorted(tracked | set(live_qty)):
             held = live_qty.get(sym, 0)
+            is_tracked_short = sym in short_symbols
             if sym in tracked and held == 0:
                 out.append((sym, "tracked but the broker holds NOTHING (phantom)"))
             elif sym not in tracked and held != 0:
                 out.append((sym, f"broker holds {held} but the bot is not tracking it"))
-            elif held < 0:
+            elif held < 0 and not is_tracked_short:
                 out.append((sym, f"SHORT position of {held} - this bot never opens shorts"))
+            elif held > 0 and is_tracked_short:
+                # The opposite mismatch: tracked as a short, but the broker
+                # now shows a LONG position - a genuine side flip (not
+                # ordinary fill drift, see Strategy.correct_entry_qty's own
+                # sign-mismatch guard), just as real a problem as the
+                # branch above and previously not reported at all.
+                out.append((sym, f"tracked SHORT but broker holds a LONG position of {held}"))
 
         if out:
             logger.warning(
@@ -2504,11 +2530,24 @@ class Executor:
                 side = "buy" if raw_qty < 0 else "sell"
                 if qty > 0:
                     if side == "buy":
-                        logger.error(
+                        # Deliberate since short_strategy shipped 2026-09-27 -
+                        # a short still open at the 16:00 time stop is
+                        # ordinary, expected end-of-day behavior for it, not
+                        # evidence of a bug. Only log the alarm when shorting
+                        # ISN'T supposed to exist at all, which is exactly
+                        # when reaching this branch still means what it used
+                        # to (phantom-entry path, or a position adopted at
+                        # startup that was never supposed to be there).
+                        _short_enabled = ((self.config.get("trading") or {})
+                                           .get("short_strategy") or {}).get("enabled", False)
+                        _log = logger.info if _short_enabled else logger.error
+                        _log(
                             f"{symbol}: flattening a SHORT position ({raw_qty:g} shares) - "
-                            f"buying to cover. The bot never opens shorts deliberately, so "
-                            f"this position is evidence of a separate bug; check how it was "
-                            f"opened (phantom-entry path, or a position adopted at startup)."
+                            f"buying to cover."
+                            + ("" if _short_enabled else
+                               " The bot never opens shorts deliberately, so this position "
+                               "is evidence of a separate bug; check how it was opened "
+                               "(phantom-entry path, or a position adopted at startup).")
                         )
                     # Use the broker's own fill data as the entry price if this
                     # executor didn't track the entry itself (e.g. a position

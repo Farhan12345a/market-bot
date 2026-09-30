@@ -186,8 +186,40 @@ check("tracked but the broker holds nothing -> PHANTOM", len(mm) == 1 and "phant
 mm = recon({"BBB": 50}, [])
 check("held but untracked is reported too", len(mm) == 1 and "not tracking" in mm[0][1], mm)
 mm = recon({"CCC": -39}, ["CCC"])
-check("a SHORT is called out explicitly - this bot never opens one",
+check("a SHORT is called out explicitly - this bot never opens one "
+      "(preserved for any caller not yet passing short_symbols)",
       len(mm) == 1 and "SHORT" in mm[0][1], mm)
+
+print("\n=== R4b. reconcile_against_broker KNOWS ABOUT LEGITIMATE SHORTS "
+      "(2026-09-30) ===")
+# Before short_symbols existed, ANY negative broker qty on a tracked symbol
+# was reported as a mismatch, unconditionally - correct when the bot truly
+# never opened shorts, but a FALSE ALARM once short_strategy went live: a
+# perfectly healthy, correctly-tracked short fired this on every single
+# reconcile poll it was open, both spamming misleading "position mismatch"
+# alerts and (traced from 2026-09-29's actual logs) obscuring the real
+# untracked-orphan case behind identical-looking noise.
+def recon2(held, tracked, short_symbols=None):
+    e = Executor.__new__(Executor)
+    e.broker = RB(held)
+    return e.reconcile_against_broker(tracked, short_symbols=short_symbols)[0]
+
+mm = recon2({"COIN": -18}, ["COIN"], short_symbols={"COIN"})
+check("a short that matches what it's tracked as reports NOTHING - this is "
+      "the exact false alarm that fired all day on 2026-09-29", mm == [], mm)
+mm = recon2({"COIN": -18}, ["COIN"], short_symbols=set())
+check("...but a negative qty on a symbol NOT tracked as a short is still a "
+      "real mismatch - short_symbols narrows the false positive, it does "
+      "not silence the check entirely",
+      len(mm) == 1 and "SHORT" in mm[0][1], mm)
+mm = recon2({"COIN": 18}, ["COIN"], short_symbols={"COIN"})
+check("the OPPOSITE mismatch is now caught too - tracked as a short but the "
+      "broker shows a LONG position (a genuine side flip, not fill drift) - "
+      "previously this fell through every branch and was never reported "
+      "at all", len(mm) == 1 and "LONG" in mm[0][1] and "SHORT" in mm[0][1], mm)
+mm = recon2({"AAPL": 100}, ["AAPL"], short_symbols=set())
+check("an ordinary tracked long, no short_symbols involved, is unaffected",
+      mm == [])
 
 
 class DeadBroker:

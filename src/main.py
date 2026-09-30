@@ -3730,8 +3730,12 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     ).total_seconds() >= _iv:
                 reconcile_state["last"] = now
                 try:
+                    _open_trades_now = strategy.get_open_trades()
                     _mm, _ = executor.reconcile_against_broker(
-                        list(strategy.get_open_trades().keys()))
+                        list(_open_trades_now.keys()),
+                        short_symbols={s for s, t in _open_trades_now.items()
+                                       if getattr(t, "direction", 1) == -1},
+                    )
                     # Alert only on a CHANGE. A divergence that persists across
                     # polls is one problem, not one per five minutes, and a
                     # channel that repeats itself is one that gets muted.
@@ -3745,9 +3749,11 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                             detail="The bot's view of what it holds disagrees with "
                                    "the broker:\n\n"
                                    + "\n".join(f"  {s}: {w}" for s, w in _mm)
-                                   + "\n\nThe broker is authoritative. A SHORT here "
-                                     "means the phantom-entry path fired; close it "
-                                     "by hand if the 16:00 flatten has not.",
+                                   + "\n\nThe broker is authoritative. A legitimately "
+                                     "tracked short showing here means it does NOT "
+                                     "match what the broker holds for it (either an "
+                                     "untracked/orphaned quantity or a side flip) - "
+                                     "close it by hand if the 16:00 flatten has not.",
                         )
                     elif not _mm:
                         reconcile_state["last_signature"] = None

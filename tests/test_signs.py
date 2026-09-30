@@ -225,6 +225,46 @@ r10 = ex10.submit_exit_order("GONE", 10, "FLATTEN_ALL", price=100.0, side="buy")
 check("zero holdings -> PHANTOM_EXIT, no cover submitted",
       r10 is PHANTOM_EXIT and b10.orders == [], (r10, b10.orders))
 
+print("\n=== 10. FLATTENING A LEGITIMATE SHORT NO LONGER CRIES WOLF "
+      "(2026-09-30) ===")
+# Reaching this branch with short_strategy DISABLED still means what it
+# always did - the bot never intended to be short, so this position is
+# evidence of a separate bug (phantom-entry path, or adopted at startup).
+# But once short_strategy is a deliberate, enabled feature, a short still
+# open at the 16:00 time stop is completely ordinary end-of-day behavior,
+# not a bug - logging it as an ERROR every single day, unconditionally, is
+# exactly the kind of stale long-only assumption this session keeps finding.
+import src.executor.executor as EX_MOD
+
+def flatten_and_capture(short_enabled):
+    cfg = copy.deepcopy(CFG)
+    cfg["trading"]["short_strategy"] = {"enabled": short_enabled}
+    b = Broker({"COIN": Pos("COIN", -18, avg=190.0, cur=192.0)})
+    ex = Executor(b, cfg)
+    calls = {"error": [], "info": []}
+    orig_error, orig_info = EX_MOD.logger.error, EX_MOD.logger.info
+    EX_MOD.logger.error = lambda msg, *a, **k: calls["error"].append(msg)
+    EX_MOD.logger.info = lambda msg, *a, **k: calls["info"].append(msg)
+    try:
+        ex.flatten_all_positions()
+    finally:
+        EX_MOD.logger.error, EX_MOD.logger.info = orig_error, orig_info
+    return calls
+
+calls_off = flatten_and_capture(short_enabled=False)
+check("short_strategy OFF: still an ERROR naming it evidence of a bug",
+      any("evidence of a separate bug" in m for m in calls_off["error"]),
+      calls_off)
+
+calls_on = flatten_and_capture(short_enabled=True)
+check("short_strategy ON: logged at INFO, not ERROR - this is expected "
+      "end-of-day behavior for a deliberate feature",
+      not any("flattening a SHORT" in m for m in calls_on["error"])
+      and any("flattening a SHORT" in m for m in calls_on["info"]),
+      calls_on)
+check("...and no longer claims it's evidence of a bug",
+      not any("evidence of a separate bug" in m for m in calls_on["info"]))
+
 print(f"\n{P} passed, {F} failed")
 import sys
 sys.exit(1 if F else 0)

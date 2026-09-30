@@ -435,6 +435,56 @@ fake broker, and a direct reproduction of the COIN shape proving a full
 exit now sells the TRUE corrected quantity instead of leaving a remainder).
 Full suite green (2802 pass, 0 fail).
 
+**2026-09-30 follow-on, explicit user request: "everything needs to be
+replicated... that we had for the shorts, like we had for the longs. The
+same issues cant continuously be coming up." Audited the rest of the
+codebase for the same class of stale long-only assumption. Found and fixed
+two more, both real:**
+
+1. **`reconcile_against_broker` (executor.py) had no way to tell a
+   legitimately-tracked short from an unexpected one.** It only ever
+   received symbol NAMES, not sides, so ANY negative broker qty on a
+   tracked symbol read as `"SHORT position of X - this bot never opens
+   shorts"` - true before short_strategy existed, a FALSE ALARM on every
+   single reconcile poll a legitimate short was open once it went live.
+   This fired a real `_AL.degraded()` alert each time the set of open
+   shorts changed, and (traced directly from 2026-09-29's own logs) is why
+   COIN appeared to flip between "not tracking it" and "never opens
+   shorts" messages across consecutive polls - neither the genuine
+   untracked-orphan case nor the healthy-tracked-short case were being
+   told apart. Fixed by adding a `short_symbols` parameter (the set of
+   symbols the caller tracks as short, from `TradeManager.direction`) -
+   a short matching what it's tracked as now reports nothing, and the
+   TRUE remaining mismatch case (tracked as one side, broker shows the
+   other - a real sign flip) is now caught for the first time instead of
+   silently passing through unreported.
+2. **`flatten_all_positions` (executor.py, 16:00 time stop) logged an
+   ERROR every time it closed ANY short, unconditionally** - "The bot
+   never opens shorts deliberately, so this position is evidence of a
+   separate bug." True when short_strategy is off; alarmist and wrong once
+   it's a deliberate feature, since a short still open at the time stop is
+   completely ordinary end-of-day behavior. Now checks
+   `short_strategy.enabled` and logs at INFO with no bug-claim when it's
+   on, preserving the original ERROR + bug-claim exactly as before when
+   it's off (the still-real "how did this position exist at all" question
+   for that case).
+
+New tests: test_risk_tier2.py R4b (reconcile_against_broker's
+short_symbols parameter, both directions of mismatch, the false-positive
+fix verified directly) and test_signs.py section 10 (flatten_all_positions'
+log level/message verified by capturing actual logger calls, both
+short_strategy on and off). Full suite green (2809 pass, 0 fail).
+
+Explicitly checked and found NOT to need changes (audited, not assumed):
+`Strategy.can_enter`'s `qty > 0` (qty here is always a positive share
+count regardless of side, side is a separate parameter - not a sign
+check), `check_exit`'s per-rule `qty > 0` (every exit rule already returns
+a direction-agnostic positive magnitude via `TradeManager.direction`
+internally), `_attempt_entry`'s `qty <= 0` sizing gate (already side-aware,
+checks `short_regime_size_multiplier` vs `regime_size_multiplier` by
+`side`), and `reconcile_existing_positions`' qty checks (already computes
+`side = "short" if raw_qty < 0 else "long"` correctly).
+
 **2026-09-28 — first live day, two bugs found, FIXED 2026-09-29 (see the
 2026-09-29 update above - INCOMPLETE, the same class of bug recurred worse):**
 
