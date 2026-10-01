@@ -38,6 +38,25 @@ trading:
   # individual stock's strength. This mode is a deliberate, budgeted retest of
   # that conclusion with better instrumentation - not a reversal of it.
   opening_burst:
+    # DISABLED AGAIN 2026-10-01, on explicit user instruction, reversing the
+    # 2026-09-22 re-enable below - this time not for a loss, but because the
+    # fill-rate problem never resolved across every lever tried: 0% (09-22),
+    # 21% (09-23, the only non-zero reading this mechanism has ever
+    # produced), 0% (09-24, wider band + more patience), 0% (09-25, full
+    # revert to the 09-23 band), 0% again (09-30). The user independently
+    # concluded on 2026-09-27 that Alpaca's paper-trading simulator itself
+    # may introduce the fill delay (50-260s, unrelated to any config lever
+    # here), and on 2026-10-01 decided the mode isn't accomplishing its
+    # purpose (real, promptly-managed fills) regardless of further tuning -
+    # not primarily an orphan-risk decision (see late_fill_watch_seconds
+    # above, which now catches a late fill on ANY entry path, opening-burst
+    # or not) but an independent call that this specific mode has had a long
+    # enough trial. _opening_burst_config() returns None when this is false,
+    # and _run_opening_move_exp() returns 0 immediately
+    # (src/main.py:2204-2206) - no baseline, no signal measured, no trade
+    # submitted, no forward-return journaling for this window either (same
+    # cost noted on the 2026-09-21 disable below, unchanged).
+    #
     # RE-ENABLED 2026-09-22 on explicit user instruction, reversing the
     # 2026-09-21 disable below. Was OFF for exactly one session (2026-09-21),
     # which is worth knowing if that day's numbers get compared against a
@@ -56,7 +75,7 @@ trading:
     # for zero trades in this window, not a shadow mode, and no shadow-mode
     # toggle exists yet to give both. Do not re-enable without the standing
     # go-ahead this file requires for entry changes.
-    enabled: true
+    enabled: false
 
     # Measure from this instant. The stream is subscribed BEFORE the open (see
     # stream_prestart_minutes) so a price actually exists at 09:30:00.

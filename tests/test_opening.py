@@ -792,10 +792,15 @@ print("\n=== 28. TOMORROW'S SETTINGS, ONE LAST TIME ===")
 # mechanism regardless of today's live toggle.
 _t = yaml.safe_load(open(CONFIG))["trading"]
 _o = _t["opening_burst"]
-# RE-ENABLED 2026-09-22 on explicit user instruction, after one session
-# (2026-09-21) disabled per the prior note here - see config.yaml's comment
-# on this key for the full history.
-check("burst enabled", _o["enabled"] is True)
+# DISABLED AGAIN 2026-10-01, on explicit user instruction - the fill-rate
+# problem never resolved across every lever tried (0%, 21%, 0%, 0%, 0%
+# across five measured sessions), and the user concluded the mode isn't
+# accomplishing its purpose regardless of further tuning, independent of
+# the orphan-risk question (see late_fill_watch_seconds, which now covers
+# every entry path). RE-ENABLED 2026-09-22 on explicit user instruction,
+# after one session (2026-09-21) disabled per the prior note here - see
+# config.yaml's comment on this key for the full history.
+check("burst disabled", _o["enabled"] is False)
 check("window 09:30 -> 09:33",
       (_o["baseline_time"], _o["decide_by"]) == ("09:30", "09:33"))
 # 0.3 -> 0.2 for 2026-09-23, on explicit user request (see config.yaml's
