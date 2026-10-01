@@ -117,6 +117,10 @@ class Executor:
         # Set by main to Strategy.correct_entry_qty - see that method for why a
         # partially filled entry must reach the strategy, not just the executor.
         self.on_entry_qty_corrected = None
+        # Set by main to Strategy.confirm_entry - see _recently_abandoned below
+        # and check_late_fills for why an entry retry_unfilled_entries already
+        # gave up on can still need this.
+        self.on_late_fill_confirmed = None
         # Exits awaiting a post-exit price check: each is
         # {row, symbol, exit_price, due_at}. See note_post_exit_prices - this is
         # how "what happened AFTER we sold" becomes answerable at all. Until
@@ -221,6 +225,27 @@ class Executor:
         # position silently unmanaged.
         self._pending_exit_verify = {}
         self._pending_entry_verify = {}
+        # symbol -> {"ts": time.monotonic() when retry_unfilled_entries gave
+        # up, "qty": int (positive, the size it was chasing), "side": "buy"
+        # or "sell", "decision_price": float or None}. See check_late_fills.
+        #
+        # 2026-09-30: retry_unfilled_entries already re-checks the broker
+        # once, immediately after cancelling, before abandoning an entry -
+        # added 2026-09-14 to catch a cancel-vs-fill race landing in the same
+        # instant. That catches a MILLISECOND race. It does not catch
+        # Alpaca's paper-trading simulator filling an order 50-260s AFTER
+        # the bot cancelled it and walked away (confirmed independently,
+        # 2026-09-27) - a fill that late sails straight past one immediate
+        # check. IONQ on 2026-09-30: abandoned at 13:30:32, 47 shares
+        # intended; the periodic reconcile (every ~300s) did not discover
+        # the broker actually holding -460 shares until 13:45:14 - 15
+        # minutes of a completely dark, unmanaged position force-closed at
+        # whatever price was showing, one of 20 ORPHAN_RECONCILE exits that
+        # day. This dict is a SHORTER, more frequent (every poll, not every
+        # ~300s) watch for exactly that window, so a late fill gets a real
+        # exit profile (see check_late_fills/Strategy.confirm_entry) instead
+        # of sitting fully invisible until the blunt reconcile sweep.
+        self._recently_abandoned = {}
         self._logged_loss_limit = None
         self._last_loss_limit_log_at = 0.0  # time.monotonic() of the last "Daily loss limit" log line
         self._logged_loss_tier = 1.0
@@ -406,6 +431,9 @@ class Executor:
                         self.on_entry_qty_corrected(symbol, held)
                     except Exception as e:
                         logger.error(f"Could not reconcile share count for {symbol}: {e}")
+
+            if self._recently_abandoned:
+                self.check_late_fills(positions)
 
             self.daily_pnl = self._compute_daily_pnl(account, positions)
         except Exception as e:
@@ -1088,6 +1116,19 @@ class Executor:
                 self._pending_cost.pop(symbol, None)
                 self.open_entries.pop(symbol, None)
                 abandoned.append(symbol)
+                # The cancel just submitted only confirms Alpaca ACCEPTED the
+                # request, same caveat as the post-cancel re-checks above,
+                # and the one immediate re-check a few lines up only covers
+                # a millisecond-scale race - not Alpaca's paper-trading fill
+                # delays of up to ~260s (see _recently_abandoned's
+                # docstring). Watch for a late fill a while longer rather
+                # than going fully dark until the next ~300s reconcile.
+                self._recently_abandoned[symbol] = {
+                    "ts": time.monotonic(),
+                    "qty": info["qty"],
+                    "side": info.get("side", "buy"),
+                    "decision_price": info.get("decision_price"),
+                }
                 continue
 
             logger.warning(
@@ -1267,6 +1308,80 @@ class Executor:
         except Exception as e:
             logger.warning(f"{symbol}: forced market retry also failed ({type(e).__name__}: {e})")
             return None, "market"
+
+    def check_late_fills(self, positions):
+        """
+        Watch symbols retry_unfilled_entries gave up on for a fill that
+        lands LATE - see _recently_abandoned's docstring for why the
+        immediate post-cancel re-check already in that method is not
+        enough. Called from refresh_account_snapshot with the SAME
+        positions dict it already fetched this poll, so this costs no
+        extra broker call.
+
+        Two outcomes per watched symbol:
+          - a matching-direction position shows up at the broker -> a real
+            late fill. Hand it to on_late_fill_confirmed (Strategy.
+            confirm_entry) so it gets a normal exit profile from this
+            moment, instead of sitting untracked until the next ~300s
+            reconcile force-closes it with no stop-loss ever having run.
+            This dict only ever carries qty/side/decision_price (see its
+            own docstring), not which config_override the original attempt
+            would have used, so a late fill re-opens under the DEFAULT exit
+            profile even if the original signal (e.g. opening-move) would
+            have used a custom one - unavoidable without also recording
+            that at submission time, and still strictly better than no
+            exit profile at all.
+          - the watch window expires with nothing showing -> stop
+            watching. This does NOT mean no position exists; it means
+            this shorter, frequent watch didn't catch one. The periodic
+            reconcile remains the backstop either way, unchanged.
+        """
+        mle_cfg = (self.config.get("trading") or {}).get("marketable_limit_entries") or {}
+        watch_seconds = float(mle_cfg.get("late_fill_watch_seconds", 240))
+        now = time.monotonic()
+
+        for symbol, info in list(self._recently_abandoned.items()):
+            expect_sign = -1 if info.get("side") == "sell" else 1
+            try:
+                held = int(float(getattr(positions.get(symbol), "qty", 0) or 0))
+            except (TypeError, ValueError):
+                held = 0
+
+            if expect_sign * held > 0:
+                self._recently_abandoned.pop(symbol, None)
+                logger.warning(
+                    f"{symbol}: LATE FILL confirmed {now - info['ts']:.0f}s after "
+                    f"giving up on this entry - {held} share(s) at the broker "
+                    f"that this bot had stopped watching. Re-opening it as a "
+                    f"tracked position under its normal exit profile rather "
+                    f"than leaving it for the next reconcile sweep to force-"
+                    f"close blind."
+                )
+                if self.on_late_fill_confirmed is not None:
+                    try:
+                        fill_price = info.get("decision_price")
+                        try:
+                            fill_price = float(getattr(positions.get(symbol), "avg_entry_price", None)
+                                                or fill_price or 0) or fill_price
+                        except (TypeError, ValueError):
+                            pass
+                        side = "short" if info.get("side") == "sell" else "long"
+                        self.on_late_fill_confirmed(symbol, fill_price, abs(held), side)
+                    except Exception as e:
+                        logger.error(f"Could not re-open {symbol} after a late fill: {e}")
+                self._open_symbols.add(symbol)
+                self._entry_recorded_at[symbol] = now
+                self.open_entries[symbol] = info.get("decision_price")
+                continue
+
+            if now - info["ts"] >= watch_seconds:
+                self._recently_abandoned.pop(symbol, None)
+                logger.info(
+                    f"{symbol}: late-fill watch expired after {watch_seconds:.0f}s "
+                    f"with nothing showing at the broker - no longer watching. "
+                    f"The periodic reconcile remains the backstop if a fill "
+                    f"still lands after this."
+                )
 
     def _correct_trade_record_for_forced_exit(self, symbol, qty, order, info):
         """

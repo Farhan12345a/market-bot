@@ -1473,6 +1473,24 @@ trading:
     # hardcoded 12s everywhere retry_unfilled_entries is called, same as
     # before this key existed.
 
+    # LATE-FILL WATCH (2026-09-30). retry_unfilled_entries already re-checks
+    # the broker once, immediately after cancelling, before abandoning an
+    # entry (2026-09-14 fix) - that catches a millisecond-scale cancel-vs-
+    # fill race. It does not catch Alpaca's paper-trading simulator filling
+    # an order 50-260s AFTER the bot cancelled it and walked away (the user
+    # independently identified this delay, 2026-09-27). IONQ on 2026-09-30:
+    # abandoned at 13:30:32, the periodic ~300s reconcile did not discover
+    # the broker actually holding -460 shares until 13:45:14 - 15 minutes
+    # fully dark, no stop-loss, force-closed at whatever price was showing.
+    # Executor._recently_abandoned/check_late_fills now watches an
+    # abandoned entry every poll (not just once) for this many seconds
+    # before giving up on it too; a fill inside this window gets a normal
+    # exit profile via Strategy.confirm_entry instead of sitting invisible
+    # until the reconcile sweep. 240s: comfortably past the reported 260s
+    # worst case while still finishing before reconcile's own ~300s cadence
+    # would otherwise have found it blind first.
+    late_fill_watch_seconds: 240
+
   marketable_limit_exits:
     enabled: true
     slippage_pct: 0.3

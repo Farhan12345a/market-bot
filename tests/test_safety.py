@@ -223,5 +223,149 @@ check("a symbol entered THIS INSTANT still reconciles its qty immediately - "
       "no waiting for ENTRY_CONFIRM_GRACE_SECONDS to elapse",
       calls3 == [("VIAV", -36)], calls3)
 
+print("\n=== D. LATE-FILL WATCH (2026-09-30) ===")
+# retry_unfilled_entries' existing post-cancel re-check (2026-09-14) only
+# catches a millisecond-scale race. IONQ on 2026-09-30 was abandoned at
+# 13:30:32 and the broker's real -460 fill was not discovered until the
+# periodic reconcile ran at 13:45:14 - 15 minutes fully dark. This section
+# tests Executor._recently_abandoned/check_late_fills, the shorter, more
+# frequent watch added to close that gap.
+esrc = open(repo_file("src", "executor", "executor.py")).read()
+
+def mk_exec(positions=None):
+    return Executor(FakeBroker(positions or {}), copy.deepcopy(CFG))
+
+# D1. retry_unfilled_entries actually POPULATES _recently_abandoned when it
+# gives up after a retry, with the info the watch needs.
+e4 = mk_exec({"IONQ": Pos(0)})
+e4._open_symbols.add("IONQ")
+e4._pending_entry_verify["IONQ"] = {
+    "ts": time.monotonic() - 999, "qty": 47, "decision_price": 44.24,
+    "side": "buy", "retried": True,
+}
+e4.retry_unfilled_entries(grace_seconds=12)
+check("a symbol abandoned after its retry also failed to fill is recorded "
+      "in _recently_abandoned, not just wiped",
+      "IONQ" in e4._recently_abandoned, e4._recently_abandoned)
+check("...with the qty/side/decision_price the watch needs to recognize a "
+      "later fill",
+      e4._recently_abandoned.get("IONQ", {}).get("qty") == 47
+      and e4._recently_abandoned.get("IONQ", {}).get("side") == "buy"
+      and e4._recently_abandoned.get("IONQ", {}).get("decision_price") == 44.24)
+check("the symbol is still fully wiped from normal tracking (unaffected by "
+      "this addition) - it only exists in the new watch dict",
+      "IONQ" not in e4._open_symbols and "IONQ" not in e4.open_entries)
+
+# D2. check_late_fills confirms a late fill inside the watch window and
+# fires on_late_fill_confirmed instead of leaving it dark.
+e5 = mk_exec()
+e5._recently_abandoned["IONQ"] = {
+    "ts": time.monotonic() - 30, "qty": 47, "side": "buy",
+    "decision_price": 44.24,
+}
+confirmed = []
+e5.on_late_fill_confirmed = lambda sym, price, qty, side: confirmed.append((sym, price, qty, side))
+e5.check_late_fills({"IONQ": Pos(460, avg=45.15)})
+check("a late fill well inside the watch window is confirmed, not left dark",
+      confirmed == [("IONQ", 45.15, 460, "long")], confirmed)
+check("...and it stops being watched (handed off, not double-handled next poll)",
+      "IONQ" not in e5._recently_abandoned)
+check("...and normal tracking is re-armed so the rest of the bot (exit "
+      "checks, exposure) sees it as a real open position again",
+      "IONQ" in e5._open_symbols and e5.open_entries.get("IONQ") is not None)
+
+# D3. A SHORT entry's late fill (negative broker qty) is recognized too -
+# the same sign-awareness every other piece of this mechanism needed.
+e6 = mk_exec()
+e6._recently_abandoned["RVMD"] = {
+    "ts": time.monotonic() - 30, "qty": 21, "side": "sell",
+    "decision_price": 203.9,
+}
+confirmed6 = []
+e6.on_late_fill_confirmed = lambda sym, price, qty, side: confirmed6.append((sym, price, qty, side))
+e6.check_late_fills({"RVMD": Pos(-42, avg=204.5)})
+check("a late SHORT fill (negative broker qty) is recognized, sized by "
+      "magnitude, and reported as side='short'",
+      confirmed6 == [("RVMD", 204.5, 42, "short")], confirmed6)
+
+# D4. A mismatched sign (e.g. a stray long qty where a short was expected)
+# is NOT treated as this entry's late fill.
+e7 = mk_exec()
+e7._recently_abandoned["RVMD"] = {
+    "ts": time.monotonic() - 30, "qty": 21, "side": "sell",
+    "decision_price": 203.9,
+}
+confirmed7 = []
+e7.on_late_fill_confirmed = lambda *a: confirmed7.append(a)
+e7.check_late_fills({"RVMD": Pos(42, avg=204.5)})  # POSITIVE - wrong side
+check("a positive qty does not satisfy a SHORT entry's late-fill watch",
+      confirmed7 == [], confirmed7)
+check("...and keeps watching rather than silently dropping it",
+      "RVMD" in e7._recently_abandoned)
+
+# D5. The watch expires after late_fill_watch_seconds with nothing found -
+# stops watching, but does NOT claim a fill happened.
+e8 = mk_exec()
+e8._recently_abandoned["IONQ"] = {
+    "ts": time.monotonic() - 241, "qty": 47, "side": "buy",  # past the 240s default
+    "decision_price": 44.24,
+}
+confirmed8 = []
+e8.on_late_fill_confirmed = lambda *a: confirmed8.append(a)
+e8.check_late_fills({})  # broker shows nothing
+check("the watch expires past late_fill_watch_seconds (240s default) with "
+      "nothing showing",
+      "IONQ" not in e8._recently_abandoned)
+check("...without ever claiming a fill that didn't happen",
+      confirmed8 == [])
+
+# D6. A callback exception cannot break the poll loop.
+e9 = mk_exec()
+e9._recently_abandoned["IONQ"] = {
+    "ts": time.monotonic() - 30, "qty": 47, "side": "buy",
+    "decision_price": 44.24,
+}
+e9.on_late_fill_confirmed = lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))
+try:
+    e9.check_late_fills({"IONQ": Pos(460, avg=45.15)})
+    check("a raising callback does not propagate out of check_late_fills", True)
+except Exception as ex:
+    check("a raising callback does not propagate out of check_late_fills", False, ex)
+
+# D7. Wired into refresh_account_snapshot, reusing the SAME positions dict
+# already fetched this poll - no extra broker call for this feature.
+check("refresh_account_snapshot calls check_late_fills when there is "
+      "something to watch",
+      "self.check_late_fills(positions)" in esrc)
+check("...gated on _recently_abandoned actually having something in it, "
+      "not called unconditionally every poll for nothing",
+      "if self._recently_abandoned:" in esrc)
+
+# D8. Config default and override both work.
+e10 = mk_exec()
+check("late_fill_watch_seconds defaults to 240 when not configured",
+      float((e10.config.get("trading") or {}).get("marketable_limit_entries", {})
+            .get("late_fill_watch_seconds", 240)) == 240)
+custom_cfg = copy.deepcopy(CFG)
+custom_cfg["trading"]["marketable_limit_entries"]["late_fill_watch_seconds"] = 5
+e11 = Executor(FakeBroker({}), custom_cfg)
+e11._recently_abandoned["IONQ"] = {
+    "ts": time.monotonic() - 6, "qty": 47, "side": "buy", "decision_price": 44.24,
+}
+e11.check_late_fills({})
+check("a configured late_fill_watch_seconds is honored instead of the "
+      "240s default",
+      "IONQ" not in e11._recently_abandoned)
+
+# D9. Wiring check: main.py connects this to Strategy.confirm_entry with
+# the side kwarg, not positionally (confirm_entry's 4th positional arg is
+# config_override, not side - a positional wire-up would silently corrupt
+# every re-opened trade's exit profile).
+msrc2 = open(repo_file("src", "main.py")).read()
+check("main wires on_late_fill_confirmed to a wrapper calling "
+      "strategy.confirm_entry with side= as a KEYWORD, not positionally",
+      "executor.on_late_fill_confirmed" in msrc2
+      and "strategy.confirm_entry(sym, price, qty, side=side)" in msrc2)
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

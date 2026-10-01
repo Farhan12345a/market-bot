@@ -5173,6 +5173,15 @@ def main():
         executor.on_entry_price_corrected = strategy.correct_entry_price
         executor.entry_price_source = market_data.entry_price_source
         executor.on_entry_qty_corrected = strategy.correct_entry_qty
+        # A late fill (see Executor._recently_abandoned/check_late_fills) gets
+        # the DEFAULT exit profile, not whatever config_override the original
+        # attempt would have used (e.g. opening-move's tighter exits) - the
+        # executor's own bookkeeping never recorded which profile was
+        # intended, only qty/side/decision_price. Still strictly better than
+        # the alternative (fully unmanaged until the next reconcile sweep).
+        executor.on_late_fill_confirmed = lambda sym, price, qty, side: (
+            strategy.confirm_entry(sym, price, qty, side=side)
+        )
         reconcile_existing_positions(broker, strategy, executor)
         email_notifier = EmailNotifier(config)
         signal_journal = SignalJournal(config)

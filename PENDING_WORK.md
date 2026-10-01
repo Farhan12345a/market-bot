@@ -1357,3 +1357,65 @@ gradient:
 Tests: `tests/test_extended_hours.py` extended with checks for the new
 `border-left` tick styling and the new chronological text line, alongside
 the existing coverage for colors/legend/tooltip/stale-data handling.
+
+## 7. 2026-09-30/10-01 — ORPHAN_RECONCILE, take three: the late-fill blind spot
+
+Found while investigating why ORPHAN_RECONCILE fired 20 times on 2026-09-30
+(worse than 09-28's 15) despite commit 912342d (item in section above) being
+live before that morning's open. 912342d fixed a DIFFERENT bug - this is a
+third, separate mechanism in the same failure family.
+
+**The bug.** `Executor.retry_unfilled_entries` already had a post-cancel
+re-check before giving up on an entry (added 2026-09-14, after FOUR/NBIS/
+VRT/AAOI/CIEN/AXTI all orphaned the same way) - cancel the stuck order,
+immediately re-check the broker, and only abandon tracking if the re-check
+still shows nothing. That catches a MILLISECOND-scale cancel-vs-fill race.
+It does not catch Alpaca's paper-trading simulator filling an order
+50-260s AFTER the cancel+recheck already ran and the bot walked away - a
+delay the user identified independently on 2026-09-27, unrelated to any
+config lever. Traced concretely on IONQ, 2026-09-30: abandoned (tracking
+fully wiped) at 13:30:32; the periodic reconcile (~300s cadence) did not
+discover the broker actually holding -460 shares until 13:45:14 - 15
+minutes of a completely dark, unmanaged position, force-closed at whatever
+price was showing. 9 of that day's 14 "never filled" opening-burst symbols
+(BE, BRKR, ILMN, IONQ, NBIS, SMTC, TEM, TWST, TXG) show this exact
+signature, which also reframes weeks of "why is the opening-burst fill
+rate 0%" - some fraction of those were never truly 0%, just invisibly
+filling late.
+
+**The fix.** `Executor._recently_abandoned` (symbol -> ts/qty/side/
+decision_price) plus `check_late_fills`, called from
+`refresh_account_snapshot` every poll (reusing the positions dict already
+fetched that poll, no extra broker call) whenever there is something to
+watch. Populated at the ONE site that actually wipes tracking in
+`retry_unfilled_entries` (the give-up-after-retry path; the separate
+"forced retry could not even be submitted" path is NOT populated here,
+correctly - no order is in flight there to fill late). A matching-direction
+fill inside `late_fill_watch_seconds` (new key under
+`marketable_limit_entries`, default 240s - past the reported 260s worst
+case, short of reconcile's own ~300s cadence) is handed to a new
+`on_late_fill_confirmed` callback, wired in main.py to
+`Strategy.confirm_entry`, re-opening the position with a normal exit
+profile instead of leaving it for the next reconcile sweep's blind
+force-close. Past the window, nothing changes - ORPHAN_RECONCILE remains
+the backstop, same as before this fix, now catching genuinely-stuck cases
+instead of routine late fills.
+
+**Known limitation, accepted rather than solved.** A late-confirmed fill
+always gets the DEFAULT exit profile, never whatever `config_override` the
+original attempt intended (e.g. opening-move's tighter exits) - Executor's
+own bookkeeping (`_pending_entry_verify`/`_recently_abandoned`) only ever
+carried qty/side/decision_price, never which profile a symbol's entry was
+meant to use. Fixing that would mean plumbing the profile choice through
+Executor, which currently has no reference to it at all. Still strictly
+better than the status quo (no exit profile for up to 15+ minutes).
+
+Tests: `tests/test_safety.py` section D (9 checks): population at the give-
+up site, confirmation on a matching late fill (long and short), a
+mismatched sign correctly NOT confirming, window expiry without falsely
+claiming a fill, a raising callback not propagating, the
+refresh_account_snapshot wiring, the config default/override, and the
+main.py wiring using `side=` as a keyword (a positional wire-up would
+silently corrupt every re-opened trade's exit profile, since
+`confirm_entry`'s 4th positional argument is `config_override`, not
+`side`).
