@@ -4470,6 +4470,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     **cand["cont"],
                     taken=taken, skip_reason=skip_reason,
                     qty=None, size_multiplier=None,
+                    regime=regime_state.get("label"),
                 )
 
             # Best-first, so the throttle keeps the best of a burst rather than
@@ -4574,6 +4575,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     **cand["cont"],
                     taken=taken, skip_reason=skip_reason,
                     qty=None, size_multiplier=burst_size,
+                    regime=regime_state.get("label"),
                 )
 
         if email_notifier is not None and getattr(email_notifier, "run_context", None):

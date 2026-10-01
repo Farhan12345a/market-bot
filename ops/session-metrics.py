@@ -49,6 +49,7 @@ JOURNAL_FIELDS = [
     "cf_score",
     "taken", "skip_reason", "qty", "size_multiplier",
     "price_15min", "pct_15min", "price_30min", "pct_30min",
+    "regime",
 ]
 
 # Past versions of each schema, so rows written before a column existed still
@@ -88,7 +89,8 @@ TRADE_FIELDS_HISTORY = [
 ]
 JOURNAL_FIELDS_HISTORY = [
     [c for c in JOURNAL_FIELDS
-     if c not in ("cf_sector_strength", "cf_sector_etf")],
+     if c not in ("cf_sector_strength", "cf_sector_etf", "regime")],
+    [c for c in JOURNAL_FIELDS if c != "regime"],
 ]
 
 MARKERS = ("<!-- BEGIN GENERATED -->", "<!-- END GENERATED -->")

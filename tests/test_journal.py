@@ -197,5 +197,37 @@ check("both journals flush on finish_day", "short_signal_journal.flush()" in src
 check("both journals flush on a crash/interrupt, not just the long one",
       src.count("_flush_journal_safely(short_signal_journal)") >= 2)
 
+print("\n=== G. REGIME COLUMN (2026-10-01) ===")
+# With longs gated to bullish-only and shorts to bearish-only (regime_sizing's
+# neutral/choppy multipliers cut to 0), every signal refused for standing down
+# on regime would otherwise vanish from the record with no way to tell "the
+# regime refused this" apart from any other internal rejection, let alone see
+# the forward return of what the symbol actually did. Explicit user request:
+# keep a measure of how symbols trade during a choppy regime even though
+# nothing is taken, so there is real data to decide what to do about it.
+tf2 = tempfile.mktemp(suffix=".csv")
+j2 = mk(tf2)
+j2.record(symbol="CHOP1", price=50.0, signal_pct=0.4, taken=False,
+          skip_reason="rejected_by_pre_entry_checks", regime="choppy")
+j2.record(symbol="BULL1", price=60.0, signal_pct=0.6, taken=True,
+          regime="bullish")
+j2.flush()
+r2 = {row["symbol"]: row for row in rows(tf2)}
+check("a signal's regime at the time it fired round-trips through the CSV",
+      r2["CHOP1"]["regime"] == "choppy" and r2["BULL1"]["regime"] == "bullish",
+      r2)
+check("regime is recorded even when the signal was refused - this is the "
+      "whole point, refused-during-chop is exactly the control group",
+      r2["CHOP1"]["taken"] == "False" and r2["CHOP1"]["regime"] == "choppy")
+
+check("the main entry loop passes the live regime label into the LONG "
+      "signal journal", "regime=regime_state.get(\"label\")" in src
+      and "signal_journal.record(" in src)
+check("...and into the SHORT signal journal too - the same question "
+      "('what did a choppy/neutral/bullish-blocked short candidate do') "
+      "applies on that side",
+      src.count('regime=regime_state.get("label")') >= 2,
+      src.count('regime=regime_state.get("label")'))
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

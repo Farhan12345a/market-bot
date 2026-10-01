@@ -67,6 +67,25 @@ JOURNAL_FIELDS = [
     "taken", "skip_reason", "qty", "size_multiplier",
     # --- what actually happened next (the label) ---
     "price_15min", "pct_15min", "price_30min", "pct_30min",
+    # The regime label in force AT SIGNAL TIME (bullish/bearish/neutral/
+    # choppy, or blank before the first read of the day) - added 2026-10-01,
+    # explicit user request: with longs now gated to bullish-only and
+    # shorts to bearish-only (regime_sizing's neutral/choppy multipliers cut
+    # to 0.0 the same week), every signal that fires during a stand-down
+    # regime is refused and WOULD otherwise vanish from the record entirely
+    # - skip_reason only ever said "rejected_by_pre_entry_checks", with no
+    # way to tell a regime stand-down apart from any other internal refusal,
+    # let alone see what the symbol went on to do. This column, combined
+    # with the forward-return columns this file already computes for every
+    # signal regardless of taken/skip_reason, makes "what would a choppy
+    # regime's refused signals have done" a question this file can answer
+    # without adding a second, separate observational journal - the same
+    # reasoning that reused this class wholesale for short_signal_journal.
+    # Appended at the END on purpose, matching cf_sector_strength/
+    # cf_sector_etf's own precedent above - repair_header remaps by name,
+    # and a column inserted mid-schema is exactly the shape that made the
+    # old header rot unreadable on 2026-08-26.
+    "regime",
 ]
 
 
@@ -96,6 +115,8 @@ JOURNAL_FIELDS_HISTORY = [
     # v3: before opening efficiency (34)
     [c for c in JOURNAL_FIELDS
      if c not in ("opening_efficiency", "opening_directional")],
+    # v4: before the regime column (36)
+    [c for c in JOURNAL_FIELDS if c != "regime"],
 ]
 
 

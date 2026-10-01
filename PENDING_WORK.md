@@ -1545,3 +1545,66 @@ alongside the existing "after losses only" one), `test_wsfail.py`, and
 had the wrong mechanism for why that specific check is unaffected by this
 flag - phantom cooldown short-circuits before the loss-only branch is
 ever reached, it is not that phantoms count as losses).
+
+## 11. 2026-10-01 — signal_journal.csv gets a `regime` column
+
+Explicit user request: "the market looks like it's gonna be very choppy
+the next upcoming days and not making any trades at all might be bad...
+keep a measure somehow of the date and the way symbols are trading in a
+choppy regime for the next few days." With longs gated to bullish-only
+and shorts to bearish-only (this same week's regime-gating change), every
+signal refused for a regime stand-down previously vanished from the
+record with no way to tell "the regime refused this" apart from any other
+internal rejection (`skip_reason` only ever said
+`rejected_by_pre_entry_checks`), let alone see what the symbol actually
+did afterward.
+
+**What changed**: added `regime` to `JOURNAL_FIELDS` (the regime label in
+force at signal time) and wired `regime=regime_state.get("label")` into
+both the long and short normal-window `signal_journal.record()`/
+`short_signal_journal.record()` calls - both journals reuse the same
+`SignalJournal` class, so the schema change applies to both with the one
+edit. Not wired into the opening-burst mechanism's own journal calls
+(`_run_opening_move_exp` doesn't receive `regime_state` at all, and
+threading it through for a currently-disabled mode wasn't worth the
+added surface).
+
+This is purely observational - no entry logic changed, nothing about
+WHICH trades happen. Every signal, taken or refused, already carries
+`pct_15min`/`pct_30min` forward returns regardless of `taken`/
+`skip_reason` - the `regime` column is what turns "what would a choppy
+regime's refused signals have done" into a question this file can
+already answer: filter `signal_journal.csv`/`short_signal_journal.csv` on
+`regime in (choppy, neutral)` and read the forward-return columns
+directly, the same way the file's existing design already treats every
+other refused signal as its own control group.
+
+**Appended at the END of JOURNAL_FIELDS**, matching the precedent set by
+`cf_sector_strength`/`cf_sector_etf` - `repair_header` remaps by name, and
+a column inserted mid-schema is exactly the shape that made the signal
+journal's header rot unreadable on 2026-08-26. A new `JOURNAL_FIELDS_
+HISTORY` entry records the pre-regime schema for older rows.
+
+Also updated two standalone copies of this exact field list that must
+stay in sync by hand (`ops/session-metrics.py`, `ops/analyze-journal.py`
+- caught by `test_schema.py`'s existing "schema matches src exactly"
+check, which failed immediately until both were updated).
+
+**Tests**: `tests/test_journal.py` section G - the field round-trips
+through a real `SignalJournal` write+read cycle, is recorded even for a
+refused signal (the actual point), and both main.py call sites are
+confirmed to pass it. `tests/test_schema.py` updated: the existing
+"without declared history, an older generation misreads" counterfactual
+now explicitly pins the sector-column (inserted) generation rather than
+whatever is structurally last, since appending (what `regime` does)
+doesn't reproduce that fault - a NEW, separate demonstration was added
+showing exactly that difference (an appended column needs no declared
+history for a row's OTHER fields to keep reading correctly; only the
+appended column itself is honestly blank for an older row that never
+recorded it).
+
+**What this does NOT do**: it does not change the chop/neutral exclusion
+itself, propose a partial-size compromise, or re-enable any trading
+during chop. It is pure instrumentation, so the user has real data (not
+a re-litigated guess) to decide what to do if the next several sessions
+are dominated by chop.
