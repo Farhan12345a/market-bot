@@ -178,8 +178,12 @@ check("...for about phantom_reentry_cooldown_minutes",
 check("the ordinary cooldown honours it too",
       ex.reentry_cooldown_remaining("WDAY") > 0)
 check("an untouched symbol is free", ex.phantom_cooldown_remaining("NVDA") == 0)
-check("reentry_cooldown_after_loss_only is still true - this is NOT that switch",
-      CFG["trading"]["reentry_cooldown_after_loss_only"] is True)
+check("reentry_cooldown_after_loss_only flipped to false on 2026-10-01 "
+      "(see config.yaml's comment) - this phantom-cooldown test is "
+      "unaffected either way, since reentry_cooldown_remaining checks "
+      "phantom_cooldown_remaining FIRST and returns early on it, never "
+      "reaching the loss-only branch for a phantom at all",
+      CFG["trading"]["reentry_cooldown_after_loss_only"] is False)
 check("the entry path checks the phantom cooldown BEFORE the skippable one",
       msrc.index('getattr(executor, "phantom_cooldown_remaining"')
       < msrc.index("cooldown_left = 0 if skip_cooldown"))
@@ -188,6 +192,46 @@ check("...and the burst's skip_reentry_cooldown cannot bypass it",
 check("...and a missing method degrades to no-cooldown rather than raising "
       "into the entry path",
       'lambda _s: 0.0' in msrc)
+
+print("\n--- ordinary cooldown: win vs loss, under the live (and the old) setting ---")
+# reentry_cooldown_after_loss_only flipped true -> false on 2026-10-01 (see
+# config.yaml's comment): 8 days of trade_history.csv showed fast re-entries
+# into a symbol that just PAID OUT losing money on average (-$5.89/trade,
+# n=28) - the exact case the old `true` setting let through with zero
+# cooldown. Exercised here end to end through the real submit_exit_order
+# path (not just the internal state directly), under BOTH settings, so a
+# future revert of this flag is caught by a real assertion instead of
+# silently changing behavior unnoticed.
+def exit_and_check(cfg, entry_price, exit_price, symbol="WIN_OR_LOSS_TEST"):
+    # B({symbol: 10}) - the broker must actually report the position HELD,
+    # or submit_exit_order reads 0 shares and treats this as a PHANTOM
+    # drop instead of a real exit, which arms a completely different
+    # cooldown (phantom_cooldown_remaining, checked first and always >0
+    # regardless of win/loss) and would make every variant of this check
+    # pass for the wrong reason.
+    exi = Executor(B({symbol: 10}), copy.deepcopy(cfg))
+    exi.open_entries[symbol] = entry_price
+    exi._open_symbols.add(symbol)
+    exi.submit_exit_order(symbol, 10, "TRAILING_STOP", exit_price, qty_before=10)
+    return exi.reentry_cooldown_remaining(symbol)
+
+check("LIVE config (after_loss_only=false): a WINNING exit now ALSO arms "
+      "the cooldown - this is the exact behavior change just made",
+      exit_and_check(CFG, 100.0, 105.0) > 0,
+      exit_and_check(CFG, 100.0, 105.0))
+check("LIVE config: a LOSING exit still arms the cooldown (unchanged)",
+      exit_and_check(CFG, 100.0, 95.0) > 0,
+      exit_and_check(CFG, 100.0, 95.0))
+
+old_style = copy.deepcopy(CFG)
+old_style["trading"]["reentry_cooldown_after_loss_only"] = True
+check("OLD setting (after_loss_only=true), kept working as a regression "
+      "guard: a WINNING exit is NOT cooled down",
+      exit_and_check(old_style, 100.0, 105.0) == 0,
+      exit_and_check(old_style, 100.0, 105.0))
+check("...but a LOSING exit still is, under the old setting too",
+      exit_and_check(old_style, 100.0, 95.0) > 0,
+      exit_and_check(old_style, 100.0, 95.0))
 
 print("\n--- attempt cap ---")
 ex2 = Executor(B({}), copy.deepcopy(CFG))

@@ -1487,3 +1487,61 @@ tests that found them instead:**
 
 All three are documented at the test that previously asserted the old,
 now-superseded relationship, not silently loosened.
+
+## 10. 2026-10-01 — reentry_cooldown_after_loss_only: true -> false
+
+Explicit user request, following a direct question about whether 97
+trades by midday could be spread out more. Checked whether fast same-
+symbol re-entries are actually worse, using all 8 recorded days of
+`trade_history.csv` grouped by (symbol, date) and split on the gap since
+that symbol's own last exit:
+
+```
+re-entered the SAME symbol <5 min after its last exit:   n=30  mean -$5.81
+re-entered the SAME symbol >=5 min after its last exit:  n=93  mean +$2.06
+```
+
+Split further by whether the prior exit was a win or a loss, it is
+almost entirely one thing: **28 of the 30 fast re-entries followed a
+WIN** (mean -$5.89, total -$164.88) - because
+`reentry_cooldown_after_loss_only: true` meant a winning exit was never
+subject to any cooldown at all. "Slow (>=5 min) after a loss" (already
+gated by the cooldown) was the single best bucket measured, +$4.86/trade,
+n=57. The single-day evidence that originally justified carving wins out
+of the cooldown (UBER/CHWY/CMG all profitable on re-entry that one day)
+did not hold up against the broader sample.
+
+Flipped the config flag; `Executor.reentry_cooldown_remaining`'s branch
+logic needed no code change; it already implements both behaviors
+correctly on this one setting; see its own docstring, updated to match.
+
+Side benefit, not the primary reason: this also partially addresses the
+"can entries be spread out more through the day" question from the same
+conversation - a cooldown after a win makes the bot wait longer before
+re-entering that symbol, which slows how fast `max_entry_attempts_per_
+symbol_per_day` gets used up on any one name, pushing some attempts later
+in the day rather than front-loading them. Not pursued as a dedicated fix
+on its own; market-structure volatility clustering early in the session
+is real and not something to fight by holding back good signals.
+
+**Tests, requested explicitly ("tested end to end")**: the existing test
+suite had NO test exercising this branch's actual win/loss logic through
+the real `submit_exit_order` path before this change - every hit was
+either a synthetic fixture or a bare assertion pinning the live config
+value. Added to `tests/test_0902b.py`: four checks running a real
+`Executor` through `submit_exit_order` for both a winning and a losing
+exit, under both the new live setting (false) and the old one (true, as
+a deep-copied override) - confirming the win-exemption is gone under the
+new default AND that the old behavior still works correctly if the flag
+is ever reverted. Caught one real test-fixture bug while writing it: the
+fake broker initially reported 0 shares held, which routed the "exit"
+through the PHANTOM-drop path instead of a real exit and made every
+variant pass for the wrong reason (phantom_cooldown_remaining, checked
+first, is unconditionally >0 regardless of win/loss) - fixed by having
+the fake broker actually report the position as held. Also updated
+`test_socket.py` (added a rendering check for the "after any exit" label,
+alongside the existing "after losses only" one), `test_wsfail.py`, and
+`test_0902b.py`'s own phantom-cooldown section (corrected a comment that
+had the wrong mechanism for why that specific check is unaffected by this
+flag - phantom cooldown short-circuits before the loss-only branch is
+ever reached, it is not that phantoms count as losses).

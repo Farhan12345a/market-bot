@@ -551,12 +551,19 @@ class Executor:
         over 3, CLSK -$238 over 4, PLUG -$137, UPST -$134. Every one of those
         was entered, stopped out, and re-entered into the same decline.
 
-        The cooldown only starts after a LOSING exit when
-        reentry_cooldown_after_loss_only is set (the default). Re-entering a
-        name that just paid out is a different situation and was profitable
-        that day - UBER +$190 over 2 entries, CHWY +$159 over 4, CMG +$109
-        over 2 - so blocking every re-entry indiscriminately would have cost
-        more than it saved.
+        Historically only started after a LOSING exit, when
+        reentry_cooldown_after_loss_only was set (the default until
+        2026-10-01) - re-entering a name that just paid out was profitable
+        on one specific day (UBER +$190 over 2 entries, CHWY +$159 over 4,
+        CMG +$109 over 2). That single-day read did not hold up against 8
+        days of trade_history.csv: fast re-entries following ANY exit,
+        win or loss, lost money on average, and it was almost entirely
+        fast re-entries following a WIN specifically (28 of 30, -$5.89/
+        trade) - exactly the case the loss-only carve-out let through with
+        no cooldown at all. reentry_cooldown_after_loss_only is now false
+        by default: the cooldown applies after every exit. The config flag
+        and this branch still exist, in case a future measurement reverses
+        this again.
         """
         minutes = self.config["trading"].get("reentry_cooldown_minutes", 0)
 

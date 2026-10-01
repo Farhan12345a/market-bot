@@ -138,6 +138,7 @@ t=CFG["trading"]
 check("cooldown reduced from 20", t["reentry_cooldown_minutes"] < 20, t["reentry_cooldown_minutes"])
 check("cooldown not removed entirely", t["reentry_cooldown_minutes"] > 0, t["reentry_cooldown_minutes"])
 check("shorter than the entry window (20 min)", t["reentry_cooldown_minutes"] < 20)
-check("still gates only losers", t["reentry_cooldown_after_loss_only"] is True)
+check("gates every exit now, not just losers (flipped 2026-10-01 - see "
+      "config.yaml's comment)", t["reentry_cooldown_after_loss_only"] is False)
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

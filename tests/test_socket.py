@@ -91,6 +91,12 @@ en.run_context={"symbols_watched":59,"symbols_streamed":14,"symbols_rest":45,"tr
 h2=en._generate_html_summary(T, label="Closing Report")
 check("cooldown value in the header band", "5 min" in h2)
 check("cooldown scope stated", "after losses only" in h2)
+en.run_context={"symbols_watched":59,"symbols_streamed":14,"symbols_rest":45,"trade_ticks":True,
+                "price_source":"stream","feed":"iex","symbols_note":"",
+                "reentry_cooldown_minutes":5,"reentry_cooldown_after_loss_only":False}
+h2b=en._generate_html_summary(T, label="Closing Report")
+check("cooldown scope renders 'after any exit' when the switch is off "
+      "(2026-10-01 live default)", "after any exit" in h2b, h2b)
 check("column count still matches the header row",
       h2.count("<th>")==h2[:h2.index("</thead>")].count("<th>"), "")
 bad=[{"symbol":"A","timestamp":"not-a-date","pl":0},{"symbol":"A","timestamp":"also-bad","pl":0}]
@@ -105,6 +111,8 @@ check("empty trade list -> empty labels, no raise", en._reentry_labels([])=={})
 print("=== E. CONFIG ===")
 t=CFG["trading"]
 check("cooldown stays at 5", t["reentry_cooldown_minutes"]==5, t["reentry_cooldown_minutes"])
-check("still losses-only", t["reentry_cooldown_after_loss_only"] is True)
+check("losses-only flipped to false on 2026-10-01 (see config.yaml's "
+      "comment) - cools down after ANY exit now, not just losses",
+      t["reentry_cooldown_after_loss_only"] is False)
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

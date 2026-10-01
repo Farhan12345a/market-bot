@@ -1515,10 +1515,27 @@ trading:
     slippage_pct: 0.3
     max_attempts: 2
 
-  reentry_cooldown_after_loss_only: true  # false = cool down after ANY exit. Left true because
+  # true -> false on 2026-10-01, explicit user request. The single-day
+  # evidence below that originally justified `true` (re-entering a winner
+  # was profitable that one day) did not hold up once 8 days of trade_
+  # history.csv were grouped by (symbol, date) and split on the gap since
+  # that symbol's own last exit: re-entries inside 5 minutes of ANY exit
+  # (not just a loss) lost money on average, and it was almost entirely
+  # fast re-entries following a WIN specifically - 28 of 30 fast
+  # re-entries, mean -$5.89/trade, total -$164.88 - since a win was never
+  # gated by any cooldown at all under `true`. Re-entries that waited 5+
+  # minutes after a loss (already gated) were the single best bucket
+  # measured, +$4.86/trade. Re-entries that waited 5+ minutes after a WIN
+  # (not gated, just naturally slower) were still mildly negative
+  # (-$2.38/trade) - so even the "wait" case isn't clearly profitable for
+  # a post-win re-entry, removing the original justification for carving
+  # wins out of the cooldown at all.
+  reentry_cooldown_after_loss_only: false  # false = cool down after ANY exit. Was true because
                                            # re-entering a name that just PAID was profitable that
                                            # day (UBER +$190 over 2, CHWY +$159 over 4, CMG +$109
-                                           # over 2) - only the losing re-entries were the problem.
+                                           # over 2) - only the losing re-entries were the problem,
+                                           # on THAT one day - see the note above for why broader
+                                           # data reversed this.
 
   # --- Position sizing ---
   # Each entry's dollar budget is the SMALLEST of three ceilings (see
