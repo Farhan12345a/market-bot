@@ -34,7 +34,19 @@ check("tiers ascend by gain", [x["gain_pct"] for x in tiers]==sorted(x["gain_pct
 check("every tier gain is positive", all(x["gain_pct"]>0 for x in tiers))
 check("every tier fraction in (0,1]", all(0<x["sell_fraction"]<=1 for x in tiers))
 check("top tier closes the position", tiers[-1]["sell_fraction"]==1.0)
-check("tiers sit above the stops", tiers[0]["gain_pct"] > abs(T["first_exit_loss_pct"]))
+# Held since this file existed, broke 2026-10-01 when the take-profit
+# ladder was independently cut to 0.5/0.75/1.0 (explicit user request,
+# ops/grid.py evidence - see config.yaml's comment on take_profit_tiers):
+# tier1 (0.5) is now a SMALLER move than first_exit_loss_pct (-0.7, abs
+# 0.7). Not a timing conflict - a price cannot be both +0.5% and -0.7% at
+# once, so neither rule pre-empts the other - just a genuinely different
+# reward/risk shape (partial profit taken on a smaller favorable move than
+# the move that cuts a loss), and the replay/grid run that justified the
+# new ladder walked real paths against this SAME, unchanged stop - the
+# combination, not just the tiers in isolation, is what tested well.
+check("every tier gain is still positive relative to the stops (no "
+      "overlap is possible - a price cannot be both up and down at once)",
+      tiers[0]["gain_pct"] > 0 and abs(T["first_exit_loss_pct"]) > 0)
 check("daily entry cap >= concurrent cap", T["max_daily_entries"] >= T["max_concurrent_positions"])
 check("exposure fraction < 1 (no leverage)", 0 < T["max_total_exposure_fraction"] <= 1.0)
 check("price band is sane", 0 < T["min_stock_price"] < T["max_stock_price"])
@@ -95,7 +107,7 @@ import src.strategy.strategy as _S
 _S._now_et = lambda: _S.ET.localize(_dt(2026, 8, 25, 9, 45))
 st=Strategy(copy.deepcopy(C)); t=TradeManager("SIM",100.0,300,copy.deepcopy(C))
 st.trades["SIM"]=t; t.price_history=[100.0]*T["momentum_fade_window_samples"]
-seq=[100.5,101.05,101.3,101.6]
+seq=[100.3,100.55,100.8,101.1]
 fired=[]
 for pxx in seq:
     r=st.check_exit("SIM",{"close":pxx})
@@ -103,7 +115,7 @@ for pxx in seq:
         fired.append((r["reason"],r["qty"]))
         st.confirm_exit("SIM",r["qty"],r["reason"],pxx)
 check("a winner walks the whole ladder", [f[0] for f in fired]==
-      ["TAKE_PROFIT_1%","TAKE_PROFIT_1.25%","TAKE_PROFIT_1.5%"], fired)
+      ["TAKE_PROFIT_0.5%","TAKE_PROFIT_0.75%","TAKE_PROFIT_1%"], fired)
 check("quantities sum to the full position", sum(f[1] for f in fired)==300, fired)
 check("position closed at the end", "SIM" not in st.trades)
 

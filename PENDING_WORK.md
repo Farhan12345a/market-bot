@@ -1419,3 +1419,71 @@ main.py wiring using `side=` as a keyword (a positional wire-up would
 silently corrupt every re-opened trade's exit profile, since
 `confirm_entry`'s 4th positional argument is `config_override`, not
 `side`).
+
+## 8. 2026-10-01 — Open Positions report: Side column, and a real P&L sign bug it surfaced
+
+Explicit user request: add a long/short column to the email reports. The
+main "Closed Trades" and "Extended Hours" tables already had one
+(`side_label = "SHORT" if t.get("side") == "short" else "LONG"`, same
+pattern reused here); `_open_positions_html` (the mid-session Open
+Positions table) did not.
+
+Adding it surfaced a real, separate bug while building it:
+`_open_position_rows` (main.py) computed every open position's unrealized
+P&L as a raw `(current - entry) * qty`, with no direction term - correct
+for a long, backwards for a short, where a FALLING price is the gain. Any
+open short sat in the mid-session report showing the exact opposite sign
+of its real live P&L for as long as it stayed open. Same class of bug
+already found and fixed in `trade_paths.csv` (2026-09-28) and
+`_position_size`, just never caught here until the Side column made it
+worth checking. Fixed: `pl`/`pl_pct` now multiply by `trade.direction`
+(+1 long, -1 short), and each row carries its own `side`.
+
+Tests: `tests/test_sched.py` section L - a long and a short at matched
+distances from entry, confirming the long's P&L is the plain move and the
+short's is correctly POSITIVE when price fell (previously would have
+been negative), plus the new `side` field and the rendered Side column
+in both the data and the HTML.
+
+## 9. 2026-10-01 — take_profit_tiers 1.0/1.25/1.5 -> 0.5/0.75/1.0
+
+Explicit user request ("yes lets try this out"), following
+`ops/replay.py`/`ops/grid.py` evidence from the same conversation: a
+smooth marginal gradient across 302 long trades over all 8 recorded days,
+two different lower-tier sets both clearly ahead of two higher ones
+(0.5/0.75/1.0 at +$0.67/trade and 0.4/0.6/0.8 at +$0.62/trade, vs
+0.75/1.0/1.25 at +$0.32 and the prior live 1.0/1.25/1.5 - the WORST of
+the four - at +$0.15/trade). `ops/grid.py`'s own honest verdict: "80 of 80
+configs not distinguishable from the top one at n=302" - not proven, but
+a plateau across two different lower-tier sets rather than one lucky
+spike, which the tool's own docs call trustworthy before any cell reaches
+significance on its own.
+
+Exit-side (`take_profit_tiers` is explicitly on CLAUDE.md's "tune these
+freely" list), so no Tier-gated entry-measurement-window discipline
+applies, but it still touched a wide ripple of hardcoded tier values
+across `test_tiers.py`, `test_be.py`, `test_collide.py`, `test_safety.py`,
+`test_0902b.py`, `test_timeline.py` and `preflight.py` - all updated.
+
+**Three side effects surfaced and deliberately NOT fixed, flagged in the
+tests that found them instead:**
+  - `regime_sizing.chop.take_profit_tiers` (0.4/0.7/1.0, Tier 4, untouched)
+    was built to sit strictly below the session ladder at every tier;
+    its top tier (1.0) is now merely TIED with the session's new top
+    tier, not below it. Chop's distinctiveness at the top has narrowed.
+    Not lowered here - that would be changing a Tier 4 setting nobody
+    asked to change, on no evidence of its own.
+  - `breakeven_trigger_pct` (0.5, untouched) now sits exactly AT the new
+    tier1 instead of strictly below it - the margin that used to exist
+    between "floor arms" and "a tier could fire" is now zero, not
+    negative. Not tightened here on the same reasoning.
+  - `first_exit_loss_pct` (-0.7, untouched): tier1 (0.5) is now a smaller
+    move than the first stop-loss's magnitude (0.7). Not a timing
+    conflict (a price cannot be both up and down at once), just a
+    different reward/risk shape than before - and the replay/grid run
+    that justified the new ladder walked real paths against this exact,
+    unchanged stop, so the combination (not the tiers in isolation) is
+    what actually tested well.
+
+All three are documented at the test that previously asserted the old,
+now-superseded relationship, not silently loosened.

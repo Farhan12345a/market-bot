@@ -459,12 +459,18 @@ check("final exit is tighter", o_["final_exit_loss_pct"] == -0.85 and n_["final_
 check("trailing stop now matches the session's exactly",
       o_["trailing_stop_pct"] == 0.75 and n_["trailing_stop_pct"] == 0.75)
 # 0.5/0.75/1.0 -> 0.75/1.0/1.25 for 2026-09-01.
-check("take-profit tiers are tighter than the session's",
+check("take-profit tiers are the burst's own fixed profile",
       [t["gain_pct"] for t in o_["take_profit_tiers"]] == [0.75, 1.0, 1.25],
       [t["gain_pct"] for t in o_["take_profit_tiers"]])
-check("...and every opening tier sits below the normal top tier",
-      max(t["gain_pct"] for t in o_["take_profit_tiers"])
-      < max(t["gain_pct"] for t in n_["take_profit_tiers"]))
+# "below the normal top tier" stopped being true 2026-10-01, when the
+# SESSION's own ladder was cut to 0.5/0.75/1.0 (replay/grid evidence - see
+# config.yaml's comment on take_profit_tiers) - lower than the burst's
+# still-fixed 0.75/1.0/1.25. Harmless while opening_burst.enabled is false
+# (it is, as of the same date, for an unrelated reason - see its own
+# comment); revisit this relationship if the mode is ever re-enabled with
+# the session ladder still this low.
+check("...and the burst's own top tier is unchanged by the session cut",
+      max(t["gain_pct"] for t in o_["take_profit_tiers"]) == 1.25)
 # The entry threshold and the first tier are measured from DIFFERENT anchors -
 # min_move_pct from the 09:30 baseline, take-profit from the entry price - so
 # a trade cannot scale out on the move that bought it. This asserts the anchors,
@@ -923,8 +929,11 @@ print("\n=== 19. TAKE-PROFIT TIERS ===")
 _oc = M._opening_exit_config(CFG)
 _tiers = [t["gain_pct"] for t in _oc["trading"]["take_profit_tiers"]]
 check("burst tiers are 0.75/1.0/1.25", _tiers == [0.75, 1.0, 1.25], _tiers)
-check("...still tighter than the session's top tier",
-      max(_tiers) < max(t["gain_pct"] for t in CFG["trading"]["take_profit_tiers"]))
+# No longer "tighter than the session's top tier" as of 2026-10-01 - see
+# section 17's comment on this same relationship.
+check("...unaffected by the session's own 2026-10-01 tier cut (a fixed, "
+      "independent profile, not derived from the session's)",
+      max(_tiers) == 1.25)
 check("...and strictly increasing", _tiers == sorted(_tiers) and len(set(_tiers)) == 3)
 _fracs = [t["sell_fraction"] for t in _oc["trading"]["take_profit_tiers"]]
 check("the last tier closes the position", _fracs[-1] == 1.0, _fracs)

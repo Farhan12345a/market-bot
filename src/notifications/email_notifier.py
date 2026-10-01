@@ -446,8 +446,10 @@ class EmailNotifier:
             mfe, mae = p.get("mfe_pct"), p.get("mae_pct")
             mfe_s = f"{mfe:+.2f}%" if isinstance(mfe, (int, float)) else "N/A"
             mae_s = f"{mae:+.2f}%" if isinstance(mae, (int, float)) else "N/A"
+            side_label = "SHORT" if p.get("side") == "short" else "LONG"
             rows.append(
                 f"<tr><td class='symbol'>{p.get('symbol','N/A')}</td>"
+                f"<td>{side_label}</td>"
                 f"<td>${float(p.get('entry_price') or 0):,.2f}</td>"
                 f"<td>${float(p.get('current_price') or 0):,.2f}</td>"
                 f"<td>{p.get('qty_remaining', 0)} of {p.get('entry_qty', 0)}</td>"
@@ -462,7 +464,7 @@ class EmailNotifier:
             '<h2 style="margin-top:30px;border-bottom:2px solid #f59e0b;'
             'padding-bottom:10px;">Open Positions</h2>'
             '<table class="trades-table"><thead><tr>'
-            '<th>Symbol</th><th>Entry</th><th>Current</th><th>Qty</th>'
+            '<th>Symbol</th><th>Side</th><th>Entry</th><th>Current</th><th>Qty</th>'
             '<th>Unrealized %</th><th>Unrealized P&L</th>'
             '<th>Peak (MFE)</th><th>Trough (MAE)</th>'
             '<th>Entry Method</th><th>Held</th>'

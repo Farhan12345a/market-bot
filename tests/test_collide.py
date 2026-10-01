@@ -20,14 +20,14 @@ def px(p): return 100.0*(1+p/100)
 
 print("=== 1. ONE POSITION, ALL EXIT RULES LIVE ===")
 st,t=mk()
-path=[0.3,0.6,1.05,1.3,1.55,0.4,0.06]   # up through every tier, then collapse
+path=[0.3,0.4,0.55,0.8,1.05,0.4,0.06]   # up through every tier, then collapse
 fired=[]
 for p in path:
     r=st.check_exit("Z",{"close":px(p)})
     if r: fired.append((round(p,2),r["reason"],r["qty"])); st.confirm_exit("Z",r["qty"],r["reason"],px(p))
     if "Z" not in st.trades: break
 names=[f[1] for f in fired]
-check("tiers fire in order, then the position closes", names==["TAKE_PROFIT_1%","TAKE_PROFIT_1.25%","TAKE_PROFIT_1.5%"], fired)
+check("tiers fire in order, then the position closes", names==["TAKE_PROFIT_0.5%","TAKE_PROFIT_0.75%","TAKE_PROFIT_1%"], fired)
 check("no rule double-sold: qty sums to the position", sum(f[2] for f in fired)==300, fired)
 check("position fully closed", "Z" not in st.trades)
 

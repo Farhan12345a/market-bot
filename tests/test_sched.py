@@ -22,10 +22,11 @@ class FakeNotifier:
         SENT.append({"label":"Daily Summary","open":[],"burst":burst_summary}); return True
 
 class FakeTrade:
-    def __init__(s,entry=100.0,qty=100,last=101.0):
+    def __init__(s,entry=100.0,qty=100,last=101.0,side="long"):
         s.entry_price=entry; s.entry_qty=qty; s.qty_remaining=qty
         s.price_history=[entry,last]; s.entry_time=datetime.now(ET)-timedelta(minutes=42)
         s.entry_method="THREE_BAR_MOMENTUM"
+        s.side=side; s.direction=-1 if side=="short" else 1
     def excursions(s): return (1.5,-0.4)
 class FakeStrategy:
     def __init__(s,trades=None): s.trades=trades or {}
@@ -249,6 +250,38 @@ src=open(repo_file("src", "main.py")).read()
 check("scheduled report saves the trade log FIRST",
       src.index("save_trades_log()\n        except Exception as e:\n            logger.error(f\"Could not save the trade log before the scheduled report")
       < src.index("open_rows = _open_position_rows"), "")
+
+print("\n=== L. OPEN-POSITIONS REPORT IS DIRECTION-AWARE (2026-10-01) ===")
+# _open_position_rows computed unrealized P&L as a raw (current - entry)
+# move, which is backwards for a SHORT - a falling price is a short's
+# GAIN, not its loss. Every open short sat in the mid-session report
+# showing the exact opposite of its real live P&L for as long as it
+# stayed open, the same class of bug already fixed in trade_paths.csv
+# (2026-09-28) and _position_size, just not caught here until a user
+# asked for a Side column and this came up alongside it.
+long_trade = FakeTrade(entry=100.0, qty=30, side="long")
+short_trade = FakeTrade(entry=100.0, qty=30, side="short")  # price FELL - a short's WIN
+class FakeMDPerSymbol:
+    def __init__(s, prices): s.prices = prices
+    def get_latest_bar(s, sym): return {"close": s.prices[sym]}
+per_symbol_md = FakeMDPerSymbol({"AAPL": 105.0, "XYZ": 95.0})
+rows = M._open_position_rows(FakeStrategy({"AAPL": long_trade, "XYZ": short_trade}), per_symbol_md, ET)
+by_symbol = {r["symbol"]: r for r in rows}
+check("a long's unrealized P&L is the plain (current - entry) move",
+      by_symbol["AAPL"]["unrealized_pl"] == (105.0 - 100.0) * 30, by_symbol["AAPL"])
+check("a SHORT that fell in price (a WIN) shows POSITIVE unrealized P&L, "
+      "not the inverted negative the undirected formula used to produce",
+      by_symbol["XYZ"]["unrealized_pl"] == (100.0 - 95.0) * 30, by_symbol["XYZ"])
+check("...and the same direction-awareness applies to the percentage figure",
+      by_symbol["XYZ"]["unrealized_pl_pct"] > 0, by_symbol["XYZ"])
+check("each row carries its side, defaulting to long for anything without one",
+      by_symbol["AAPL"]["side"] == "long" and by_symbol["XYZ"]["side"] == "short")
+
+html_sides = en._open_positions_html(rows)
+check("the Open Positions table has its own Side column",
+      "<th>Side</th>" in html_sides)
+check("a short position is rendered as SHORT, a long as LONG",
+      "SHORT" in html_sides and "LONG" in html_sides, html_sides)
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

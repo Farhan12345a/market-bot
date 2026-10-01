@@ -47,7 +47,7 @@ check("reconciles down to what the broker holds", t.qty_remaining==40, t.qty_rem
 check("reports that it changed something", changed is True)
 check("original size shrinks proportionally so tiers size off reality",
       t.entry_qty==40, t.entry_qty)
-tier=t.check_take_profit(101.05)   # +1.05% = tier 1, not the top tier
+tier=t.check_take_profit(100.55)   # +0.55% = tier 1, not the top tier
 check("a 40% tier now sizes off 40, not 79", tier[0]==int(40*0.4), tier)
 check("tier can never exceed what is held", tier[0] <= t.qty_remaining)
 

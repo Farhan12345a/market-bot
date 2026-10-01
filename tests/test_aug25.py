@@ -152,7 +152,7 @@ t=CFG["trading"]
 # MFE it touched. Assert the SHAPE, not the value, so retuning is not a failure.
 check("trailing_stop_pct is a sane positive %", 0 < t["trailing_stop_pct"] <= 3, t["trailing_stop_pct"])
 check("still above the first-exit stop", t["trailing_stop_pct"] > abs(t["first_exit_loss_pct"]))
-check("take-profit tiers unchanged", [x["gain_pct"] for x in t["take_profit_tiers"]]==[1.0,1.25,1.5])
+check("take-profit tiers unchanged", [x["gain_pct"] for x in t["take_profit_tiers"]]==[0.5,0.75,1.0])
 
 print("\n=== E. SCREENER EXCLUDES OUT-OF-BAND PRICES BEFORE RANKING ===")
 import types as _t

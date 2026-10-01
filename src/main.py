@@ -1501,8 +1501,16 @@ def _open_position_rows(strategy, market_data, et):
             current = trade.price_history[-1] if trade.price_history else trade.entry_price
 
         qty = trade.qty_remaining
-        pl = (current - trade.entry_price) * qty
-        pl_pct = ((current - trade.entry_price) / trade.entry_price * 100) if trade.entry_price else 0
+        # direction-aware: a raw (current - entry) move is backwards for a
+        # short, where a FALLING price is the gain. Without this, every
+        # open SHORT position's unrealized P&L in the mid-session report
+        # showed the exact opposite sign of its real, live P&L for as long
+        # as it stayed open - the same class of bug already found and
+        # fixed in trade_paths.csv (2026-09-28) and _position_size, just
+        # not yet caught here.
+        direction = getattr(trade, "direction", 1)
+        pl = direction * (current - trade.entry_price) * qty
+        pl_pct = (direction * (current - trade.entry_price) / trade.entry_price * 100) if trade.entry_price else 0
 
         try:
             mfe, mae = trade.excursions()
@@ -1518,6 +1526,7 @@ def _open_position_rows(strategy, market_data, et):
 
         rows.append({
             "symbol": symbol,
+            "side": getattr(trade, "side", "long"),
             "entry_price": trade.entry_price,
             "current_price": current,
             "qty_remaining": qty,

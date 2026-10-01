@@ -334,8 +334,21 @@ check("BEARISH keeps precedence over choppy - a falling tape is worse",
 print("\n--- the chop exit ladder ---")
 normal_tiers = [t["gain_pct"] for t in CFG["trading"]["take_profit_tiers"]]
 chop_tiers = [t["gain_pct"] for t in rc["chop"]["take_profit_tiers"]]
-check("the chop ladder is LOWER at every tier",
-      all(c < n for c, n in zip(chop_tiers, normal_tiers)), (chop_tiers, normal_tiers))
+# Was "LOWER at every tier" until 2026-10-01, when the SESSION's own ladder
+# was independently cut to 0.5/0.75/1.0 (explicit user request, ops/grid.py
+# evidence - see config.yaml's comment on take_profit_tiers). chop's ladder
+# (0.4/0.7/1.0, regime_sizing.chop - Tier 4, untouched by that change) is
+# no longer strictly below it at the top tier (1.0 vs 1.0, now tied) - the
+# session caught up to where chop used to sit alone. Not fixed here: that
+# would mean lowering a Tier 4 setting nobody asked to change, on no
+# evidence of its own. Flagged as a real, known side effect; revisit
+# chop's own ladder with its own evidence if this gap mattering becomes
+# measurable.
+check("the chop ladder is lower-or-tied at every tier, strictly lower "
+      "below the top (where the session's own cut caught up to it)",
+      all(c <= n for c, n in zip(chop_tiers, normal_tiers))
+      and all(c < n for c, n in zip(chop_tiers[:-1], normal_tiers[:-1])),
+      (chop_tiers, normal_tiers))
 check("its first tier is at or below +0.5% - the whole move on a chop day",
       chop_tiers[0] <= 0.5, chop_tiers)
 out = M._chop_exit_config(CFG, {"label": "choppy"}, None)

@@ -246,10 +246,14 @@ if prev.returncode == 0:
         "max_daily_loss_usd": 1000,
         # 0.33/0.40/1.0 -> 0.40/0.30/1.0 for 2026-09-02: take more off the
         # first tier, same 30% of the original left to run past +1.5%.
+        # 1.0/1.25/1.5 -> 0.5/0.75/1.0 on 2026-10-01, on explicit user
+        # request - see config.yaml's comment on this key for the
+        # ops/grid.py evidence (a smooth plateau across two lower-tier
+        # sets, not yet statistically significant on its own).
         "take_profit_tiers": [
-            {"gain_pct": 1.0, "sell_fraction": 0.4},
-            {"gain_pct": 1.25, "sell_fraction": 0.3},
-            {"gain_pct": 1.5, "sell_fraction": 1.0},
+            {"gain_pct": 0.5, "sell_fraction": 0.4},
+            {"gain_pct": 0.75, "sell_fraction": 0.3},
+            {"gain_pct": 1.0, "sell_fraction": 1.0},
         ],
         # 28 -> 30 for 2026-09-02, together with the counting model. The cap
         # is now a count of UNIQUE SYMBOLS rather than channel-subscriptions:

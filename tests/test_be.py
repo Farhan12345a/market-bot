@@ -131,8 +131,18 @@ t_=CFG["trading"]
 check("poll interval 10s", t_["entry_check_interval_seconds"]==10)
 check("trail back to 0.75", t_["trailing_stop_pct"]==0.75)
 check("floor is above zero (covers the spread)", t_["breakeven_floor_pct"]>0)
-check("trigger below the first take-profit tier",
-      t_["breakeven_trigger_pct"] < t_["take_profit_tiers"][0]["gain_pct"])
+# Was strictly BELOW the first tier until 2026-10-01, when the session's
+# own ladder was independently cut to 0.5/0.75/1.0 (explicit user request,
+# ops/grid.py evidence - see config.yaml's comment on take_profit_tiers).
+# breakeven_trigger_pct (0.5, untouched by that change) now sits exactly
+# AT the new tier1, not below it - the margin is zero, not negative: the
+# floor arms no later than a tier could first fire, it just no longer
+# arms strictly earlier. Not tightened here on its own (no evidence yet
+# that a zero margin, rather than a negative one, actually costs
+# anything) - flagged as a known side effect to revisit with its own
+# evidence if it turns out to matter.
+check("trigger no later than the first take-profit tier",
+      t_["breakeven_trigger_pct"] <= t_["take_profit_tiers"][0]["gain_pct"])
 check("trigger above the trail width", t_["breakeven_trigger_pct"] >= t_["trailing_stop_pct"]*0.6)
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

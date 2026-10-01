@@ -1790,10 +1790,28 @@ trading:
   # is "sell everything left," so it is still 30% of the original either way -
   # 0.40 + 0.30 = 0.70 taken, 30% remaining, same shape the old 0.33/0.40 gave,
   # weighted earlier.
+  #
+  # 1.0/1.25/1.5 -> 0.5/0.75/1.0 on 2026-10-01, explicit user request after
+  # ops/grid.py (not a single replay.py probe - see docs/REPLAY.md's own
+  # warning against picking one cell) showed a SMOOTH, consistent gradient
+  # across 302 long trades over all 8 recorded days: both lower-tier sets
+  # tried (0.4/0.6/0.8 and 0.5/0.75/1.0) clearly beat both higher ones
+  # (0.75/1.0/1.25 and the then-live 1.0/1.25/1.5, which was the WORST of
+  # the four marginal values: +$0.15/trade vs +$0.67/trade for 0.5/0.75/1.0).
+  # Not yet statistically significant on its own (grid's verdict: "80 of 80
+  # configs not distinguishable from the top one at n=302") - but a plateau
+  # across two different lower-tier sets is the kind of signal the tool's
+  # own docs call trustworthy before any single cell reaches significance,
+  # a smooth gradient rather than one lucky spike. Also consistent with the
+  # `chop` block's already-separately-proven logic (2026-08-28: "+0.5% is
+  # the whole move" on certain days) - this suggests that was never a
+  # chop-specific fact, just the first place it was measured. Revisit with
+  # ops/grid.py once n is larger; this is a reasoned bet on a real trend,
+  # not a proven result yet.
   take_profit_tiers:
-    - {gain_pct: 1.0,  sell_fraction: 0.40}   # take 40% off early
-    - {gain_pct: 1.25, sell_fraction: 0.30}   # 30% more of the original
-    - {gain_pct: 1.5,  sell_fraction: 1.0}    # close out whatever is left
+    - {gain_pct: 0.5,  sell_fraction: 0.40}   # take 40% off early
+    - {gain_pct: 0.75, sell_fraction: 0.30}   # 30% more of the original
+    - {gain_pct: 1.0,  sell_fraction: 1.0}    # close out whatever is left
 
   # Legacy single-tier form, used ONLY if take_profit_tiers is absent. Kept so
   # an older config still works unchanged.
