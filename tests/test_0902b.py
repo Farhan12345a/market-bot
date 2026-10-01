@@ -671,6 +671,82 @@ check("multifactor_rank still OFF (it inverted move order)",
 check("max_daily_entries unchanged", t["max_daily_entries"] == 100)
 check("PDT floor still enforced", "25,000" in esrc or "25000" in esrc)
 
+print("\n=== 17. FULL EXIT UNDER-ASKS WHEN AN EARLIER PARTIAL NEVER FILLED (2026-10-01) ===")
+# Reproduced from the live log, 2026-10-01: MXL entered 38 shares.
+# FIRST_EXIT_-0.7% submitted a marketable-limit sell for 12 (confirm_exit
+# commits the qty_remaining reduction at SUBMISSION, same optimistic-then-
+# reconcile pattern entries already use) - then that order was cancelled,
+# still unfilled, 4 seconds later when TRAILING_STOP superseded it.
+# TRAILING_STOP's own qty was computed from the now-stale qty_remaining
+# (38-12=26), not from what the broker actually held (still the full 38).
+# The 12-share gap became a genuine, fully untracked residual the moment
+# this exit closed the position - found only minutes later by the
+# periodic reconcile and force-closed via ORPHAN_RECONCILE. 69 such exits
+# fired that single session from this one root cause.
+class ExitBroker:
+    def __init__(s, held_qty): s.held = held_qty
+    def get_positions(s):
+        return {"MXL": types.SimpleNamespace(symbol="MXL", qty=str(s.held))}
+    def cancel_open_orders(s, sym): return 1
+    def submit_market_order(s, sym, qty, side="sell"): return types.SimpleNamespace(id="mkt")
+    def submit_limit_order(s, sym, qty, px, side="sell"): return types.SimpleNamespace(id="lmt")
+
+eb = ExitBroker(38)  # the broker never actually filled FIRST_EXIT's 12
+ex17 = Executor(eb, copy.deepcopy(CFG))
+ex17.open_entries["MXL"] = 92.34
+# The caller (main.py) always passes qty_before=trade.qty_remaining AT THE
+# MOMENT this exit fires - by the time TRAILING_STOP evaluates, Strategy's
+# own qty_remaining is ALREADY 26 (38 - 12, decremented optimistically
+# when FIRST_EXIT's confirm_exit ran at SUBMISSION time - see
+# submit_entry_order's docstring for why entries/exits both commit before
+# a fill is confirmed). TRAILING_STOP computes "sell everything left" as
+# 26 too, so qty == qty_before == 26 here, a full exit by is_partial_exit's
+# own definition (qty >= qty_before) - genuinely full, just computed from
+# a number that was already wrong relative to the broker's real 38.
+order17 = ex17.submit_exit_order("MXL", 26, "TRAILING_STOP", 91.585, qty_before=26)
+check("a full exit (qty >= qty_before) is corrected UP to what the broker "
+      "actually holds, not left at the stale 'remaining' count",
+      ex17.exit_qty_actually_submitted("MXL", 26) == 38,
+      ex17.exit_qty_actually_submitted("MXL", 26))
+
+# The mirror case already existed and must still work: broker holds LESS
+# than tracked (a genuine partial fill not yet reconciled) still corrects
+# DOWN, exactly as before - this fix must not touch that direction.
+eb2 = ExitBroker(15)
+ex18 = Executor(eb2, copy.deepcopy(CFG))
+ex18.open_entries["MXL"] = 92.34
+ex18.submit_exit_order("MXL", 26, "TRAILING_STOP", 91.585, qty_before=26)
+check("the EXISTING shrink-correction (broker holds less than tracked) is "
+      "unaffected by this fix",
+      ex18.exit_qty_actually_submitted("MXL", 26) == 15,
+      ex18.exit_qty_actually_submitted("MXL", 26))
+
+# A genuinely PARTIAL exit (e.g. FIRST_EXIT itself, or a take-profit tier
+# that leaves shares running) must NOT be inflated to "sell everything" -
+# the strategy deliberately wants to keep some of the position open.
+eb3 = ExitBroker(38)
+ex19 = Executor(eb3, copy.deepcopy(CFG))
+ex19.open_entries["MXL"] = 92.34
+ex19.submit_exit_order("MXL", 12, "FIRST_EXIT_-0.7%", 91.585, qty_before=38)
+check("a genuinely PARTIAL exit is left alone even when the broker holds "
+      "more than it asks for - inflating it would oversell a deliberate "
+      "tiered exit",
+      ex19.exit_qty_actually_submitted("MXL", 12) == 12,
+      ex19.exit_qty_actually_submitted("MXL", 12))
+
+# Without qty_before (some callers may not have it), the correction must
+# not guess - it requires qty_before to know whether this was MEANT to be
+# a full exit at all.
+eb4 = ExitBroker(38)
+ex20 = Executor(eb4, copy.deepcopy(CFG))
+ex20.open_entries["MXL"] = 92.34
+ex20.submit_exit_order("MXL", 26, "TRAILING_STOP", 91.585, qty_before=None)
+check("without qty_before, the full-exit correction does not fire (nothing "
+      "to compare against) - the shrink-correction above remains the only "
+      "one that can act without it",
+      ex20.exit_qty_actually_submitted("MXL", 26) == 26,
+      ex20.exit_qty_actually_submitted("MXL", 26))
+
 print(f"\n{P} passed, {F} failed")
 import sys
 sys.exit(1 if F else 0)

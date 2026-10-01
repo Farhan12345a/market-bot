@@ -1608,3 +1608,64 @@ itself, propose a partial-size compromise, or re-enable any trading
 during chop. It is pure instrumentation, so the user has real data (not
 a re-litigated guess) to decide what to do if the next several sessions
 are dominated by chop.
+
+## 12. 2026-10-01 — ORPHAN_RECONCILE, take four: the EXIT side's own gap
+
+First full trading day running every 2026-09-30 fix (late-fill watch,
+regime gating, reentry cooldown, take-profit ladder). ORPHAN_RECONCILE
+fired 69 times - worse than any prior day (09-29's 28 had been the
+previous worst) - for -$853.49, against a total day P&L of -$741.61 (the
+rest of the day's trading was actually net +$111.88). This is a
+DIFFERENT mechanism from everything fixed the day before - the late-fill
+watch covers the ENTRY side specifically; this is an EXIT-side gap that
+was never touched.
+
+**The bug.** `strategy.confirm_exit` commits a qty_remaining reduction
+the instant an exit order is SUBMITTED, not once it fills - the same
+optimistic-then-reconcile pattern `submit_entry_order` already uses for
+entries (see that docstring). If an exit gets cancelled and superseded by
+a DIFFERENT exit condition before it ever actually fills - an entirely
+normal, expected path (a marketable-limit order sitting unfilled, then
+the next poll's check_exit finds a different rule now also qualifies) -
+the superseding exit computes "everything remaining" from the
+already-decremented qty_remaining, not from what the broker actually
+holds. `Executor.submit_exit_order` already re-reads the broker's live
+qty and corrects DOWNWARD when it holds LESS than tracked (a known,
+already-fixed case, 2026-09-01's CRM incident) - there was no equivalent
+correction for the broker holding MORE, which is exactly what happens
+here.
+
+Traced exactly on MXL: `FIRST_EXIT_-0.7%` submitted a sell for 12 of 38
+shares at 13:43:00; cancelled, still 0/12 filled, 4 seconds later when
+`TRAILING_STOP` superseded it; TRAILING_STOP computed its own "remaining"
+as 38-12=26 (already assuming the 12 were gone), submitted that, and
+later escalated to a market order for 26 when IT also didn't fill fast
+enough. The broker genuinely sold 26 and still held 12 - a residual the
+bot's own bookkeeping had already written off as closed. Discovered
+~5 minutes later by the periodic reconcile, force-closed via
+ORPHAN_RECONCILE with no stop-loss ever having run on it. This exact
+sequence (a partial exit superseded by a different rule before its fill
+confirms) is common enough - FIRST_EXIT in particular is meant to be an
+early, tentative scale-out, exactly the kind of exit likely to get
+overtaken by a stop or trail moments later - that it plausibly explains
+most of the 69.
+
+**The fix.** `submit_exit_order` now mirrors its own existing shrink-
+correction in the other direction: when this exit is a FULL exit
+(`not is_partial_exit(reason, qty, qty_before)` - qty_before is the
+qty_remaining Strategy believed was left at the moment this exit fired)
+and the broker's live count is GREATER than what's being asked, sell the
+broker's true live quantity instead of the stale "remaining" count. A
+genuinely partial exit (FIRST_EXIT itself, a take-profit tier that
+deliberately leaves shares running) is left untouched either way - this
+only ever widens a FULL exit, never inflates a deliberate partial into
+an unintended full close.
+
+**Tests**: `tests/test_0902b.py` section 17 (4 checks) - the exact MXL
+scenario reproduced end to end through a real `Executor.submit_exit_order`
+call (corrects 26 -> 38); the existing shrink-correction confirmed
+unaffected (still corrects down when the broker holds less); a genuine
+partial exit confirmed NOT inflated even when the broker holds more;
+and the correction confirmed inert without `qty_before` to compare
+against (nothing to judge "full vs partial" from). Full suite re-run
+clean (2860 pass, 0 fail) after the addition.

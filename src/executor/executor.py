@@ -2024,6 +2024,51 @@ class Executor:
                 # genuinely still holds.
                 self._last_exit_qty[symbol] = qty
 
+            # THE OTHER DIRECTION (2026-10-01). A "full exit" (qty_before is
+            # not partial - see is_partial_exit) means "sell everything this
+            # position has left" - but qty_before (Strategy's qty_remaining)
+            # can itself be STALE-LOW. confirm_exit commits a qty reduction
+            # the instant an exit order is SUBMITTED, not once it fills (same
+            # optimistic-then-reconcile pattern submit_entry_order already
+            # uses for entries - see that docstring). If an EARLIER, still-
+            # unconfirmed exit for this same symbol gets cancelled/superseded
+            # before it ever actually filled - a different exit condition
+            # firing on the very next poll, the ordinary "retry this on a
+            # fresh signal" path - qty_remaining was already decremented for
+            # shares that never left the account. A full exit computed from
+            # that stale number then asks for FEWER shares than the broker
+            # truly holds, and the gap becomes a genuine, fully untracked
+            # residual the instant this exit closes the position - found only
+            # minutes later by the periodic reconcile sweep, force-closed via
+            # ORPHAN_RECONCILE with no stop-loss ever having run on it.
+            #
+            # Reproduced exactly from the 2026-10-01 log: MXL's
+            # FIRST_EXIT_-0.7% (12 of 38 shares) was submitted, then cancelled
+            # 4 seconds later - still unfilled - when TRAILING_STOP
+            # superseded it; TRAILING_STOP's own qty was computed as 38-12=26,
+            # already assuming the 12 were gone, while the broker still held
+            # the full 38. 69 ORPHAN_RECONCILE exits that single session, one
+            # root cause - this gap, not the entry-side late-fill blind spot
+            # fixed the day before (that fix targets a different mechanism
+            # entirely and left this one uncovered).
+            #
+            # Mirrors the correction above exactly, in the other direction:
+            # trust the broker's live count over the tracked "remaining"
+            # whenever this exit means to clear everything.
+            elif (
+                live_qty is not None and qty_before is not None
+                and not is_partial_exit(reason, qty, qty_before)
+                and live_qty > qty
+            ):
+                logger.info(
+                    f"{symbol}: exit qty corrected {qty} -> {live_qty} (this "
+                    f"is a full exit and the broker holds MORE than tracked "
+                    f"- an earlier unconfirmed partial exit's shares never "
+                    f"actually left)"
+                )
+                qty = live_qty
+                self._last_exit_qty[symbol] = qty
+
         # MARKETABLE LIMIT rather than pure market, when configured.
         #
         # A market sell takes whatever the book offers. In a thin, fast,
