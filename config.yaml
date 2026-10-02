@@ -1037,7 +1037,18 @@ trading:
   # submissions in between. Worth specifically re-checking attempt #3/#4
   # performance once real data exists under this setting, rather than
   # assuming the pattern continues or reverses.
-  max_entry_attempts_per_symbol_per_day: 4
+  #
+  # 4 -> 3 on 2026-10-02, explicit user request, to bring down the number
+  # of trades per day without touching the symbol list (which the user
+  # explicitly chose to leave alone this time) or selection quality. Not
+  # driven by fresh attempt-number evidence - 2026-10-01's 94 positions /
+  # 194 tranches is too contaminated by that day's exit-side orphan bug
+  # (fixed the same day, commit 8ce4ad6) to read cleanly: an incorrectly
+  # early/forced close can free a symbol's re-entry cooldown sooner than a
+  # correctly-managed exit would have, inflating same-day re-attempts for
+  # reasons that have nothing to do with signal quality. Revisit the
+  # attempt-number analysis once a few days of clean (post-fix) data exist.
+  max_entry_attempts_per_symbol_per_day: 3
 
   # How far a name may already have travelled from the OPEN and still be
   # bought by the normal window. Distinct from rapid_increase_max_pct, which

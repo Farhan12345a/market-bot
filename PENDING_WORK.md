@@ -1669,3 +1669,42 @@ partial exit confirmed NOT inflated even when the broker holds more;
 and the correction confirmed inert without `qty_before` to compare
 against (nothing to judge "full vs partial" from). Full suite re-run
 clean (2860 pass, 0 fail) after the addition.
+
+**Follow-up audit, 2026-10-02 (explicit user request to look for anything
+else this might have missed).** Checked how many of 09-30's 69 orphans
+actually show the exact MXL shape (two DIFFERENT exit reasons racing):
+only 21 of 69 have a second, distinct exit_reason logged on the same
+position beforehand. The other 48 show only ONE exit reason (e.g.
+`FINAL_EXIT_-1.0%`, `BREAKEVEN_STOP`) before the orphan - not the two-
+rule-supersede sequence traced on MXL.
+
+This does not mean the fix misses them. The fix operates on the general
+condition (`qty >= qty_before` - a full exit - and the broker holds more
+than that), not on "two different reasons were involved" specifically.
+Traced why: main.py always passes `qty_before=trade.qty_remaining` at
+the moment of the call, and `Strategy.check_exit` computes a full exit's
+own qty from that SAME `qty_remaining` - so for ANY full-exit call
+through the normal path, `qty == qty_before` by construction, and
+`is_partial_exit` correctly reads it as full regardless of how
+`qty_remaining` got stale (a different rule superseding, as on MXL; a
+same-reason resubmission; or any other path not yet individually traced).
+The fix fires on that general condition, so it should cover the other 48
+too, not just the MXL-shaped subset - but this is reasoning from the code,
+not independently re-confirmed against each of the other 48 line by line
+given time constraints. The real test is tomorrow's live orphan count
+once deployed.
+
+Also checked `retry_unconfirmed_exits` (the OTHER place that forces a
+qty onto the broker) and `flatten_all_positions` (the 16:00 sweep) for
+the same class of staleness - both already compute their forced quantity
+from a FRESH `broker.get_positions()` read, not from tracked state, so
+neither needed the same fix. Nothing else found in this pass.
+
+`max_entry_attempts_per_symbol_per_day: 4 -> 3`, same date, explicit
+user request to reduce daily trade count without touching the symbol
+list. See config.yaml's own comment for why this is NOT backed by a
+fresh attempt-number re-analysis: 09-30's own trade sample is too
+contaminated by that day's orphan bug (an incorrectly early/forced close
+can free a symbol's re-entry cooldown sooner than a correct exit would
+have) to read cleanly. Revisit the attempt-number question once a few
+days of post-fix data exist.

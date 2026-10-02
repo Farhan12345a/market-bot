@@ -320,10 +320,13 @@ if prev.returncode == 0:
         "num_stocks_to_trade": 25,
         # 3 -> 5 -> 4 on 2026-09-30, on explicit user request, after the
         # 2026-09-29 extended-hours analysis found ~12 symbols exhausting
-        # all 3 attempts by midday. Tier 3 - not in this timeline's
-        # tracked-keys list (max_entry_attempts_per_symbol_per_day isn't one
-        # of `same` either), so nothing else here needs updating for it.
-        "max_entry_attempts_per_symbol_per_day": 4,
+        # all 3 attempts by midday. 4 -> 3 on 2026-10-02, explicit user
+        # request to bring down daily trade count without touching the
+        # symbol list - see config.yaml's comment on this key. Tier 3 -
+        # not in this timeline's tracked-keys list (max_entry_attempts_
+        # per_symbol_per_day isn't one of `same` either), so nothing else
+        # here needs updating for it.
+        "max_entry_attempts_per_symbol_per_day": 3,
     }
     for k, want in changed.items():
         check(f"{k} deliberately changed to {want}", t.get(k) == want,
