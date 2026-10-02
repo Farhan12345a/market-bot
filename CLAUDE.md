@@ -126,6 +126,37 @@ Sizing sits in between: `sizing_mode`, `volatility_sizing`,
 per trade but not WHICH trades exist, so outcomes stay comparable - a changed
 size scales a result, it does not replace it.
 
+## Every order call site must derive side= from the position, never from a default
+
+**This exact bug has happened twice.** 2026-08-28: `flatten_all_positions`
+submitted a bare sell for whatever the 16:00 time-stop found, so a short still
+open at that time GREW instead of closing (CRWD/MTCH/OKTA, ~$1,015) - fixed by
+reading the broker's own `position.qty` sign and setting `side` from THAT, never
+from a default. 2026-10-02: the short strategy's normal exit call site in
+`run_trading_day` (the one `check_exit` feeds every poll) made the SAME mistake
+in new code - it never passed `side=` to `submit_exit_order` at all, so every
+exit on a SHORT position (not just the time-stop sweep) sold instead of covered,
+doubling the short, for the better part of a week before it was traced on PRIM.
+The first fix didn't prevent the second because it lived in one function, not as
+a rule anyone checked against when short_strategy added a SECOND place that
+submits exit orders.
+
+**The rule, so there isn't a third time**: any code that calls
+`submit_exit_order`, `submit_entry_order`, or `broker.submit_*_order` directly
+must set `side` by reading the position's actual direction (`trade.side`,
+`trade.direction`, or the broker's own `position.qty` sign) - never by leaving
+a parameter at its default, never by assuming "exits are always a sell."
+`close_orphaned_position` and `flatten_all_positions` both do this correctly
+(`close_side = "buy" if qty < 0 else "sell"` off the broker's own reading) -
+pattern-match new call sites against those two, not against the shape of
+whichever call site is closest by.
+
+Covered by `tests/test_short_strategy.py` section I (the normal exit call site)
+- if a new order call site is added, it needs its own version of that check, not
+just a pass on the existing suite. 2862 passing tests did NOT catch this bug
+the first time; they only catch it now because that specific check was added
+AFTER it was found, not before.
+
 ## Testing and deployment
 
 - Do NOT run the test suite, commit, or push unless the user explicitly asks.
