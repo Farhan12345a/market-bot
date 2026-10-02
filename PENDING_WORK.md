@@ -1708,3 +1708,58 @@ contaminated by that day's orphan bug (an incorrectly early/forced close
 can free a symbol's re-entry cooldown sooner than a correct exit would
 have) to read cleanly. Revisit the attempt-number question once a few
 days of post-fix data exist.
+
+## 13. 2026-10-02 — SHORT EXITS WERE SELLING, NOT COVERING, SINCE THE SHORT STRATEGY SHIPPED
+
+Found while chasing why 10-02 still had 46 `ORPHAN_RECONCILE` events after
+the 10-01 exit-qty fix (#12) was confirmed live and firing correctly. Traced
+PRIM: a 19-share SHORT opened at 15:21, a `TRAILING_STOP` "exit" at 15:33
+logged `"Limit order submitted: PRIM 19 SELL @ 77.74"` with a POSITIVE P&L
+(+$4.27) despite the exit price being ABOVE the entry price - backwards for
+a short, where a higher exit price is a loss. By 15:35 the broker held -38 -
+exactly double the original -19.
+
+**Root cause.** `Executor.submit_exit_order` defaults to `side="sell"`
+(closing a long) and only covers a short (`side="buy"`) when the CALLER
+says so. `main.py`'s normal exit call site - the one every `check_exit`
+result (FIRST_EXIT, TRAILING_STOP, TAKE_PROFIT, BREAKEVEN_STOP, GAP_EXIT,
+MOMENTUM_FADE, RESISTANCE, FINAL_EXIT) flows through on every poll - never
+passed `side=` at all. So every normal exit on a SHORT position submitted
+a SELL, which doesn't close a short, it ADDS to it. `check_exit` has no
+"side" key in its return dict to begin with (confirmed by reading the
+whole method) - the side was always supposed to come from the trade
+itself, and nothing wired it through.
+
+This has been live since `short_strategy.enabled` went to `true`
+(2026-09-27) - every short exit through the normal path has been growing
+the short, not closing it, for the better part of a week. The reason this
+didn't show up as universal runaway shorting on every position: many
+shorts got closed correctly anyway, either by `flatten_all_positions`'
+16:00 sweep (reads the broker's own fresh position, side-agnostic, already
+correct) or by `close_orphaned_position` once a mismatch persisted long
+enough to trip the reconcile gate - which is itself the ORPHAN_RECONCILE
+noise this was found while investigating. The ones that got caught by
+neither, like PRIM, just kept doubling until something closed them.
+
+**The fix.** `main.py`'s normal exit call site now passes
+`side=("buy" if trade is not None and trade.side == "short" else "sell")`
+- `trade` (`strategy.trades.get(symbol)`) is only `None`-unreachable when
+`exit_info` is falsy anyway, since `check_exit` only returns a result for
+a symbol that's in `self.trades`, so this always has a real `trade.side`
+to read from for a genuine exit. `submit_exit_order` already derives
+`is_cover = (side == "buy")` from this same parameter internally, so
+everything downstream (limit price band direction, P&L sign) auto-
+corrects once `side` itself is right - no other code needed to change.
+
+**Tests**: `tests/test_short_strategy.py` section I - two source-level
+checks (this file's established pattern for this kind of call-site wiring,
+see section F/G4) confirming the exact `side=` expression is present and
+is part of the SAME `submit_exit_order` call as `qty_before`, not some
+unrelated one. Full suite re-run clean (2862 pass, 0 fail) after the
+addition.
+
+**Not yet independently measured**: how much of 09-27 through 10-02's
+short-side P&L was corrupted by this (shorts silently growing instead of
+being managed by their own stop/target logic until EOD flatten caught
+them) - the live orphan count and tomorrow's short-side P&L are the real
+test now that this is fixed and deployed.

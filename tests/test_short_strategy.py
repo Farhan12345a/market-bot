@@ -405,6 +405,28 @@ check("the bullish latch clears on any non-bullish label, mirroring the "
       "bearish latch's own reset - both are independently re-armable",
       "regime_state[\"tightened_at_short\"] = None" in src)
 
+print("\n=== I. THE NORMAL EXIT CALL SITE THREADS side= FROM trade.side ===")
+# Found 2026-10-02: Executor.submit_exit_order defaults to side="sell"
+# (closing a long). main.py's normal exit call site - the one check_exit
+# feeds on every poll - never passed side= at all, so EVERY exit on a SHORT
+# position (FIRST_EXIT, TRAILING_STOP, TAKE_PROFIT, etc.) submitted a SELL
+# instead of a BUY-to-cover, which just sells MORE of the same short rather
+# than closing it. Live evidence: PRIM's short went -19 -> -38 (exactly
+# doubled) on a TRAILING_STOP "exit", then showed up as a persistent
+# ORPHAN_RECONCILE once the bot's own tracking (which assumed the cover had
+# worked) hit qty_remaining == 0 and deleted the trade while the broker
+# still held the (now-doubled) short.
+check("the normal exit call site passes side=, derived from trade.side "
+      "rather than falling through to submit_exit_order's long-only default",
+      'side=("buy" if trade is not None and trade.side == "short" else "sell")'
+      in src)
+_qty_before_idx = src.find("qty_before=(trade.qty_remaining if trade else None)")
+_side_idx = src.find('side=("buy" if trade is not None and trade.side == "short" else "sell")')
+check("...and it's the SAME submit_exit_order call as qty_before (not some "
+      "other, unrelated call site)",
+      _qty_before_idx != -1 and _side_idx != -1
+      and 0 < (_side_idx - _qty_before_idx) < 1000)
+
 print("\n=== H. LIVE CONFIG ===")
 t_ = CFG["trading"]
 check("short_strategy is ENABLED as of 2026-09-27 (explicit user request, "

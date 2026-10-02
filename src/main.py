@@ -3459,6 +3459,16 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         # So the executor can tell a partial sale from a full
                         # one by the numbers rather than by the reason string.
                         qty_before=(trade.qty_remaining if trade else None),
+                        # submit_exit_order defaults to side="sell" (closing a
+                        # long). A short's exit is a COVER and must say
+                        # side="buy", or the broker just sells more of the
+                        # same short instead of closing it. Found 2026-10-02 -
+                        # PRIM's short went -19 -> -38 (exactly doubled) when
+                        # its TRAILING_STOP exit fell through to this default;
+                        # every normal exit reason (FIRST_EXIT, TRAILING_STOP,
+                        # TAKE_PROFIT, etc.) was affected for every short,
+                        # since none of them ever set side explicitly here.
+                        side=("buy" if trade is not None and trade.side == "short" else "sell"),
                     )
                     if order is PHANTOM_EXIT:
                         # The broker held zero shares - the entry never
