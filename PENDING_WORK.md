@@ -1763,3 +1763,58 @@ short-side P&L was corrupted by this (shorts silently growing instead of
 being managed by their own stop/target logic until EOD flatten caught
 them) - the live orphan count and tomorrow's short-side P&L are the real
 test now that this is fixed and deployed.
+
+## 14. 2026-10-05 — full end-to-end verification of #13, and a second short-specific bug found auditing for siblings
+
+Explicit user request after #13 landed: prove it's actually fixed, start to
+finish, every scenario, simulate it if needed - "please I don't want
+anymore errors."
+
+**End-to-end simulation, not just a source-string check.** Section I
+(2026-10-02) only confirmed the right line of code exists at the call site.
+Added section J in `tests/test_short_strategy.py`: a `LiveFillBroker` double
+that actually moves its held quantity on every fill, driven through the
+real `Strategy`/`TradeManager`/`Executor` mechanism across a full two-leg
+exit chain (a partial exit, then a second rule superseding it - the exact
+FIRST_EXIT -> TRAILING_STOP shape traced on MXL/PRIM/etc.). Run twice: once
+with `side` derived from `trade.side` (today's fix) and once with `side`
+hardcoded to `"sell"` (the exact pre-10-02 bug). The fixed run closes the
+broker to EXACTLY 0. The buggy run reproduces the doubling mechanism from
+first principles - broker ends at -100, matching -50 doubling to -100 -
+independently confirming the forensic reconstruction done on 10-02 from the
+live logs, without relying on that reconstruction being correct. A LONG
+chain run through the same harness confirms no regression - still sells,
+still closes cleanly.
+
+**A second, separate short-specific bug found in the same audit pass.**
+`Executor.retry_unconfirmed_exits` (the safety net that forces a market
+order when a marketable-limit exit sits unfilled past `grace_seconds`) read
+`held = int(float(position.qty))` with no `abs()` - every OTHER qty read in
+this file already takes the magnitude (`submit_exit_order`'s `live_qty`,
+`close_orphaned_position`'s `qty`, `flatten_all_positions`' `qty`); this one
+was the exception. For a short, `position.qty` is negative. Simulated it
+directly: a short's stuck cover for 26 shares that never filled at all
+(broker still holds the full -26) computed `filled_so_far = qty_before(26)
+- held(-26) = 52`, which is `>= intended_qty(26)` - the "this order already
+did its job, nothing to force" branch fired on a position that had not
+moved AT ALL, silently dropping it from tracking with no market order ever
+forced. This is exactly the WLY-shaped failure (2026-09-03) this method
+exists to prevent, just for the one side its own test coverage never
+exercised. Confirmed via direct simulation before and after - the broker
+is left at -26 (unprotected) before the fix, 0 (forced market cover) after.
+
+**Fix**: one-line `abs()` added to the `held` read. Three new tests added
+in section K: never-filled (forces the full shortfall), partially-filled
+(forces only the remainder, not a second full order that would flip the
+position into an accidental long), and fully-filled (left alone, no
+spurious order).
+
+**CLAUDE.md updated**: the "every order call site must derive side= from
+the position" rule now also names this `abs()` requirement explicitly,
+since it's the same root cause (a short's signed quantity handled as if it
+were a long's) in a different function.
+
+Full suite: 2875 pass, 0 fail (91 in `test_short_strategy.py` alone, up
+from 78). Neither of today's findings is visible in Friday's logs or any
+log collected so far - they were found by audit and simulation, not by
+tracing a live incident, which is the point of doing this pass at all.

@@ -11,7 +11,7 @@ entries recognizing a filled short (a NEGATIVE broker quantity, not
 positive), close_orphaned_position's short-handling gated on the same flag,
 and _short_regime_multiplier mirroring the long side's regime table.
 """
-import copy, sys
+import copy, sys, time, types
 from _repo import REPO, CONFIG, repo_file
 import yaml
 import src.main as M
@@ -437,6 +437,170 @@ check("short exit tiers are the exact inverse magnitudes of the long side",
       and t_["short_strategy"]["exits"]["trailing_stop_pct"] == t_["trailing_stop_pct"])
 check("extended_hours_experiment is configured",
       "extended_hours_experiment" in t_ and "end_time" in t_["extended_hours_experiment"])
+
+print("\n=== J. END-TO-END: A SHORT'S FULL EXIT CHAIN, DRIVEN THE WAY main.py ACTUALLY DRIVES IT ===")
+# Section I only checks that the right SOURCE LINE exists at the call site.
+# This drives the real mechanism - Strategy's qty_remaining bookkeeping,
+# Executor.submit_exit_order's broker-truth correction, a broker double that
+# actually moves its held quantity on every fill - end to end, and checks
+# the FINAL broker position, not just one call's arguments. Reproduces the
+# exact PRIM/MXL shape: a partial exit's qty_remaining decrement, then a
+# second exit rule computing "everything left" from that already-decremented
+# number (a FULL exit, since qty==qty_before by construction - see PENDING_
+# WORK.md item 12), which is exactly when submit_exit_order's 2026-10-01 fix
+# corrects the ask UP to the broker's true (already-bug-inflated) holding.
+
+
+class LiveFillBroker:
+    """Unlike section I's static doubles, this one actually moves its held
+    quantity on every fill - the only way to prove a MULTI-STEP exit chain
+    ends with the position closed, not doubled."""
+    def __init__(s, qty, price=100.0):
+        s.qty = qty   # signed: negative = short
+        s.price = price
+        s.fills = []
+
+    def get_positions(s):
+        if s.qty == 0:
+            return {}
+        return {"Z": types.SimpleNamespace(
+            qty=str(s.qty), avg_entry_price=s.price, current_price=s.price)}
+
+    def cancel_open_orders(s, sym):
+        return 0
+
+    def _fill(s, qty, side):
+        s.fills.append((side, qty))
+        s.qty += qty if side == "buy" else -qty
+        return types.SimpleNamespace(id=f"o{len(s.fills)}")
+
+    def submit_market_order(s, sym, qty, side="sell"):
+        return s._fill(qty, side)
+
+    def submit_limit_order(s, sym, qty, px, side="sell"):
+        return s._fill(qty, side)
+
+
+def run_exit_chain(entry_side, use_fixed_side):
+    """Replays: enter 38 shares -> a partial exit asks for 12 -> a second
+    exit rule supersedes, computing its qty from the now-decremented
+    qty_remaining (26) exactly like Strategy really does - a full exit, by
+    construction. use_fixed_side=False reproduces the pre-2026-10-02 bug
+    (side always "sell", no matter the position's direction); True is the
+    fix (side derived from trade.side, exactly as main.py's call site now
+    does)."""
+    cfg = copy.deepcopy(CFG)
+    strat = Strategy(cfg)
+    trade = TradeManager("Z", 100.0, 38, cfg, side=entry_side)
+    strat.trades["Z"] = trade
+    start_qty = -38 if entry_side == "short" else 38
+    broker = LiveFillBroker(qty=start_qty, price=100.0)
+    ex = Executor(broker, cfg)
+    ex.open_entries["Z"] = 100.0
+
+    def do_exit(qty, reason, price):
+        qty_before = trade.qty_remaining
+        if use_fixed_side:
+            side = "buy" if trade.side == "short" else "sell"
+        else:
+            side = "sell"   # the bug: always "sell", whatever the position is
+        order = ex.submit_exit_order("Z", qty, reason, price,
+                                      qty_before=qty_before, side=side)
+        assert order is not None, "exit order was rejected by the broker double"
+        trade.process_exit(qty, reason)
+        return side
+
+    s1 = do_exit(12, "FIRST_EXIT_-0.7%", 99.3 if entry_side == "short" else 100.7)
+    s2 = do_exit(trade.qty_remaining, "TRAILING_STOP", 99.5 if entry_side == "short" else 100.9)
+    return broker, s1, s2
+
+
+broker_fixed, sA, sB = run_exit_chain("short", use_fixed_side=True)
+check("a SHORT's full chain, fixed: both exits are BUY (to cover)",
+      sA == "buy" and sB == "buy", (sA, sB))
+check("...and the broker ends EXACTLY flat - no orphan residue",
+      broker_fixed.qty == 0, broker_fixed.qty)
+
+broker_buggy, sA2, sB2 = run_exit_chain("short", use_fixed_side=False)
+check("the SAME chain, pre-fix behavior: both exits wrongly SELL",
+      sA2 == "sell" and sB2 == "sell", (sA2, sB2))
+check("...and the short DOUBLES on the second (full-exit) leg - -50 -> -100, "
+      "reproducing the live PRIM/AAOI/DK/etc. mechanism from first "
+      "principles, independent of the forensic log reconstruction",
+      broker_buggy.qty == -100, broker_buggy.qty)
+
+broker_long, sL1, sL2 = run_exit_chain("long", use_fixed_side=True)
+check("a LONG's full chain is unaffected by the fix - still SELLs",
+      sL1 == "sell" and sL2 == "sell", (sL1, sL2))
+check("...and still closes cleanly to zero", broker_long.qty == 0, broker_long.qty)
+
+print("\n=== K. retry_unconfirmed_exits: THE SAME SIGN BUG, FOUND AUDITING FOR OTHERS ===")
+# Found 2026-10-05, auditing every short-specific qty read for the same
+# class of mistake after the side= fix above. held was read WITHOUT abs() -
+# harmless for a long (qty > 0 always) but for a short, broker.position.qty
+# is NEGATIVE. qty_before(26) - held(-26) = 52, which is >= intended_qty(26)
+# - the "this order already did its job, nothing to force" branch fired on
+# a position that had NOT MOVED AT ALL, silently abandoning tracking with no
+# market order ever forced. This is exactly the WLY-shaped failure this
+# method was built to prevent (2026-09-03 - a stuck marketable-limit exit
+# left unmanaged because nothing ever re-checked it), just for the side this
+# method's own test coverage never exercised.
+
+
+class ShortRetryBroker:
+    def __init__(s, qty):
+        s.qty = qty
+        s.market_calls = []
+
+    def get_positions(s):
+        if s.qty == 0:
+            return {}
+        return {"Z": types.SimpleNamespace(qty=str(s.qty))}
+
+    def cancel_open_orders(s, sym):
+        return 0
+
+    def submit_market_order(s, sym, qty, side="sell"):
+        s.market_calls.append((qty, side))
+        s.qty += qty if side == "buy" else -qty
+        return types.SimpleNamespace(id="m")
+
+
+rb1 = ShortRetryBroker(qty=-26)   # a cover for 26 was submitted, never filled at all
+rex1 = Executor(rb1, copy.deepcopy(CFG))
+rex1._pending_exit_verify["Z"] = {
+    "ts": time.monotonic() - 999, "qty": 26, "side": "buy", "qty_before": 26,
+}
+forced1 = rex1.retry_unconfirmed_exits(grace_seconds=15)
+check("a short's cover that never filled at all gets FORCED, not abandoned",
+      forced1 == [("Z", 26)], forced1)
+check("...with a BUY (to cover), for the full 26",
+      rb1.market_calls == [(26, "buy")], rb1.market_calls)
+check("...and the broker ends flat", rb1.qty == 0, rb1.qty)
+
+rb2 = ShortRetryBroker(qty=-16)   # 26 -> 16 short: 10 already genuinely covered
+rex2 = Executor(rb2, copy.deepcopy(CFG))
+rex2._pending_exit_verify["Z"] = {
+    "ts": time.monotonic() - 999, "qty": 26, "side": "buy", "qty_before": 26,
+}
+forced2 = rex2.retry_unconfirmed_exits(grace_seconds=15)
+check("a PARTIALLY-filled short cover forces only the remaining shortfall",
+      forced2 == [("Z", 16)], forced2)
+check("...not the full 26 again (which would over-cover into a long)",
+      rb2.qty == 0, rb2.qty)
+
+rb3 = ShortRetryBroker(qty=0)   # fully covered already
+rex3 = Executor(rb3, copy.deepcopy(CFG))
+rex3._pending_exit_verify["Z"] = {
+    "ts": time.monotonic() - 999, "qty": 26, "side": "buy", "qty_before": 26,
+}
+forced3 = rex3.retry_unconfirmed_exits(grace_seconds=15)
+check("a genuinely, fully-covered short is left alone - no spurious order",
+      forced3 == [] and rb3.market_calls == [], (forced3, rb3.market_calls))
+
+esrc2 = open(repo_file("src", "executor", "executor.py")).read()
+check("the fix is the one-line abs() on retry_unconfirmed_exits' own held read",
+      'held = abs(int(float(getattr(live.get(symbol), "qty", 0) or 0)))' in esrc2)
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

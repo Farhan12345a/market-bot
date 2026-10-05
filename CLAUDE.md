@@ -151,11 +151,28 @@ a parameter at its default, never by assuming "exits are always a sell."
 pattern-match new call sites against those two, not against the shape of
 whichever call site is closest by.
 
-Covered by `tests/test_short_strategy.py` section I (the normal exit call site)
-- if a new order call site is added, it needs its own version of that check, not
-just a pass on the existing suite. 2862 passing tests did NOT catch this bug
-the first time; they only catch it now because that specific check was added
-AFTER it was found, not before.
+**The same family, one level down**: any code that reads `position.qty` (or
+any other broker-reported quantity) for a SHORT must take `abs()` of it
+before comparing it to a tracked, always-positive `qty`. Found 2026-10-05 in
+`retry_unconfirmed_exits`, which compared a short's raw negative `qty`
+against a positive tracked quantity and silently concluded "already handled"
+on a position that hadn't moved at all. Same root cause as the side= bug -
+code written when only longs existed, not updated when shorts were added -
+just a sign-handling mistake instead of a routing one. When touching any
+function that reads a broker position for a symbol that could be short,
+check for both: is `side` derived from the position, and is every qty
+comparison using a magnitude, not the raw signed value.
+
+Covered by `tests/test_short_strategy.py` sections I (the call site passes
+side=), J (full multi-leg exit chain simulated end to end with a broker
+double that actually moves its held qty on each fill - proves the chain
+closes to zero, not just that one call's arguments are right) and K
+(retry_unconfirmed_exits' abs() fix, including the partial-fill and
+already-handled cases). If a new order or position-reading call site is
+added, it needs its own version of these checks, not just a pass on the
+existing suite - passing tests did NOT catch either of these bugs the first
+time; they only catch them now because the checks were added AFTER each was
+found, not before.
 
 ## Testing and deployment
 
