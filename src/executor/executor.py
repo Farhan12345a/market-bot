@@ -843,7 +843,19 @@ class Executor:
         forced = []
         for symbol, info in list(self._pending_exit_verify.items()):
             try:
-                held = int(float(getattr(live.get(symbol), "qty", 0) or 0))
+                # abs() - a SHORT's position.qty is negative. Without this, a
+                # short's stuck cover that never filled at all (qty still the
+                # full -26 it started at) read as held=-26, and
+                # qty_before(26) - held(-26) = 52 >= intended_qty - the
+                # "already fully handled" branch below fired on a position
+                # that hadn't moved at all, silently abandoning tracking with
+                # no market order ever forced. Found 2026-10-05 auditing the
+                # short-exit side fix for other short-specific gaps in the
+                # same family. Every other qty read in this file already
+                # takes abs() (submit_exit_order's live_qty, close_orphaned_
+                # position's qty, flatten_all_positions' qty) - this was the
+                # one left over.
+                held = abs(int(float(getattr(live.get(symbol), "qty", 0) or 0)))
             except (TypeError, ValueError):
                 held = 0
 
