@@ -3047,6 +3047,29 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
         except Exception as e:
             logger.debug(f"{symbol}: halt check skipped ({e})")
 
+    # ATR FLOOR (trading.atr_floor, see config.yaml's own comment on the
+    # key). Refuses a signal whose own typical range is too small to be
+    # worth the risk - "a stock that moves 40 cents a day won't pay you" -
+    # the complement of volatility_sizing above, which only ever scales a
+    # too-WIDE name down, never refuses a too-NARROW one. Reuses the same
+    # ATR reading _volatility_multiplier already computes; an unknown ATR
+    # (atr <= 0, not computed yet for this symbol) never blocks.
+    _af = config["trading"].get("atr_floor") or {}
+    if _af.get("enabled"):
+        try:
+            _engine = _DYNAMIC_STOPS.get("engine")
+            _atr = float((_engine.atr_by_symbol or {}).get(symbol) or 0) if _engine else 0
+            _min_atr = float(_af.get("min_atr_pct", 0.5))
+            if _atr > 0 and _atr < _min_atr:
+                logger.info(
+                    f"{symbol}: entry skipped - ATR {_atr:.2f}% is below "
+                    f"atr_floor.min_atr_pct {_min_atr:g}% (too quiet to be "
+                    f"worth the risk)"
+                )
+                return False
+        except Exception as e:
+            logger.debug(f"{symbol}: ATR floor check skipped ({e})")
+
     ok, reason = executor.pre_entry_check(qty, price, symbol=symbol,
                                           is_opening_burst=is_opening_burst)
     if not ok:

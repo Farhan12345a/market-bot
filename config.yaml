@@ -1120,6 +1120,23 @@ trading:
     reference_atr_pct: 1.5   # ATR that gets full size; above it, scaled down
     min_multiplier: 0.35     # floor - a wild name is reduced, never refused
 
+  # ATR FLOOR (added 2026-10-06, explicit user request, informed by the
+  # retail "stocks in play" framework: RVOL/liquidity/spread/price/market-
+  # context were all already covered somewhere in this file - range was
+  # the one piece with no entry-side gate, only volatility_sizing's SIZE-
+  # DOWN-if-too-wild scalar above. "A stock that moves 40 cents a day won't
+  # pay you" - the complement of that: refuse a name whose own typical
+  # range is too SMALL to be worth the risk, rather than only ever scaling
+  # down one that's too wide. Reuses the exact same ATR reading
+  # volatility_sizing already computes (engine.atr_by_symbol) - no new data
+  # source, just a second way of reading data that already existed. Tier 2
+  # under CLAUDE.md (changes which signals SURVIVE, not the signal itself).
+  # An unknown ATR (not yet computed for this symbol) never blocks, same
+  # fail-open convention every other pre-entry check in this file uses.
+  atr_floor:
+    enabled: true
+    min_atr_pct: 0.5   # below this, refused outright - not sized down
+
   # Any bid-ask spread wider than this is treated as a BAD QUOTE, not a wide
   # market - the reading is discarded and the spread reported as unknown.
   #

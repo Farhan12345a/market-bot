@@ -163,6 +163,65 @@ check("a halted symbol is refused", res is False)
 M._HALT_CACHE.clear()
 
 # ===================================================================
+print("\n=== R3b. ATR FLOOR (2026-10-06) ===")
+# "A stock that moves 40 cents a day won't pay you" - the complement of
+# volatility_sizing (R2 above), which only ever scales a too-WIDE name
+# down. This refuses a too-NARROW one outright. Reuses the exact same ATR
+# reading (engine.atr_by_symbol) - verified by routing an executor whose
+# pre_entry_check just RECORDS whether it was ever reached, so a refusal
+# this early (vs one further down the chain) is unambiguous.
+from src.analytics.dynamic_stops import DynamicStops as _DS_early
+af_cfg = copy.deepcopy(CFG)
+af_cfg["trading"]["halt_check"] = {"enabled": False}
+af_cfg["trading"]["atr_floor"] = {"enabled": True, "min_atr_pct": 0.5}
+M._DYNAMIC_STOPS["engine"] = _DS_early(af_cfg, history={},
+                                       atr_by_symbol={"QUIET": 0.2, "LIVELY": 1.0})
+
+pre_entry_calls = []
+def _fake_pre_entry_check(*a, **k):
+    pre_entry_calls.append(a)
+    return False, "stub refusal - just confirming the ATR gate let it through"
+
+strat_af = types.SimpleNamespace(can_enter=lambda *a: True, get_open_trades=lambda: {})
+ex_af = types.SimpleNamespace(
+    broker=None, equity=100000.0, regime_size_multiplier=1.0,
+    loss_tier_multiplier=lambda: 1.0,
+    phantom_cooldown_remaining=lambda s: 0.0,
+    reentry_cooldown_remaining=lambda s: 0.0,
+    pre_entry_check=_fake_pre_entry_check,
+)
+
+res_quiet = M._attempt_entry(af_cfg, strat_af, ex_af, "QUIET", 100.0, "TEST", 50)
+check("a too-quiet symbol (ATR 0.2% < 0.5% floor) is refused BEFORE "
+      "pre_entry_check is ever reached",
+      res_quiet is False and pre_entry_calls == [], (res_quiet, pre_entry_calls))
+
+pre_entry_calls.clear()
+res_lively = M._attempt_entry(af_cfg, strat_af, ex_af, "LIVELY", 100.0, "TEST", 50)
+check("a normal-range symbol (ATR 1.0%) clears the gate and reaches "
+      "pre_entry_check", len(pre_entry_calls) == 1, pre_entry_calls)
+
+pre_entry_calls.clear()
+res_unknown = M._attempt_entry(af_cfg, strat_af, ex_af, "UNKNOWN_SYM", 100.0, "TEST", 50)
+check("an unknown ATR (not yet computed for this symbol) never blocks - "
+      "fail-open, same convention as halt_check/spread", len(pre_entry_calls) == 1)
+
+off_cfg = copy.deepcopy(af_cfg)
+off_cfg["trading"]["atr_floor"]["enabled"] = False
+pre_entry_calls.clear()
+res_off = M._attempt_entry(off_cfg, strat_af, ex_af, "QUIET", 100.0, "TEST", 50)
+check("disabled -> the same too-quiet symbol is no longer refused by this gate",
+      len(pre_entry_calls) == 1)
+
+M._DYNAMIC_STOPS["engine"] = None
+check("shipped ENABLED, reusing the same ATR reading volatility_sizing uses - "
+      "not a new data source",
+      CFG["trading"]["atr_floor"]["enabled"] is True
+      and "_engine.atr_by_symbol" in msrc)
+check("placed BEFORE pre_entry_check, same spot halt_check occupies",
+      msrc.index("atr_floor.min_atr_pct") < msrc.index("ok, reason = executor.pre_entry_check"))
+
+# ===================================================================
 print("\n=== R4. BROKER RECONCILIATION ===")
 rc = CFG["trading"]["reconcile"]
 check("shipped enabled", rc["enabled"] is True)
