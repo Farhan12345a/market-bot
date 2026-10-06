@@ -1046,9 +1046,17 @@ trading:
   # (fixed the same day, commit 8ce4ad6) to read cleanly: an incorrectly
   # early/forced close can free a symbol's re-entry cooldown sooner than a
   # correctly-managed exit would have, inflating same-day re-attempts for
-  # reasons that have nothing to do with signal quality. Revisit the
-  # attempt-number analysis once a few days of clean (post-fix) data exist.
-  max_entry_attempts_per_symbol_per_day: 3
+  # reasons that have nothing to do with signal quality.
+  #
+  # 3 -> 4 on 2026-10-06, explicit user request, reverting the above.
+  # 2026-10-05's own data showed this cap was a real, large throttle (804 of
+  # 4307 signals skipped for hitting it, by far the single biggest filter
+  # that day) - not evidence it was WRONG, just confirmation it is doing
+  # exactly what the 10-02 change asked for. Reverting is a volume choice,
+  # not a correction of a mistake. Like the 10-02 change, this is not backed
+  # by a fresh attempt-number read of which specific re-attempts were
+  # winners vs losers - that analysis still doesn't exist either direction.
+  max_entry_attempts_per_symbol_per_day: 4
 
   # How far a name may already have travelled from the OPEN and still be
   # bought by the normal window. Distinct from rapid_increase_max_pct, which

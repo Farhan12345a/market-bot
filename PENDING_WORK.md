@@ -1912,3 +1912,56 @@ source-level checks tying the composition and the session-reset into
 week, then bring the logged reads back for a real go/no-go conversation
 before ever flipping `shadow_mode: false` - this entry itself is not that
 go-ahead.
+
+## 17. 2026-10-06 — max_entry_attempts_per_symbol_per_day reverted 3 -> 4; investigated the 3-day negative-edge streak
+
+`max_entry_attempts_per_symbol_per_day: 3 -> 4`, explicit user request,
+reverting the 10-02 change. Not a correction - 2026-10-05's own data showed
+the cap at 3 genuinely binding (804 of 4307 signals skipped for hitting it,
+the single largest filter that day, well ahead of burst_throttle's 829),
+confirming it was doing exactly what the 10-02 change asked for. This is a
+volume preference reversal, not new evidence against the cap.
+`qqq_list_top_n`: user asked to cut it to 2 - already at 2 since 09-30
+(`8283e0d`), no change needed, told the user so rather than silently
+no-op'ing.
+
+**What caused the 3-day negative edge streak (10/1, 10/2, 10/5)?** Checked
+every config.yaml commit between 09-27 and 10-01. The most likely single
+cause: `2ad17fd` (2026-09-30 16:56 UTC, landing between 09-30's close and
+10-01's open) set `regime_sizing.neutral_multiplier` and `.choppy_multiplier`
+from 0.5 to 0.0, on explicit user request at the time ("I want to have no
+trades occurring at all when the regime is choppy... nothing should be
+executed at all whether regime is choppy or neutral"). Before: longs could
+still fire at half size in neutral/choppy windows. After: longs ONLY fire
+on a confirmed-bullish label - the exact window 10-05's own investigation
+(item 16 above) showed can be "bullish" by the VWAP-crossing definition
+while the underlying tape is flat/directionless. Mechanism: narrowing entry
+eligibility to ONLY the bullish label concentrates entries into exactly the
+label this session proved can mean "weak, technically-positive, no real
+follow-through" - whereas before, some neutral windows (which aren't
+inherently worse, just unclassified either way) were also eligible and may
+have diluted that concentration.
+
+**Caveat, stated plainly**: this is the best-evidenced single hypothesis
+from timing + mechanism, not a proven cause. Only 3 trading days of
+post-change data exist (10-01, 10-02, 10-05 - the 09-30 session itself
+still ran under the OLD 0.5/0.5 multipliers and had positive edge,
++0.229pp), and 2 of those 3 days were also still running the orphan/
+exit-side bugs fixed later the same week (fixed 10-01 and 10-02
+respectively) - though note the edge metric itself is computed from
+signal-time forward returns, not realized trade P&L, so it should be
+independent of those bugs specifically.
+
+**Tips for fixing, in order of how much is already built**:
+1. **The conviction gate (item 16, this file)** is the most direct answer -
+   it exists specifically to catch "technically bullish, actually weak"
+   days like 10-05 without re-opening neutral/choppy entries, which the
+   user explicitly asked to close off for other reasons. Shadow mode first,
+   per that item's own notes.
+2. Re-testing a small positive `neutral_multiplier` (e.g. 0.25, leaving
+   `choppy_multiplier` at 0.0) as its own one-week held Tier 4 experiment -
+   this would directly test whether neutral specifically was wrongly
+   excluded, separate from choppy. Not done - would reopen a door the user
+   explicitly asked to close 09-30, so flagged as an option, not actioned.
+3. Do nothing yet and watch for a 4th negative day - 3 is suggestive, not
+   yet proof of a persistent regression rather than a rough week.

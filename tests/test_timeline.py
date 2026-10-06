@@ -322,11 +322,14 @@ if prev.returncode == 0:
         # 2026-09-29 extended-hours analysis found ~12 symbols exhausting
         # all 3 attempts by midday. 4 -> 3 on 2026-10-02, explicit user
         # request to bring down daily trade count without touching the
-        # symbol list - see config.yaml's comment on this key. Tier 3 -
-        # not in this timeline's tracked-keys list (max_entry_attempts_
-        # per_symbol_per_day isn't one of `same` either), so nothing else
-        # here needs updating for it.
-        "max_entry_attempts_per_symbol_per_day": 3,
+        # symbol list - see config.yaml's comment on this key. 3 -> 4 again
+        # on 2026-10-06, explicit user request reverting that - 2026-10-05's
+        # data showed the cap genuinely binding (804 of 4307 signals), which
+        # confirmed it was working as intended rather than arguing to change
+        # it back. Tier 3 - not in this timeline's tracked-keys list
+        # (max_entry_attempts_per_symbol_per_day isn't one of `same`
+        # either), so nothing else here needs updating for it.
+        "max_entry_attempts_per_symbol_per_day": 4,
     }
     for k, want in changed.items():
         check(f"{k} deliberately changed to {want}", t.get(k) == want,
