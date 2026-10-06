@@ -2059,3 +2059,17 @@ per CLAUDE.md, so this one doesn't even need to wait for live data -
 paths once levels are computed). Worth running that replay comparison
 BEFORE writing any live code, since the answer might come back "no real
 difference," which would settle this without ever touching `_attempt_entry`.
+
+## 21. 2026-10-06 — first live trading day since all of items 13/16/19's fixes/features deployed
+
+**The short-exit fix (item 13) is now confirmed under real load, not just absent load.** 10 short positions traded today (first bearish-regime window since the fix went live) - every one closed in exactly ONE leg (TRAILING_STOP/FINAL_EXIT/GAP_EXIT), no multi-leg chains, no doubling, zero ORPHAN_RECONCILE. Monday (10-05) had zero shorts at all, so zero orphans that day was inconclusive by construction - today is the real confirmation.
+
+**Catalyst watch (item 19) confirmed working end to end**: `CATALYST WATCH: 6 of 28 watchlist symbols have overnight news` logged at session start - the Alpaca News API integration works in production, not just in mocked tests.
+
+**ATR floor (item 19) saw zero rejections today** - not a bug, checked: `DYNAMIC STOPS enabled - ATR for 179 symbol(s)` confirms the engine had data; every candidate that reached the check already cleared 0.5% ATR, consistent with a momentum screener naturally selecting already-volatile names. Floor may simply rarely bind given what this screener selects for - watch over more days before concluding it's inert vs. just not load-bearing yet.
+
+**The day itself was rough**: -$510.67, 84 positions, 29% win rate, and unlike 10-05 the payoff ratio wasn't there to compensate (avg win $14.50 vs avg loss $14.80, roughly even - not the 1.6x cushion 10-05 had). Longs -$283.62 (103 tranches), shorts -$227.04 (10 tranches, see above - mechanically clean, just not profitable today).
+
+**The edge streak is now 4 consecutive negative days**: 10-01 -0.194pp, 10-02 -0.169pp, 10-05 -0.166pp, 10-06 -0.270pp. This is the first day under the `neutral_multiplier: 0.25` experiment (item 18), and edge got WORSE, not better - though the experiment is sized for neutral-regime trades specifically (8 trades today, -$13.88, roughly breakeven, far too small a sample on its own), while the bulk of today's loss was in BULLISH-regime trades (104 of the pooled trade_context rows), a different bucket the experiment doesn't touch. One day does not contradict the experiment's premise, but also doesn't yet support it - keep watching, don't conclude from day 1.
+
+Chart artifact updated with today's narrative and the still-active experiment banner (day 1 of the planned week).
