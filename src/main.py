@@ -577,6 +577,57 @@ def _compute_conviction_read(config, repo_root=None):
     return shadow_multiplier, label, pool_return
 
 
+def _fetch_catalyst_counts(config, executor, symbols, et):
+    """
+    trading.catalyst_watch (ON by default, OBSERVATION ONLY - see below):
+    {symbol: overnight_headline_count}, via Executor.broker.get_overnight_news.
+
+    WHY THIS EXISTS. The "stocks in play" framework the user raised
+    2026-10-05/06 names catalyst as the first thing a discretionary trader
+    checks - is there a REASON this name is moving, or is the move random
+    and likely to fade. This bot currently has no idea; it only ever sees
+    the move itself (rapid_increase_pct and friends are all pure price/
+    volume proxies for a catalyst, never the catalyst itself - see the many
+    "gap says a catalyst exists" comments throughout src/screener/). Alpaca's
+    News API (Benzinga-sourced, included free with the account already in
+    use - no new vendor or credential) makes a real catalyst signal cheap to
+    try.
+
+    OBSERVATION ONLY, DELIBERATELY. This does NOT filter or rank anything -
+    it only ever ATTACHES a headline count to each signal_journal row
+    (`catalyst_news_count`), the exact same "measure first, trade on it
+    later" path short_signal_journal and the regime column both went
+    through before either one touched a real decision. Promoting this to an
+    actual entry filter/ranking factor is a Tier 1 change under CLAUDE.md
+    (changes the signal itself) and needs its own explicit go-ahead and a
+    held week once there is evidence a headline count means anything here -
+    there is currently zero days of data on that question.
+
+    One network call per session (not per symbol, not per poll) - every
+    watchlist symbol's count comes back in a single Alpaca News API request.
+    Returns {} on any failure, logged at debug - a catalyst read must never
+    delay or block the pre-market pipeline it runs ahead of.
+    """
+    cw = (config.get("trading") or {}).get("catalyst_watch") or {}
+    if not cw.get("enabled") or not symbols:
+        return {}
+    try:
+        now = datetime.now(et)
+        lookback_hours = float(cw.get("lookback_hours", 16))
+        start = now - timedelta(hours=lookback_hours)
+        counts = executor.broker.get_overnight_news(symbols, start, now)
+        hits = sum(1 for v in counts.values() if v)
+        logger.info(
+            f"CATALYST WATCH: {hits} of {len(symbols)} watchlist symbols have "
+            f"overnight news (trailing {lookback_hours:g}h) - observation "
+            f"only, not yet used for selection or sizing"
+        )
+        return counts
+    except Exception as e:
+        logger.debug(f"catalyst watch skipped ({e})")
+        return {}
+
+
 _DYNAMIC_STOPS = {"engine": None}
 # The live regime state, so _attempt_entry can read the current label without
 # it being threaded through every caller. Set once per session by
@@ -587,6 +638,9 @@ _REGIME_STATE = {}
 # symbol per TTL rather than one per poll - see the halt check in
 # _attempt_entry.
 _HALT_CACHE = {}
+# symbol -> overnight headline count, set once per session by
+# run_trading_day - see _fetch_catalyst_counts.
+_CATALYST_COUNTS = {}
 
 
 def _build_dynamic_stops(config, screener=None, history_path="logs/trade_history.csv"):
@@ -3409,6 +3463,10 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
      _conviction_pool_return) = _compute_conviction_read(config)
     regime_state["conviction_label"] = _conviction_label
     regime_state["conviction_pool_return"] = _conviction_pool_return
+    # See _fetch_catalyst_counts's docstring - observation only, logged and
+    # journaled, not yet used for any entry decision.
+    _CATALYST_COUNTS.clear()
+    _CATALYST_COUNTS.update(_fetch_catalyst_counts(config, executor, symbols, et))
     market_open_dt = parse_hhmm_today("09:30", et)
     sector_history = {}
     # Only the sectors this watchlist actually needs. Computed once here rather
@@ -4633,6 +4691,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     taken=taken, skip_reason=skip_reason,
                     qty=None, size_multiplier=None,
                     regime=regime_state.get("label"),
+                    catalyst_news_count=_CATALYST_COUNTS.get(cand["symbol"]),
                 )
 
             # Best-first, so the throttle keeps the best of a burst rather than
@@ -4739,6 +4798,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     taken=taken, skip_reason=skip_reason,
                     qty=None, size_multiplier=burst_size,
                     regime=regime_state.get("label"),
+                    catalyst_news_count=_CATALYST_COUNTS.get(symbol),
                 )
 
         if email_notifier is not None and getattr(email_notifier, "run_context", None):

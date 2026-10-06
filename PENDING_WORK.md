@@ -1985,3 +1985,77 @@ one-week comparison (vs the three 0.0-neutral days - 10-01, 10-02, 10-05)
 is actually done and reported back to the user, THEN remove it (or set
 `"experiments": []`) once concluded - don't just keep copying it forward
 out of habit after it's resolved, and don't drop it early either.
+
+## 19. 2026-10-06 — ATR floor (shipped, live) and catalyst watch (shipped, observation-only)
+
+Both from the "stocks in play" conversation, both explicit user go-ahead
+("let's add both").
+
+**`trading.atr_floor`** (enabled, live): refuses an entry whose ATR doesn't
+clear `min_atr_pct` (0.5%) - the complement of `volatility_sizing`, which
+only ever scales a too-WIDE name down. Reuses the exact ATR reading
+`_volatility_multiplier` already computes (`engine.atr_by_symbol`), placed
+in `_attempt_entry` right where `halt_check` already sits, same fail-open
+convention. Tier 2 (changes which signals survive, not the signal itself).
+8 tests in `tests/test_risk_tier2.py` section R3b.
+
+**`trading.catalyst_watch`** (enabled, OBSERVATION ONLY): counts overnight
+headlines per watchlist symbol via Alpaca's own News API
+(`AlpacaBroker.get_overnight_news`, Benzinga-sourced, free with the
+account already in use - no new vendor or credential) and journals
+`catalyst_news_count` on every signal_journal row - the same "measure
+first" path the regime column took before anything acted on it. One
+network call per session, never per-symbol. Does NOT filter, rank or size
+anything - that would be a Tier 1 change (changes the signal itself) and
+needs real evidence first, which does not exist yet (zero days of data as
+of this writing). 16 tests in `tests/test_catalyst_watch.py` (mocked
+NewsClient, no real network calls in CI) plus wiring checks in
+`tests/test_journal.py` section H.
+
+**Important limitation, told to the user directly**: this session (Claude)
+is not present when the bot actually runs pre-market on its own schedule -
+the news fetch has to be a fully automated API call the bot makes itself,
+which is what `get_overnight_news` is. There is no mechanism for Claude to
+personally supply "live" news at runtime; Alpaca's News API is the
+automated substitute.
+
+**Next step, explicit**: let catalyst_news_count collect for at least the
+2-week bar this codebase has used for every other new observational factor
+(short_signal_journal, the regime column) before concluding whether it
+predicts anything here - check with `ops/analyze-journal.py`-style rho
+analysis once enough days exist, the same way `cf_exhaustion` and the
+other continuation factors were evaluated.
+
+Full suite: 2931 pass, 0 fail.
+
+## 20. TODO (not started) — "clean levels": premarket/prior-day H/L as stop references
+
+User request, explicitly deferred to a todo rather than built now. Current
+stops are purely percentage-based (`first_exit_loss_pct`, `trailing_stop_pct`,
+etc.) - the "stocks in play" framework instead argues for risk defined
+against actual price levels (premarket high/low, prior day's high/low,
+VWAP - VWAP is the one of these already in use). This is a bigger fork
+than a config tweak: it would mean a second, level-based stop mechanism
+alongside or instead of the percentage ladder, needs its own design
+conversation (which level, for which exit tier, how it interacts with
+the existing dynamic-stop tightening) before any code gets written. Tier 1
+under CLAUDE.md if it changes what counts as a stop-out (changes the
+signal/exit logic), not a quick add.
+
+**Will it be profitable - honest answer, asked directly by the user.** No
+way to know in advance, and I said so rather than promise it. What can be
+said: percentage stops and level-based stops aren't competing claims about
+which is "right" - they're different ways of encoding the same underlying
+belief about where a trade is wrong, and for a bot holding positions for
+minutes, not hours, the gap between the two is usually small (a 0.7% stop
+and "below the premarket low" often land within a few cents of each other
+intraday). The most likely real benefit isn't bigger average stops, it's
+fewer BAD stops - the ones where a percentage figure gets clipped by
+ordinary noise sitting right at a level that would have held. That is a
+testable claim, not a certainty: it would need the same one-variable,
+held-week discipline as any other exit change (exits are replayable
+per CLAUDE.md, so this one doesn't even need to wait for live data -
+`ops/replay.py` could compare the two stop styles against recorded price
+paths once levels are computed). Worth running that replay comparison
+BEFORE writing any live code, since the answer might come back "no real
+difference," which would settle this without ever touching `_attempt_entry`.

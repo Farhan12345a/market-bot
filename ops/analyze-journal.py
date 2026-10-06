@@ -36,6 +36,7 @@ JOURNAL_FIELDS = [
     "taken", "skip_reason", "qty", "size_multiplier",
     "price_15min", "pct_15min", "price_30min", "pct_30min",
     "regime",
+    "catalyst_news_count",
 ]
 
 # The continuation factors, in the order they appear in the journal. Each is

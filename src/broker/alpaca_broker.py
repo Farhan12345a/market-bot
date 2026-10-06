@@ -326,6 +326,53 @@ class AlpacaBroker:
             logger.debug(f"Could not interpret asset status for {symbol}: {e}")
             return None, "asset status unreadable"
 
+    def get_overnight_news(self, symbols, start, end, limit=50):
+        """
+        {symbol: headline_count} from Alpaca's News API (Benzinga-sourced,
+        included with every account tier - same api_key/api_secret already
+        used for trading and bars, no new vendor or credential).
+
+        For "stocks in play" catalyst awareness (2026-10-06): a price move
+        with a real news reason behind it is a different trade than the same
+        move with nothing behind it, and this bot currently has no way to
+        tell the two apart - it only sees the move itself. This is the first
+        step: COUNT headlines per symbol, nothing more. Which headlines, how
+        recent, how market-moving - all future work once counts alone prove
+        useful.
+
+        `start`/`end` are datetimes bounding the news window - typically
+        "since yesterday's close" through "now", to catch after-hours and
+        pre-market news together. Capped at one page (`limit`, Alpaca's own
+        per-request max is 50) deliberately - this is a coarse first cut,
+        not a complete news read; a symbol with more than `limit` total
+        headlines overnight across the WHOLE watchlist combined only
+        undercounts, it never raises a false count.
+
+        Returns {} on ANY failure (bad response shape, network error, rate
+        limit) - a catalyst read is informational. It must never be allowed
+        to block or delay the pre-market pipeline it runs ahead of, the same
+        contract is_symbol_tradable above already keeps.
+        """
+        counts = {s: 0 for s in symbols}
+        if not symbols:
+            return counts
+        try:
+            from alpaca.data.historical.news import NewsClient
+            from alpaca.data.requests import NewsRequest
+            client = NewsClient(self.api_key, self.api_secret)
+            req = NewsRequest(symbols=",".join(symbols), start=start, end=end,
+                              limit=limit, exclude_contentless=True)
+            news_set = client.get_news(req)
+            articles = news_set.data.get("news", [])
+            for article in articles:
+                for sym in (getattr(article, "symbols", None) or []):
+                    if sym in counts:
+                        counts[sym] += 1
+            return counts
+        except Exception as e:
+            logger.debug(f"overnight news fetch failed, continuing without it: {e}")
+            return {}
+
     def get_latest_bars(self, symbols, timeframe="1Min"):
         """Get the latest bar for symbols (useful for real-time checks)"""
         try:

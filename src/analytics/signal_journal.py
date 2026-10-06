@@ -86,6 +86,15 @@ JOURNAL_FIELDS = [
     # and a column inserted mid-schema is exactly the shape that made the
     # old header rot unreadable on 2026-08-26.
     "regime",
+    # Overnight headline count for this symbol from Alpaca's News API -
+    # added 2026-10-06, explicit user request following the "stocks in
+    # play" conversation (catalyst is the one thing on that list this bot
+    # could never see; everything else only ever inferred a catalyst from
+    # price action). See trading.catalyst_watch / _fetch_catalyst_counts in
+    # src/main.py. OBSERVATION ONLY - not used for selection or sizing yet,
+    # same "measure first" path the regime column just above took. Appended
+    # at the END, same repair_header reasoning as every column before it.
+    "catalyst_news_count",
 ]
 
 
@@ -116,7 +125,9 @@ JOURNAL_FIELDS_HISTORY = [
     [c for c in JOURNAL_FIELDS
      if c not in ("opening_efficiency", "opening_directional")],
     # v4: before the regime column (36)
-    [c for c in JOURNAL_FIELDS if c != "regime"],
+    [c for c in JOURNAL_FIELDS if c not in ("regime", "catalyst_news_count")],
+    # v5: before the catalyst_news_count column (37)
+    [c for c in JOURNAL_FIELDS if c != "catalyst_news_count"],
 ]
 
 

@@ -98,12 +98,17 @@ check("every historic column still exists today",
       all(c in JOURNAL_FIELDS for h in JOURNAL_FIELDS_HISTORY for c in h))
 # V32 is specifically the sector-columns generation (fields INSERTED before
 # `taken`, not appended) - the demonstration below relies on that insertion
-# shifting positions to prove the history is load-bearing. Pinned by index
-# from the end rather than taking JOURNAL_FIELDS_HISTORY[-1] outright,
-# because 2026-10-01 added one more generation (the `regime` column) AFTER
-# this one, and that one is APPENDED - see the separate demonstration below
-# for why an appended column does not reproduce this same fault.
-V19, V32 = JOURNAL_FIELDS_HISTORY[0], JOURNAL_FIELDS_HISTORY[-2]
+# shifting positions to prove the history is load-bearing. Found BY SHAPE
+# (has cf_score, lacks the sector columns) rather than pinned by a fixed
+# index, because every APPENDED generation since (regime 2026-10-01,
+# catalyst_news_count 2026-10-06) adds another entry to the end of this
+# list and silently moves whichever index used to mean "the sector
+# generation" - this broke once already (the previous fix pinned [-2],
+# which the very next appended column immediately invalidated). Shape-based
+# lookup can't be broken by a future append the same way.
+V19 = JOURNAL_FIELDS_HISTORY[0]
+V32 = next(h for h in JOURNAL_FIELDS_HISTORY
+           if "cf_score" in h and "cf_sector_strength" not in h)
 p3 = os.path.join(TMP, "three.csv")
 with open(p3, "w", newline="") as f:
     w = csv.writer(f); w.writerow(V19)
@@ -143,28 +148,33 @@ check("without the history, v2's cf_score no longer reads correctly",
 check("...while v1 and v3 are unaffected either way",
       ng["V1"]["taken"] == "True" and ng["V3"]["cf_sector_etf"] == "WGMI")
 
-# A DIFFERENT counterfactual, for the generation added 2026-10-01 (`regime`,
-# appended at the very end rather than inserted mid-schema, on purpose - see
-# JOURNAL_FIELDS' own comment on it). Appending does not shift any existing
-# column's position, so even WITHOUT declaring it as history, a row written
-# under the pre-regime schema still reads every pre-existing field correctly
-# when read against the current (post-regime) header - this is the payoff of
-# appending rather than inserting, demonstrated rather than just asserted.
-V_PRE_REGIME = JOURNAL_FIELDS_HISTORY[-1]
+# A DIFFERENT counterfactual, for an APPENDED generation (regime 2026-10-01,
+# catalyst_news_count 2026-10-06 - see JOURNAL_FIELDS' own comments on each).
+# Appending does not shift any existing column's position, so even WITHOUT
+# declaring it as history, a row written under an older, pre-append schema
+# still reads every pre-existing field correctly when read against the
+# current header - this is the payoff of appending rather than inserting,
+# demonstrated rather than just asserted. [-1] always means "the generation
+# immediately before the MOST RECENT append" - whichever column that is as
+# of whenever this runs, the property under test (append-safety) is the
+# same, so this stays correct without re-pinning every time one more column
+# is appended (unlike V32 above, which needed the shape-based fix instead).
+LATEST_APPENDED_COL = next(c for c in JOURNAL_FIELDS if c not in JOURNAL_FIELDS_HISTORY[-1])
+V_PRE_LATEST_APPEND = JOURNAL_FIELDS_HISTORY[-1]
 p5 = os.path.join(TMP, "append_safe.csv")
 with open(p5, "w", newline="") as f:
-    w = csv.writer(f); w.writerow(V_PRE_REGIME)
-    r = dict.fromkeys(V_PRE_REGIME, ""); r.update(symbol="PRE", cf_score="55.5", taken="True")
-    w.writerow([r[k] for k in V_PRE_REGIME])
+    w = csv.writer(f); w.writerow(V_PRE_LATEST_APPEND)
+    r = dict.fromkeys(V_PRE_LATEST_APPEND, ""); r.update(symbol="PRE", cf_score="55.5", taken="True")
+    w.writerow([r[k] for k in V_PRE_LATEST_APPEND])
 repair_header(p5, JOURNAL_FIELDS)              # no legacy_schemas, deliberately
 pg = {r["symbol"]: r for r in csv.DictReader(open(p5, newline=""))}
-check("an APPENDED column (regime) does not need to be declared as history "
-      "for an older row's other fields to still read correctly - unlike the "
-      "sector-column INSERTION above",
+check(f"an APPENDED column ({LATEST_APPENDED_COL}) does not need to be "
+      "declared as history for an older row's other fields to still read "
+      "correctly - unlike the sector-column INSERTION above",
       pg.get("PRE", {}).get("cf_score") == "55.5", pg.get("PRE"))
 check("...the appended column itself is simply blank for that older row, "
       "which is honest - it genuinely was never recorded",
-      pg.get("PRE", {}).get("regime") == "", pg.get("PRE"))
+      pg.get("PRE", {}).get(LATEST_APPENDED_COL) == "", pg.get("PRE"))
 
 print("\n=== 4. remap_row ===")
 check("remap places by name",

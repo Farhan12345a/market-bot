@@ -2717,6 +2717,31 @@ trading:
   earnings_list_top_n: 3  # 3 -> 5 on 2026-09-24, reverted to 3 on 2026-09-25 - see num_stocks_to_trade's comment
   earnings_calendar_timeout_seconds: 20
 
+  # CATALYST WATCH (added 2026-10-06, explicit user request, informed by the
+  # "stocks in play" framework). Earnings above is the ONE catalyst type
+  # this bot has ever been able to see; everything else (upgrades/
+  # downgrades, FDA, M&A, general news) was invisible - the screener only
+  # ever sees a PRICE move and infers a catalyst must exist behind it (see
+  # the many "gap says a catalyst exists" comments throughout
+  # src/screener/), never the catalyst itself.
+  #
+  # Uses Alpaca's own News API (Benzinga-sourced, free with the account
+  # already in use - no new vendor, no new credential) to count overnight
+  # headlines per watchlist symbol, once per session. See
+  # _fetch_catalyst_counts in src/main.py.
+  #
+  # OBSERVATION ONLY. This does not filter, rank or size anything yet - it
+  # only attaches `catalyst_news_count` to every signal_journal row, the
+  # same "measure first" path short_signal_journal and the regime column
+  # both went through before either one touched a real decision. There is
+  # zero days of evidence yet that a headline count means anything for this
+  # strategy specifically; turning it into an actual entry/ranking factor
+  # is a Tier 1 change (changes the signal itself) and needs its own
+  # explicit go-ahead plus a held week once that evidence exists.
+  catalyst_watch:
+    enabled: true
+    lookback_hours: 16   # since the prior close, through pre-market
+
   # QQQ list: the Nasdaq-100 constituents in src/screener/qqq_constituents.txt,
   # used ONLY on days QQQ is itself trending up (gap, N-day return and price-vs-
   # average, majority of three). On a flat or falling index these names are

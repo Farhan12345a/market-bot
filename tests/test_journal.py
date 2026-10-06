@@ -229,5 +229,37 @@ check("...and into the SHORT signal journal too - the same question "
       src.count('regime=regime_state.get("label")') >= 2,
       src.count('regime=regime_state.get("label")'))
 
+print("\n=== H. CATALYST_NEWS_COUNT COLUMN (2026-10-06) ===")
+# "stocks in play" framework, explicit user request: catalyst is the one
+# thing this bot could never see - every screener signal is a PRICE/volume
+# proxy for a catalyst, never the catalyst itself. OBSERVATION ONLY for now
+# (same measure-first path the regime column above took) - this just
+# confirms the count round-trips and reaches both journals, not that
+# anything acts on it yet.
+tf3 = tempfile.mktemp(suffix=".csv")
+j3 = mk(tf3)
+j3.record(symbol="NEWSY", price=70.0, signal_pct=0.5, taken=True,
+          catalyst_news_count=3)
+j3.record(symbol="QUIET", price=40.0, signal_pct=0.3, taken=False,
+          skip_reason="burst_throttle", catalyst_news_count=0)
+j3.flush()
+r3 = {row["symbol"]: row for row in rows(tf3)}
+check("a symbol's overnight headline count round-trips through the CSV",
+      r3["NEWSY"]["catalyst_news_count"] == "3", r3["NEWSY"])
+check("a zero count (genuinely checked, nothing found) is recorded as 0, "
+      "not left blank the way 'never checked' would be",
+      r3["QUIET"]["catalyst_news_count"] == "0", r3["QUIET"])
+
+check("_fetch_catalyst_counts exists and is off-by-default-safe (config-gated)",
+      "_fetch_catalyst_counts" in src and 'cw.get("enabled")' in src)
+check("the main entry loop passes the session's catalyst count into the "
+      "LONG signal journal", 'catalyst_news_count=_CATALYST_COUNTS.get(symbol)' in src)
+check("...and into the SHORT signal journal too",
+      'catalyst_news_count=_CATALYST_COUNTS.get(cand["symbol"])' in src)
+check("the broker-level fetch never raises into the caller on failure - "
+      "a catalyst read must not be able to block the pre-market pipeline",
+      "overnight news fetch failed" in
+      open(repo_file("src", "broker", "alpaca_broker.py")).read())
+
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)
