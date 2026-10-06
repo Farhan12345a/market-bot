@@ -485,6 +485,98 @@ def _short_regime_multiplier(config, label):
     return table.get(label, 1.0)
 
 
+def _compute_conviction_read(config, repo_root=None):
+    """
+    trading.conviction_gate (OFF by default): a day-level size scalar driven
+    by SIGNAL QUALITY rather than direction - orthogonal to regime_sizing,
+    which only ever says long/short/neither.
+
+    WHY THIS EXISTS. 2026-10-05: regime read bullish (both indices above
+    VWAP) for the entire session, longs were the only side gated open, and
+    the day still lost -$142.93 at a 31% win rate. Traced it: SPY/QQQ barely
+    moved all day (+0.02% to -0.04%, repeatedly crossing zero) and the day's
+    ENTIRE signal pool (signal_journal.csv, taken or not) averaged a
+    NEGATIVE forward return (mean pct_15min -0.094%) before any selection
+    even happened - a technically-bullish, genuinely weak tape. regime_sizing
+    cannot see this distinction; it only reads price vs VWAP, which says
+    nothing about whether the move has any follow-through. This is the gap
+    the user's "Market Environment Cheat Sheet" conversation flagged as
+    missing (the range-bound/quality category) - a day can be labeled
+    correctly and still be a bad day to trade at full size.
+
+    WHAT IT READS. The pooled mean pct_15min across EVERY signal (taken or
+    not) from the last `lookback_days` COMPLETED sessions in logs/daily/ -
+    exactly ops/session-metrics.py's "all signals" column, the do-nothing
+    benchmark, read live instead of after the fact. Today is deliberately
+    excluded (its own signals' forward returns aren't known yet - using them
+    would mean waiting 15 minutes behind every poll, and the trailing window
+    is the available substitute).
+
+    SHADOW MODE (shadow_mode: true, the default whenever enabled: true is
+    set). Computed and logged every day, but the multiplier returned to the
+    caller is ALWAYS 1.0 - nothing about sizing changes. This is deliberate:
+    CLAUDE.md's own rule for anything that can silently change the sample
+    (Tier 4) is to hold a change for a week and compare, not to flip it live
+    the day it's built. Shadow mode is that week - watch regime_state's
+    logged conviction_shadow_multiplier against what actually happened each
+    day before ever setting shadow_mode: false.
+
+    Returns (multiplier, label, pool_return_pct_or_None). multiplier is
+    always 1.0 unless enabled AND shadow_mode is explicitly false.
+    """
+    import glob as _glob
+    cg = (config.get("trading") or {}).get("conviction_gate") or {}
+    if not cg.get("enabled"):
+        return 1.0, None, None
+
+    root = repo_root or "."
+    lookback_days = int(cg.get("lookback_days", 5))
+    weak_threshold = float(cg.get("weak_threshold_pct", -0.05))
+    weak_multiplier = float(cg.get("weak_size_multiplier", 0.5))
+
+    day_dirs = sorted(
+        d for d in _glob.glob(os.path.join(root, "logs", "daily", "*"))
+        if os.path.basename(d) < datetime.now().strftime("%Y-%m-%d")
+    )[-lookback_days:]
+
+    returns = []
+    for d in day_dirs:
+        jpath = os.path.join(d, "signal_journal.csv")
+        if not os.path.exists(jpath):
+            continue
+        try:
+            with open(jpath, newline="") as f:
+                for row in csv.DictReader(f):
+                    v = row.get("pct_15min")
+                    if v not in (None, ""):
+                        try:
+                            returns.append(float(v))
+                        except ValueError:
+                            pass
+        except Exception as e:
+            logger.debug(f"conviction_gate: could not read {jpath} ({e})")
+
+    if not returns:
+        return 1.0, None, None
+
+    pool_return = sum(returns) / len(returns)
+    label = "weak" if pool_return < weak_threshold else "normal"
+    shadow_multiplier = weak_multiplier if label == "weak" else 1.0
+
+    logger.info(
+        f"CONVICTION GATE: trailing {len(day_dirs)}-day pooled signal "
+        f"forward return {pool_return:+.3f}% (n={len(returns)}) -> {label}"
+        + (f", shadow multiplier would be {shadow_multiplier:g}x"
+           if label == "weak" else "")
+        + (" (SHADOW MODE - not applied to real sizing)"
+           if cg.get("shadow_mode", True) else " (LIVE - applied to real sizing)")
+    )
+
+    if cg.get("shadow_mode", True):
+        return 1.0, label, pool_return
+    return shadow_multiplier, label, pool_return
+
+
 _DYNAMIC_STOPS = {"engine": None}
 # The live regime state, so _attempt_entry can read the current label without
 # it being threaded through every caller. Set once per session by
@@ -1805,6 +1897,15 @@ def _position_size(config, executor, price, symbol=None, volume_history=None,
     except Exception as e:
         logger.debug(f"loss tier scaling skipped ({e})")
 
+    # CONVICTION GATE (trading.conviction_gate, off by default - see
+    # _compute_conviction_read). A THIRD independent reason to be smaller,
+    # same composition pattern as the two above: regime says which direction
+    # to trade, loss-tier says how much of today's budget is left, this says
+    # whether the signal pool lately has had any real follow-through at all.
+    # Set once per session by run_trading_day; stays 1.0 (no-op) unless the
+    # gate is both enabled and out of shadow mode.
+    regime_mult *= getattr(executor, "conviction_size_multiplier", 1.0)
+
     # VOLATILITY-ADJUSTED SIZING.
     #
     # Applied as a multiplier rather than through the risk-budget ceiling
@@ -2962,10 +3063,29 @@ def _attempt_entry(config, strategy, executor, symbol, price, entry_method, symb
             _spread = _usable_spread_pct(config, market_data, symbol, price)
         except Exception:
             _spread = None
+    # symbol_rsi only has a value when use_rsi_filter is on - found 2026-10-06,
+    # auditing the emailed report's "a lot of N/A" complaint. use_rsi_filter
+    # has been False the entire time these reports have existed, so the
+    # "Entry RSI" column was 0/N populated for every trade on every day
+    # checked back to 09-29 - not a reporting bug, a reporting BLIND SPOT,
+    # since rsi_values (the dict symbol_rsi reads from) was never computed at
+    # all when the filter is off. Fetched fresh here, purely for the record -
+    # mirrors exactly how exit_rsi is already fetched fresh at exit time
+    # (same try/except-never-blocks pattern) - and does NOT touch
+    # use_rsi_filter or rsi_max, so no entry DECISION changes, only what gets
+    # written down about one that was already made.
+    _report_rsi = symbol_rsi
+    if _report_rsi is None and market_data is not None:
+        try:
+            _report_rsi = market_data.get_rsi(
+                symbol, period=config["trading"].get("rsi_period", 14))
+        except Exception:
+            _report_rsi = None
     order = executor.submit_entry_order(symbol, qty, price, entry_method=entry_method,
-                                        entry_rsi=symbol_rsi, spread_pct=_spread,
+                                        entry_rsi=_report_rsi, spread_pct=_spread,
                                         is_opening_burst=is_opening_burst,
-                                        side=("sell" if side == "short" else "buy"))
+                                        side=("sell" if side == "short" else "buy"),
+                                        signal_pct=signal_pct)
     if order is None:
         return False  # broker rejected/failed - already logged by submit_entry_order, nothing committed
 
@@ -3258,6 +3378,14 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     # surviving a day, which this file already guards against elsewhere.
     executor.regime_size_multiplier = 1.0
     executor.short_regime_size_multiplier = 1.0
+    # See _compute_conviction_read's docstring. Off by default; when on, it's
+    # shadow-mode (logged, not applied) until explicitly taken out of that
+    # mode - this call is cheap (a few small CSV reads) even when the gate
+    # itself is off, since that check happens first and returns immediately.
+    (executor.conviction_size_multiplier, _conviction_label,
+     _conviction_pool_return) = _compute_conviction_read(config)
+    regime_state["conviction_label"] = _conviction_label
+    regime_state["conviction_pool_return"] = _conviction_pool_return
     market_open_dt = parse_hhmm_today("09:30", et)
     sector_history = {}
     # Only the sectors this watchlist actually needs. Computed once here rather
@@ -4456,6 +4584,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                             side="short",
                             exit_config=_short_exit_config(config),
                             entry_window_label=entry_window_label,
+                            signal_pct=cand["signal_pct"],
                         )
                         if taken:
                             entries_triggered += 1
@@ -4557,6 +4686,7 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         market_data=market_data,
                         volume_history=volume_history,
                         entry_window_label=entry_window_label,
+                        signal_pct=cand["signal_pct"],
                     )
                     if taken:
                         entries_triggered += 1
@@ -4811,7 +4941,8 @@ def _advance_pullback_state(config, strategy, executor, symbol, price, pending_p
                     f"resumed to {price:.2f}"
                 )
                 return _attempt_entry(config, strategy, executor, symbol, price, "PULLBACK_RESUMPTION",
-                              symbol_rsi, market_data=market_data)
+                              symbol_rsi, market_data=market_data,
+                              signal_pct=round(setup["pct_change"], 3))
 
     if price > setup["peak"]:
         setup["peak"] = price

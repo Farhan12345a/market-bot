@@ -838,5 +838,52 @@ check("...and a SHORT is filtered out before the streak counter ever sees it "
       "unless short_strategy is enabled (2026-09-27)",
       "if _held < 0 and not _short_enabled" in src)
 
+print("\n=== 35. signal_pct AND entry_rsi ACTUALLY REACH trade_history.csv ===")
+# Found 2026-10-06, auditing the emailed daily report's "a lot of N/A"
+# complaint: both columns were 0/N populated on EVERY day checked back to
+# 09-29. Two separate gaps, same symptom:
+#   - signal_pct: record_entry_meta() never accepted it as a parameter at
+#     all, despite being available at every _attempt_entry call site the
+#     whole time - just never threaded the last few feet of the call chain.
+#   - entry_rsi: wired correctly, but its ONLY source (rsi_values) is only
+#     ever computed when use_rsi_filter is on - which has been False this
+#     entire time, so there was never a value to thread through in the
+#     first place.
+b35 = Broker(holdings={})
+ex35 = Executor(b35, CFG)
+order35 = ex35.submit_entry_order("ZZZ", 10, 50.0, entry_method="RAPID_INCREASE_CANDIDATE",
+                                  entry_rsi=62.4, signal_pct=1.17, side="buy")
+check("the order still goes through with the new kwarg",
+      order35 is not None)
+check("signal_pct reaches entry_meta", ex35.entry_meta["ZZZ"]["signal_pct"] == 1.17,
+      ex35.entry_meta["ZZZ"])
+check("entry_rsi (stored as 'rsi') reaches entry_meta",
+      ex35.entry_meta["ZZZ"]["rsi"] == 62.4, ex35.entry_meta["ZZZ"])
+
+ex35b = Executor(Broker(holdings={}), CFG)
+ex35b.record_entry_meta("YYY", method="X", rsi=None, signal_pct=0.81)
+check("record_entry_meta accepts and stores signal_pct directly",
+      ex35b.entry_meta["YYY"]["signal_pct"] == 0.81)
+check("...and a call with no signal_pct at all still defaults to None, not "
+      "a crash (every RECONCILED/orphan call site never passes it)",
+      Executor(Broker(holdings={}), CFG).record_entry_meta("W", method="X", rsi=None)
+      is None)
+
+check("main.py's normal LONG entry call site passes signal_pct",
+      'entry_window_label=entry_window_label,\n                        signal_pct=cand["signal_pct"],'
+      in src)
+check("...and the SHORT entry call site too",
+      'entry_window_label=entry_window_label,\n                            signal_pct=cand["signal_pct"],'
+      in src)
+check("...and PULLBACK_RESUMPTION",
+      'signal_pct=round(setup["pct_change"], 3)' in src)
+check("...and the opening-burst call site (already correct before this fix)",
+      'burst_note=note, signal_pct=round(move, 3),' in src)
+check("entry_rsi now has a fresh-fetch fallback for when use_rsi_filter is "
+      "off, mirroring exactly how exit_rsi is already fetched fresh at exit "
+      "time (same never-blocks try/except shape)",
+      "_report_rsi = symbol_rsi" in src
+      and "_report_rsi = market_data.get_rsi(" in src)
+
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)

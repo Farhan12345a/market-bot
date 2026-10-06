@@ -1818,3 +1818,97 @@ Full suite: 2875 pass, 0 fail (91 in `test_short_strategy.py` alone, up
 from 78). Neither of today's findings is visible in Friday's logs or any
 log collected so far - they were found by audit and simulation, not by
 tracing a live incident, which is the point of doing this pass at all.
+
+## 15. 2026-10-06 — the emailed report's "a lot of N/A": signal_pct and entry_rsi were never threaded through
+
+User complaint, direct: the daily emailed report has "a lot of NA... in a
+lot of the columns and rows." Checked every column's non-blank rate in
+`trade_history.csv` across 5 recent days (09-29 through 10-05) - every
+field was fully populated except two, which were **0/N populated on every
+single day checked**: `signal_pct` and `entry_rsi`.
+
+**`signal_pct`**: `record_entry_meta()` never accepted it as a parameter at
+all, despite `signal_pct` being available at literally every
+`_attempt_entry` call site in `run_trading_day` the whole time - just never
+threaded the last few feet of the call chain (`_attempt_entry` ->
+`submit_entry_order` -> `record_entry_meta` -> `entry_meta` ->
+`trade_history.csv`). The opening-burst call site was the sole exception -
+it already passed it correctly, which is how this went unnoticed: nobody
+ever happened to look at an opening-burst row specifically next to a normal
+one.
+
+**`entry_rsi`**: wired correctly end to end, but its only source
+(`rsi_values`) is only ever computed when `use_rsi_filter` is on - which has
+been `False` this entire time, so `symbol_rsi` was always `None` by the time
+it reached the entry call site. Not a reporting bug so much as a reporting
+BLIND SPOT: the RSI filter being off should mean "RSI doesn't decide
+anything," not "RSI is never even looked up."
+
+**Fix**: `record_entry_meta`/`submit_entry_order` gained a `signal_pct`
+parameter, threaded through from the 4 real call sites that were missing it
+(normal long, short, pullback-resumption - opening-burst already had it).
+`entry_rsi` now has a fresh-fetch fallback right before the entry order
+goes out when `symbol_rsi` is `None`, mirroring exactly how `exit_rsi` is
+already fetched fresh at exit time (same try/except-never-blocks shape) -
+deliberately does NOT touch `use_rsi_filter` or `rsi_max`, so no entry
+DECISION changes, only what gets recorded about one already made.
+
+Three hand-rolled fake-Executor test doubles (`tests/test_opening.py` x2,
+`tests/test_bursts_separate.py`) had their own `submit_entry_order` stub
+signatures and needed `signal_pct=None` added to match - caught immediately
+by the full suite, not a surprise later. New regression coverage in
+`tests/test_phantom_exit.py` section 35 (11 checks) confirms both fields
+reach `entry_meta` end to end and that every real call site passes
+`signal_pct`. Full suite: 2885 pass, 0 fail.
+
+## 16. 2026-10-06 — trading.conviction_gate: a day-level size scalar for signal QUALITY, not direction (OFF by default, shadow-mode-first)
+
+Built in direct response to 2026-10-05's loss: regime read bullish (both
+indices above VWAP) for the entire session, longs were the only side gated
+open under the existing directional gating, and the day still lost
+-$142.93 at a 31% win rate. Traced why: SPY/QQQ barely moved all day
+(+0.02% to -0.04%, crossing zero repeatedly) and the day's ENTIRE signal
+pool (`signal_journal.csv`, taken or not) averaged a NEGATIVE forward
+return (mean `pct_15min` -0.094%) before any selection even happened - a
+technically-bullish, genuinely weak tape. `regime_sizing` cannot see this:
+it only reads price vs VWAP, which says nothing about follow-through. This
+is exactly the gap the user's "Market Environment Cheat Sheet" conversation
+flagged as missing (the range-bound/quality category) - a day can be
+labeled correctly by direction and still be a bad day to trade at full
+size.
+
+**Mechanism** (`_compute_conviction_read` in `src/main.py`): pools
+`pct_15min` across every signal (taken or not) from the trailing
+`lookback_days` COMPLETED sessions under `logs/daily/` - exactly
+`ops/session-metrics.py`'s "all signals" column (the do-nothing benchmark),
+read live instead of after the fact. Today is always excluded (its own
+signals' forward returns aren't known yet). Below `weak_threshold_pct` ->
+label `"weak"`, multiplier `weak_size_multiplier`; otherwise `"normal"`,
+multiplier `1.0`. Composes into `_position_size` as a third independent
+multiplicative factor alongside `regime_size_multiplier` and
+`loss_tier_multiplier` - same pattern, same place, same "always 1.0 when
+inert" convention.
+
+**Ships OFF (`enabled: false`), and even when enabled, ships in
+`shadow_mode: true`** - computed and logged every day (`CONVICTION GATE:
+...` in the service log) but the multiplier returned to the caller stays
+`1.0` regardless, so nothing about real sizing changes. This follows
+CLAUDE.md's own Tier 4 rule to the letter: anything that can silently
+shrink the sample gets a week of observation before it's allowed to touch a
+real order, the same discipline `regime_sizing`'s chop table and
+`short_strategy` were both built under before going live. **Do not set
+`shadow_mode: false` without first reviewing a week of logged reads against
+what actually happened those days** - this has exactly zero days of
+real-world validation as of this writing.
+
+Tests: `tests/test_conviction_gate.py`, 18 checks - the off/no-op case, a
+synthetic weak trailing pool (shadow vs live mode), a synthetic normal
+pool, no-data-at-all (must not manufacture a false "weak"), confirms
+today's own date is never read even when present on disk, and two
+source-level checks tying the composition and the session-reset into
+`_position_size`/`run_trading_day`. Full suite: 2903 pass, 0 fail.
+
+**Next step, explicit**: let shadow mode run for the CLAUDE.md-standard
+week, then bring the logged reads back for a real go/no-go conversation
+before ever flipping `shadow_mode: false` - this entry itself is not that
+go-ahead.

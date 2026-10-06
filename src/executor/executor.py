@@ -1697,7 +1697,8 @@ class Executor:
 
         return True, ""
 
-    def record_entry_meta(self, symbol, method, rsi, entry_time=None, price_source=None, side="long"):
+    def record_entry_meta(self, symbol, method, rsi, entry_time=None, price_source=None,
+                          side="long", signal_pct=None):
         """
         Record how/when a position was opened, independent of open_entries
         (which only holds price and is read by the P&L calc). Called for
@@ -1720,11 +1721,16 @@ class Executor:
             # trade_history.csv/trade_context.csv so a short is never
             # ambiguous with a long in the reports.
             "side": side,
+            # The % move that fired the signal. Was never threaded this far
+            # down the call chain despite being available at the call site
+            # the whole time - found 2026-10-06, the "Signal %" column has
+            # been N/A for every trade on every day checked back to 09-29.
+            "signal_pct": signal_pct,
         }
 
     def submit_entry_order(self, symbol, qty, price=None, entry_method=None,
                            entry_rsi=None, spread_pct=None, is_opening_burst=False,
-                           side="buy"):
+                           side="buy", signal_pct=None):
         """
         Submit a market order to enter a position. Returns the order on
         success, or None on failure (does NOT raise) - callers must check the
@@ -1839,6 +1845,7 @@ class Executor:
             symbol, method=entry_method or "UNKNOWN", rsi=entry_rsi,
             price_source=(self.entry_price_source(symbol) if self.entry_price_source else None),
             side=("short" if side == "sell" else "long"),
+            signal_pct=signal_pct,
         )
 
         self.order_history.append({

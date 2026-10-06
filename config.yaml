@@ -2112,6 +2112,31 @@ trading:
     bullish_above_pct: 0.0     # BOTH readings at/above this -> bullish
 
   # -----------------------------------------------------------------------
+  # CONVICTION GATE (added 2026-10-06, OFF by default) - a day-level size
+  # scalar driven by SIGNAL QUALITY, orthogonal to regime_sizing above (which
+  # only ever says long/short/neither). Built after 2026-10-05: regime read
+  # bullish all session, longs were the only side gated open, and the day
+  # still lost -$142.93 at a 31% win rate - SPY/QQQ barely moved all day and
+  # the entire signal pool that day averaged a NEGATIVE forward return before
+  # any selection even happened. regime_sizing cannot see that distinction;
+  # it only reads price vs VWAP. See _compute_conviction_read in main.py for
+  # the full mechanism and reasoning.
+  #
+  # SHIPS IN SHADOW MODE WHENEVER enabled: true IS SET. shadow_mode: true
+  # computes and logs the read every day but the multiplier applied to real
+  # sizing stays 1.0 regardless - per CLAUDE.md, anything that can silently
+  # shrink the sample (this can, same as regime_sizing's chop table) gets a
+  # week of observation before it ever touches a real order. Do NOT set
+  # shadow_mode: false without first reviewing a week of logged
+  # "CONVICTION GATE" lines against what actually happened those days.
+  conviction_gate:
+    enabled: false
+    shadow_mode: true
+    lookback_days: 5          # trailing COMPLETED sessions pooled, today excluded
+    weak_threshold_pct: -0.05 # pooled mean pct_15min below this -> "weak"
+    weak_size_multiplier: 0.5
+
+  # -----------------------------------------------------------------------
   # THE SHORT STRATEGY (added 2026-09-27, ENABLED same day on explicit user
   # request), reported as its OWN section, deliberately never combined with
   # the primary (long) window's own P&L - see analytics/reporting notes and
