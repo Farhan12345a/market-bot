@@ -1965,3 +1965,23 @@ independent of those bugs specifically.
    explicitly asked to close 09-30, so flagged as an option, not actioned.
 3. Do nothing yet and watch for a 4th negative day - 3 is suggestive, not
    yet proof of a persistent regression rather than a rough week.
+
+## 18. 2026-10-06 — neutral_multiplier experiment actioned; the chart artifact gets a persistent "Active Experiments" banner
+
+Option 2 from item 17 actioned on explicit user request:
+`regime_sizing.neutral_multiplier: 0.0 -> 0.25` (choppy stays 0.0). See
+config.yaml's own comment on the key for full reasoning - this entry is
+just the artifact-side half.
+
+**The daily chart artifact (`daily_viz/index.html` + `meta.json`) now has a
+persistent "Active Experiments" banner**, requested explicitly so a held
+change doesn't disappear into a comment nobody rechecks: `meta.json` takes
+an optional `"experiments"` array of `{label, started, detail}`; the page
+renders them in a visible amber-bordered box right under the narrative,
+every day they're present, not just the day they start. **The daily
+routine must now carry this forward**: keep the `neutral_multiplier`
+experiment entry in `meta.json`'s `experiments` array every day until the
+one-week comparison (vs the three 0.0-neutral days - 10-01, 10-02, 10-05)
+is actually done and reported back to the user, THEN remove it (or set
+`"experiments": []`) once concluded - don't just keep copying it forward
+out of habit after it's resolved, and don't drop it early either.
