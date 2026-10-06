@@ -2070,9 +2070,25 @@ trading:
     # see the "regime says stand down" check at the entry-skip site in
     # main.py - so this reuses the exact mechanism bearish_multiplier: 0.0
     # already relies on, just extended to two more labels.
-    neutral_multiplier: 0.0
+    #
+    # HELD EXPERIMENT, STARTED 2026-10-06, explicit user request: 0.0 -> 0.25
+    # for NEUTRAL only - choppy stays at 0.0, untouched, per the user's
+    # original 09-30 reasoning (choppy specifically was never in question).
+    # Built after PENDING_WORK.md item 17 identified this 09-30 change as the
+    # most likely cause of a 3-day negative-edge streak (10-01, 10-02,
+    # 10-05): narrowing longs to ONLY the bullish label concentrates entries
+    # into a label that can mean "technically positive, no real
+    # follow-through" (see item 16's 10-05 finding), while neutral windows -
+    # not inherently worse, just unclassified either way - got shut out
+    # entirely. One variable, held for a week per CLAUDE.md's own entry-
+    # change discipline, compared against the three 0.0-neutral days
+    # (10-01, 10-02, 10-05) once enough 0.25-neutral days exist. Also
+    # surfaced in the daily chart artifact's "Active Experiments" panel
+    # (daily_viz/index.html + meta.json's "experiments" field) so it isn't
+    # just a config comment nobody rechecks.
+    neutral_multiplier: 0.25
     bearish_multiplier: 0.0    # 0 = no new longs. 0.25 = quarter size instead.
-    choppy_multiplier: 0.0     # see the chop block below; 0.5 -> 0.0 2026-09-30, same request as neutral_multiplier above
+    choppy_multiplier: 0.0     # see the chop block below; 0.5 -> 0.0 2026-09-30, same request as neutral_multiplier above - UNCHANGED by the 10-06 neutral experiment
 
     # ---------------------------------------------------------------------
     # CHOP - the fourth regime label (added 2026-09-02)

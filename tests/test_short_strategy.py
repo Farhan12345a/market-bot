@@ -302,9 +302,15 @@ check("it only ever NARROWS the short side (0.0), never the reverse - "
 # nonzero and the short side needs forcing to 0.0 on top of its own table
 # value. Elsewhere (neutral, choppy, bearish) both sides already agree
 # without it: one side's own config number is already 0.
+#
+# neutral_multiplier (long side only) 0.0 -> 0.25 on 2026-10-06, a held
+# one-week experiment (PENDING_WORK.md item 17/18) - choppy stays 0.0,
+# untouched. The short side's neutral_multiplier is independently forced to
+# 0.0 "regardless" (see config.yaml), so mutual exclusion at "neutral" still
+# holds even though longs are nonzero there now.
 for label, want_long_nonzero, want_short_nonzero in [
     ("bullish", True, False),
-    ("neutral", False, False),
+    ("neutral", True, False),
     ("choppy", False, False),
     ("bearish", False, True),
 ]:
