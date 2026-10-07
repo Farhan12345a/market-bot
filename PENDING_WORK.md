@@ -2073,3 +2073,75 @@ difference," which would settle this without ever touching `_attempt_entry`.
 **The edge streak is now 4 consecutive negative days**: 10-01 -0.194pp, 10-02 -0.169pp, 10-05 -0.166pp, 10-06 -0.270pp. This is the first day under the `neutral_multiplier: 0.25` experiment (item 18), and edge got WORSE, not better - though the experiment is sized for neutral-regime trades specifically (8 trades today, -$13.88, roughly breakeven, far too small a sample on its own), while the bulk of today's loss was in BULLISH-regime trades (104 of the pooled trade_context rows), a different bucket the experiment doesn't touch. One day does not contradict the experiment's premise, but also doesn't yet support it - keep watching, don't conclude from day 1.
 
 Chart artifact updated with today's narrative and the still-active experiment banner (day 1 of the planned week).
+
+## 22. 2026-10-07 — same-day loss follow-up: real participation data, the 2-strike rule, opening-minutes throttle, the data feed fix, and the lookback-minutes experiment
+
+Deep-dived 10-06's 28 never-developed positions further at the user's
+request. Two concrete findings beyond item 21:
+
+**RVOL at signal time was baseline or missing for nearly every opening-
+minute loser** (15 of 18 entries taken in the first ~1 minute had RVOL
+<=1.1 or blank) - real evidence these specific moves had no unusual
+participation behind them. But pooled rho for `cf_efficiency` across all
+12 tracked days is **-0.000** (flips sign day to day: -0.069, +0.025,
++0.111, -0.047, +0.123, +0.096) and the whole `cf_score` composite pools
+at +0.008 - both statistically zero despite looking promising on any
+single recent day. Corrected an overclaim made earlier the same
+conversation (cited 2 good days as if they generalized). Neither factor is
+validated enough to gate on yet.
+
+**Nearly all of 10-06's opening-minute losers fired within the same ~45
+seconds of each other** - not a sector story (sector_for() has too little
+coverage to say), a TIMING story: 5 separate BURST DETECTED events in the
+first minute, each correctly throttled to 3 at half size on its own, but
+nothing capped the total across them.
+
+**Four things built/changed, all tested, all pushed**:
+
+1. **`trading.max_losses_per_symbol_per_day: 2`** (the 2-strike rule) -
+   refuses further entries on a symbol after 2 fully-closed losing
+   positions same day, cumulative not consecutive. Traced directly from
+   MXL (3 entries, 3 losses, -$106.64), CDNA (4 entries, 4 losses,
+   -$101.11), MDB (4 entries, 3 losses). Hooks into the existing
+   `_note_position_closed`/`closed_at_loss` mechanism already used for the
+   re-entry cooldown - no new P&L accumulation needed.
+2. **`trading.opening_minutes_throttle`** (enabled, 2min/6 entries) - caps
+   the TOTAL entries taken within 2 minutes of `entry_window_start` across
+   however many separate per-poll bursts contribute, closing the gap
+   `burst_throttle` leaves (per-poll only, no cross-poll memory).
+3. **`AlpacaBroker.feed` made configurable**, reusing `trading.websocket_feed`
+   (already "sip" in the live config). Found while evaluating the
+   lookback-minutes question: two REST calls (`get_historical_bars`,
+   `get_latest_quote`) were hardcoded to the free `DataFeed.IEX` regardless
+   of config - the account's paid SIP upgrade was only actually benefiting
+   the ~92% of reads served by the live websocket stream (which already
+   read the config correctly), not the REST fallback path.
+4. **`rapid_increase_lookback_minutes: 3 -> 2`**, a held Tier 1 experiment.
+   This was originally widened 2 -> 3 specifically because the free IEX
+   feed lags wall-clock by ~2-3min, and a window shorter than that delay
+   could never accumulate 2 genuinely-different in-window samples. Only
+   reverted after the user confirmed the account is now on paid SIP (which
+   doesn't carry that lag) AND item 3 above was fixed so the REST fallback
+   path actually gets the benefit too - not done blindly despite the
+   user's initial request, specifically because of this documented history.
+
+**"Keep track of this" - explicit watch list for the lookback-minutes
+change**, since the user asked for it directly:
+- Watch for any sign the 2-minute window still can't accumulate 2 samples
+  for some symbols (the ORIGINAL failure mode) - e.g. a spike in
+  `signal_pct` coming back null/missing in signal_journal.csv, or a drop
+  in total signal count that doesn't track with a quieter market day. This
+  would mean the SIP upgrade didn't fully remove the original constraint
+  (maybe for REST-fallback symbols specifically, or some other residual
+  lag) and the window should go back to 3.
+- Compare entry volume, win rate and edge for the week after 10-07 against
+  the week before, same one-variable-at-a-time discipline as every other
+  held experiment in this file.
+- This stacks with the already-running `neutral_multiplier` experiment
+  (item 18) and the opening-minutes throttle above - three live changes in
+  the same stretch makes attribution harder if several things move at
+  once. Noting this explicitly rather than pretending it isn't a
+  complication.
+
+Full suite: 2968 pass, 0 fail (tests/test_0902b.py's 2-strike section,
+tests/test_opening_minutes_throttle.py, tests/test_data_feed.py all new).

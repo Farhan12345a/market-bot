@@ -56,7 +56,7 @@ expect = {"min_stock_price":20, "momentum_fade_slope_threshold":-0.05, "entry_wi
           "resistance_min_decline_pct":0.5, "reentry_cooldown_minutes":5,
           "use_burst_throttle":True, "use_websocket_stream":True,
           "use_trade_ticks_for_entry":True,
-          "rapid_increase_pct":0.3, "rapid_increase_lookback_minutes":3,
+          "rapid_increase_pct":0.3, "rapid_increase_lookback_minutes":2,
           "three_bar_require_acceleration":True, "screener_start_time":"09:05"}
 for k, v in expect.items():
     check(f"{k} = {v}", T[k] == v, T[k])

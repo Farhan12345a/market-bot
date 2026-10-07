@@ -767,11 +767,21 @@ trading:
   # stream drops.
   rapid_increase_max_pct_streamed_only: true
 
-  rapid_increase_lookback_minutes: 3 # Rolling window, in minutes, that the % gain above is measured over.
-                                      # Widened from 2min: the free IEX feed lags wall-clock by ~2-3min, and the
-                                      # lookback cutoff is computed against wall-clock time, so a window shorter
-                                      # than the feed delay could never accumulate 2 in-window samples (see the
-                                      # wall-clock-cutoff fix in run_entry_window in main.py).
+  rapid_increase_lookback_minutes: 2 # Rolling window, in minutes, that the % gain above is measured over.
+                                      # 3 -> 2 on 2026-10-07, explicit user request/held Tier 1 experiment
+                                      # (CLAUDE.md: never change two at once, one variable held for a week).
+                                      # Originally widened 2 -> 3 because the free IEX feed lags wall-clock by
+                                      # ~2-3min, and the lookback cutoff is computed against wall-clock time, so
+                                      # a window shorter than the feed delay could never accumulate 2 in-window
+                                      # samples (see the wall-clock-cutoff fix in run_entry_window in main.py).
+                                      # That constraint is why this was NOT touched the first time it came up
+                                      # this session - reverted back to 2 only once the user confirmed the
+                                      # account is now on the PAID sip feed, which trading.websocket_feed already
+                                      # reflects (see AlpacaBroker.feed, made configurable the same day - two
+                                      # REST calls were still hardcoded to the free iex feed regardless of this
+                                      # setting until then). sip does not carry IEX's lag, so the original
+                                      # constraint should no longer apply - "should", not "confirmed live yet".
+                                      # PENDING_WORK.md has the explicit watch-for list.
 
   # --- RSI pre-filter ---
   # Computed once per candidate at symbol-selection time (market open); would

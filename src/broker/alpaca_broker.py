@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 class AlpacaBroker:
-    def __init__(self, api_key=None, api_secret=None, paper=True):
+    def __init__(self, api_key=None, api_secret=None, paper=True, feed="iex"):
         self.api_key = api_key or os.getenv("APCA_API_KEY_ID")
         self.api_secret = api_secret or os.getenv("APCA_API_SECRET_KEY")
 
@@ -26,6 +26,25 @@ class AlpacaBroker:
             raise ValueError("APCA_API_KEY_ID and APCA_API_SECRET_KEY must be set")
 
         self.paper = paper
+
+        # Reuses trading.websocket_feed (the SAME account-level subscription
+        # decides what both the socket and REST are entitled to - it was
+        # never really a websocket-specific setting). Found 2026-10-07: both
+        # REST calls below (get_historical_bars, get_latest_quote) were
+        # hardcoded to DataFeed.IEX regardless of this, so upgrading the
+        # account's data subscription to SIP (as the user has now done) only
+        # benefited the ~92% of reads served by the stream - the REST
+        # fallback path (stream drop, a symbol not subscribed, or anything
+        # that routes through get_historical_bars for history) stayed on the
+        # free, ~2-3min-delayed IEX feed no matter what the account paid
+        # for. Same resolve-with-safe-fallback shape as
+        # PriceStream._resolve_feed in src/data/stream.py.
+        try:
+            self.feed = DataFeed(feed)
+        except ValueError:
+            valid = ", ".join(f.value for f in DataFeed)
+            logger.error(f"Unknown data feed '{feed}' (valid: {valid}) - falling back to iex")
+            self.feed = DataFeed.IEX
 
         self.trading_client = TradingClient(
             api_key=self.api_key,
@@ -244,7 +263,7 @@ class AlpacaBroker:
                 start=start,
                 end=end,
                 timeframe=tf_map.get(timeframe, TimeFrame.Day),
-                feed=DataFeed.IEX
+                feed=self.feed
             )
 
             bars = self.data_client.get_stock_bars(request)
@@ -282,7 +301,7 @@ class AlpacaBroker:
             from alpaca.data.requests import StockLatestQuoteRequest
 
             q = self.data_client.get_stock_latest_quote(
-                StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=DataFeed.IEX)
+                StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=self.feed)
             )
             quote = q.get(symbol) if isinstance(q, dict) else q
             bid, ask = float(quote.bid_price), float(quote.ask_price)

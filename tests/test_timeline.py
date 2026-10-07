@@ -330,13 +330,22 @@ if prev.returncode == 0:
         # (max_entry_attempts_per_symbol_per_day isn't one of `same`
         # either), so nothing else here needs updating for it.
         "max_entry_attempts_per_symbol_per_day": 4,
+        # 3 -> 2 on 2026-10-07, explicit user request/held Tier 1 experiment.
+        # Originally widened 2 -> 3 because the free IEX feed lags wall-clock
+        # by ~2-3min and a window shorter than that could never accumulate 2
+        # in-window samples - see config.yaml's comment on this key. Reverted
+        # only after the user confirmed the account is now on the paid sip
+        # feed (trading.websocket_feed), which doesn't carry that lag -
+        # AlpacaBroker.feed made configurable the same day so the REST
+        # fallback path actually uses it too, not just the websocket stream.
+        "rapid_increase_lookback_minutes": 2,
     }
     for k, want in changed.items():
         check(f"{k} deliberately changed to {want}", t.get(k) == want,
               (old.get(k), t.get(k)))
 
     same = ["entry_window_start", "rapid_increase_pct",
-            "rapid_increase_max_pct", "rapid_increase_lookback_minutes",
+            "rapid_increase_max_pct",
             "max_concurrent_positions",
             "final_exit_loss_pct", "trailing_stop_pct",
             "breakeven_tiers", "use_resistance_exit",

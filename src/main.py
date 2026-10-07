@@ -5407,7 +5407,13 @@ def main():
         logger.info("Config loaded")
 
         # Initialize broker
-        broker = AlpacaBroker(paper=config["broker"]["paper_trading"])
+        # feed reuses trading.websocket_feed - see AlpacaBroker.__init__'s own
+        # comment: the account-level data subscription (free IEX vs paid SIP)
+        # governs REST reads the same as it governs the socket, so the REST
+        # fallback path shouldn't silently stay on IEX after the account is
+        # upgraded just because this wasn't threaded through before.
+        broker = AlpacaBroker(paper=config["broker"]["paper_trading"],
+                              feed=config["trading"].get("websocket_feed", "iex"))
         account = broker.get_account()
         logger.info(f"Connected to broker. Cash: ${account.cash}")
 
