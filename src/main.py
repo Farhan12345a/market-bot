@@ -3335,6 +3335,20 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
     # how many extended-hours entries actually happened, the number the user
     # asked to keep watching after the 2026-09-29 rate-cap/ranking changes.
     extended_entries_today = 0
+    # OPENING-MINUTES CONCENTRATION THROTTLE (trading.opening_minutes_throttle,
+    # added 2026-10-07, explicit user request). burst_throttle (above, via
+    # burst_max/index) caps each INDIVIDUAL poll's simultaneous signals, but
+    # does nothing across CONSECUTIVE polls - 2026-10-06 had 5 separate
+    # "BURST DETECTED" events in the first ~45 seconds of the session (each
+    # correctly capped to 3 at half size on its own), and the entries from
+    # all 5 still stacked up to 18 same-minute, same-mechanism entries, 15 of
+    # them at baseline RVOL. This is a SEPARATE, session-relative window - not
+    # a repeating bucket like extended_hourly_state - so it is set once here
+    # and never reset for the rest of the day. Deliberately does NOT refund a
+    # phantom/cancelled entry the way extended_hourly_state does (see its own
+    # comment) - a conservative slot spent on a fill that did not happen is a
+    # minor, deliberately-accepted imprecision, not a safety issue.
+    opening_window_state = {"count": 0, "cap_logged": False}
     # A colored 9:30-16:00 strip for the email report (email_notifier's
     # _regime_timeline_html), added 2026-09-29 on explicit user request - one
     # row per CONFIRMED regime transition (not one per poll; see the write
@@ -4632,8 +4646,26 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         _ext_cap = (config["trading"].get("extended_hours_experiment") or {}).get(
                             "max_entries_per_hour")
 
+                    _omt = config["trading"].get("opening_minutes_throttle") or {}
+                    _in_opening_window = (
+                        _omt.get("enabled")
+                        and (now - entry_start).total_seconds() <= _omt.get("window_minutes", 2) * 60
+                    )
+
                     if max_daily_entries and entries_triggered >= max_daily_entries:
                         skip_reason = "max_daily_entries"
+                    elif (_in_opening_window
+                          and opening_window_state["count"] >= _omt.get("max_entries", 6)):
+                        skip_reason = "opening_minutes_cap"
+                        if not opening_window_state["cap_logged"]:
+                            logger.info(
+                                f"Reached the opening-minutes cap "
+                                f"({opening_window_state['count']}/{_omt.get('max_entries', 6)} "
+                                f"within {_omt.get('window_minutes', 2)} min of "
+                                f"{entry_start:%H:%M} ET) - no new entries until it lapses; "
+                                f"exits continue as normal"
+                            )
+                            opening_window_state["cap_logged"] = True
                     elif _ext_cap and extended_hourly_state["count"] >= _ext_cap:
                         skip_reason = "extended_hourly_cap"
                         if not extended_hourly_state["cap_logged"]:
@@ -4672,6 +4704,8 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                             if entry_window_label == "extended":
                                 extended_hourly_state["count"] += 1
                                 extended_entries_today += 1
+                            if _in_opening_window:
+                                opening_window_state["count"] += 1
                             had_any_trades = True
                         else:
                             skip_reason = "rejected_by_pre_entry_checks"
@@ -4734,8 +4768,26 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     _ext_cap = (config["trading"].get("extended_hours_experiment") or {}).get(
                         "max_entries_per_hour")
 
+                _omt = config["trading"].get("opening_minutes_throttle") or {}
+                _in_opening_window = (
+                    _omt.get("enabled")
+                    and (now - entry_start).total_seconds() <= _omt.get("window_minutes", 2) * 60
+                )
+
                 if max_daily_entries and entries_triggered >= max_daily_entries:
                     skip_reason = "max_daily_entries"
+                elif (_in_opening_window
+                      and opening_window_state["count"] >= _omt.get("max_entries", 6)):
+                    skip_reason = "opening_minutes_cap"
+                    if not opening_window_state["cap_logged"]:
+                        logger.info(
+                            f"Reached the opening-minutes cap "
+                            f"({opening_window_state['count']}/{_omt.get('max_entries', 6)} "
+                            f"within {_omt.get('window_minutes', 2)} min of "
+                            f"{entry_start:%H:%M} ET) - no new entries until it lapses; "
+                            f"exits continue as normal"
+                        )
+                        opening_window_state["cap_logged"] = True
                 elif _ext_cap and extended_hourly_state["count"] >= _ext_cap:
                     skip_reason = "extended_hourly_cap"
                     if not extended_hourly_state["cap_logged"]:
@@ -4775,6 +4827,8 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                         if entry_window_label == "extended":
                             extended_hourly_state["count"] += 1
                             extended_entries_today += 1
+                        if _in_opening_window:
+                            opening_window_state["count"] += 1
                         had_any_trades = True
                         pending_pullbacks.pop(symbol, None)
                     else:

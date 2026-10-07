@@ -1820,6 +1820,22 @@ trading:
   burst_max_entries: 3        # take at most this many of them
   burst_size_multiplier: 0.5  # and size each at this fraction of normal
 
+  # OPENING-MINUTES CONCENTRATION THROTTLE (added 2026-10-07, explicit user
+  # request). burst_width_threshold/burst_max_entries above cap each
+  # INDIVIDUAL poll's simultaneous signals, but nothing capped the total
+  # across CONSECUTIVE polls - 2026-10-06 had 5 separate burst events in the
+  # first ~45 seconds (each correctly throttled to 3 at half size on its
+  # own), and the entries from all 5 still stacked up to 18 same-minute
+  # entries, 15 of them at baseline RVOL (no real volume behind the move).
+  # This caps the TOTAL taken within window_minutes of entry_window_start,
+  # regardless of how many separate bursts contributed to it. See
+  # run_trading_day's opening_window_state for the mechanism - a one-time
+  # session-relative window, not a repeating bucket.
+  opening_minutes_throttle:
+    enabled: true
+    window_minutes: 2
+    max_entries: 6
+
   # --- Take profit (EXPERIMENTAL - added 2026-08-20 for the 08-21 session) ---
   # Sell take_profit_fraction of the position once it is up take_profit_pct.
   # Fires at most once per position; the remainder keeps running under the
