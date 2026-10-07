@@ -1058,6 +1058,20 @@ trading:
   # winners vs losers - that analysis still doesn't exist either direction.
   max_entry_attempts_per_symbol_per_day: 4
 
+  # THE 2-STRIKE RULE (added 2026-10-07, explicit user request). Separate
+  # from the attempt cap above, which is a flat ceiling regardless of
+  # outcome - this responds to EVIDENCE a symbol isn't cooperating today.
+  # Traced from 2026-10-06: MXL bought 3 times (short, long, short again)
+  # as it chopped between ~107.50 and ~109.30 all morning, losing all 3
+  # (-$106.64); CDNA bought 4 times, lost all 4 (-$101.11); MDB bought 4
+  # times, lost 3 of 4. A 2nd loss on the same symbol same day is treated
+  # as good evidence the stock is just chopping, not trending - stop buying
+  # it rather than wait for the attempt cap to run out doing the same thing
+  # a 3rd or 4th time. Counts FULLY-CLOSED positions only (not individual
+  # partial-exit legs), cumulative not consecutive - a win in between does
+  # not reset it. See Executor._count_losing_entry for the exact mechanism.
+  max_losses_per_symbol_per_day: 2
+
   # How far a name may already have travelled from the OPEN and still be
   # bought by the normal window. Distinct from rapid_increase_max_pct, which
   # measures the 3-MINUTE delta - the two came apart badly on 2026-09-02:

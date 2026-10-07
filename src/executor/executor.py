@@ -256,6 +256,8 @@ class Executor:
         self._order_times = deque(maxlen=2000)
         self._entry_attempts = {}
         self._entry_attempts_day = None
+        self._losing_entries = {}
+        self._losing_entries_day = None
 
     def refresh_account_snapshot(self):
         """
@@ -518,6 +520,36 @@ class Executor:
     def _note_position_closed(self, symbol, closed_at_loss):
         """Record when a position fully closed, to enforce the re-entry cooldown."""
         self._last_close_at[symbol] = (time.monotonic(), closed_at_loss)
+        if closed_at_loss:
+            self._count_losing_entry(symbol)
+
+    def _count_losing_entry(self, symbol):
+        """
+        Tally FULLY-CLOSED positions per symbol per day that lost money - the
+        "2-strike rule" (trading.max_losses_per_symbol_per_day), explicit
+        user request 2026-10-07 after MXL/CDNA/MDB/P each got bought 3-4
+        times the same session as they chopped in a tight range, losing on
+        nearly every re-entry (MXL: -$106.64 across 3 straight losses).
+        max_entry_attempts_per_symbol_per_day caps how many times a symbol
+        can be bought at all; this caps it on EVIDENCE the symbol is not
+        cooperating today specifically, which can bind well before the
+        attempt cap does - a symbol can hit 2 losses on attempt 2 of a
+        possible 4. Same lazy day-rollover pattern as _count_entry_attempt.
+        Cumulative, not consecutive - a win in between does not reset it,
+        since the question is "has this symbol cost us twice today", not
+        "is it on a streak".
+        """
+        today = datetime.now().date()
+        if self._losing_entries_day != today:
+            self._losing_entries_day = today
+            self._losing_entries = {}
+        self._losing_entries[symbol] = self._losing_entries.get(symbol, 0) + 1
+
+    def losing_entries_today(self, symbol):
+        """How many of `symbol`'s fully-closed positions today lost money."""
+        if self._losing_entries_day != datetime.now().date():
+            return 0
+        return self._losing_entries.get(symbol, 0)
 
     def phantom_cooldown_remaining(self, symbol):
         """
@@ -1663,6 +1695,22 @@ class Executor:
                 return False, (
                     f"at max_entry_attempts_per_symbol_per_day "
                     f"({attempts}/{max_attempts}) - not buying {symbol} again today"
+                )
+
+        # THE 2-STRIKE RULE (trading.max_losses_per_symbol_per_day) - see
+        # _count_losing_entry's docstring. Checked separately from, and
+        # typically BEFORE, the attempt cap above - a symbol can earn this
+        # refusal on attempt 2 of a possible 4, which is the whole point:
+        # the attempt cap is a flat ceiling regardless of outcome, this one
+        # responds to evidence the symbol isn't cooperating today.
+        max_losses = self.config["trading"].get("max_losses_per_symbol_per_day")
+        if max_losses and symbol:
+            losses = self.losing_entries_today(symbol)
+            if losses >= max_losses:
+                return False, (
+                    f"at max_losses_per_symbol_per_day "
+                    f"({losses}/{max_losses}) - {symbol} has already lost "
+                    f"money {losses} time(s) today, not buying it again"
                 )
 
         max_per_sector = self.config["trading"].get("max_positions_per_sector")

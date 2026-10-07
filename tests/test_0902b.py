@@ -247,6 +247,51 @@ check("a different symbol is unaffected", ok2 is True)
 check("attempts counted per DAY", ex2.entry_attempts_today("WDAY") == cap)
 check("8 WDAY submissions could not happen under this cap", cap < 8)
 
+print("\n--- the 2-strike rule (2026-10-07) ---")
+ex2b = Executor(B({}), copy.deepcopy(CFG))
+ex2b._equity = 100000.0; ex2b._buying_power = 100000.0
+max_losses = CFG["trading"]["max_losses_per_symbol_per_day"]
+check("shipped at 2", max_losses == 2)
+ok3, _ = ex2b.pre_entry_check(10, 100.0, symbol="MXL")
+check("no losses yet -> allowed", ok3 is True)
+ex2b._note_position_closed("MXL", closed_at_loss=True)
+check("one loss so far", ex2b.losing_entries_today("MXL") == 1)
+ok4, _ = ex2b.pre_entry_check(10, 100.0, symbol="MXL")
+check("still allowed after 1 loss (cap is 2)", ok4 is True)
+ex2b._note_position_closed("MXL", closed_at_loss=True)
+ok5, why5 = ex2b.pre_entry_check(10, 100.0, symbol="MXL")
+check(f"refused after {max_losses} losing closes", ok5 is False, why5)
+check("...naming the rule", "max_losses_per_symbol_per_day" in (why5 or ""), why5)
+ok6, _ = ex2b.pre_entry_check(10, 100.0, symbol="RBLX")
+check("a different symbol is unaffected", ok6 is True)
+check("a WINNING close does not count toward it",
+      ex2b.losing_entries_today("RBLX") == 0)
+ex2b._note_position_closed("RBLX", closed_at_loss=False)
+check("...confirmed: still 0 after a win", ex2b.losing_entries_today("RBLX") == 0)
+ok7, _ = ex2b.pre_entry_check(10, 100.0, symbol="RBLX")
+check("...so RBLX is still buyable after one win", ok7 is True)
+check("cumulative, not reset by a win in between: a symbol with a win "
+      "sandwiched between two losses still trips at 2 losses",
+      True)  # exercised directly below
+ex2c = Executor(B({}), copy.deepcopy(CFG))
+ex2c._equity = 100000.0; ex2c._buying_power = 100000.0
+ex2c._note_position_closed("CDNA", closed_at_loss=True)   # loss 1
+ex2c._note_position_closed("CDNA", closed_at_loss=False)  # a win - does not reset
+ex2c._note_position_closed("CDNA", closed_at_loss=True)   # loss 2
+ok8, why8 = ex2c.pre_entry_check(10, 100.0, symbol="CDNA")
+check("a win sandwiched between two losses does not save the symbol - "
+      "this counts LOSSES today, not a streak",
+      ok8 is False, why8)
+off_cfg2 = copy.deepcopy(CFG)
+off_cfg2["trading"]["max_losses_per_symbol_per_day"] = 0
+ex2d = Executor(B({}), off_cfg2)
+ex2d._equity = 100000.0; ex2d._buying_power = 100000.0
+ex2d._note_position_closed("MXL", closed_at_loss=True)
+ex2d._note_position_closed("MXL", closed_at_loss=True)
+ex2d._note_position_closed("MXL", closed_at_loss=True)
+ok9, _ = ex2d.pre_entry_check(10, 100.0, symbol="MXL")
+check("0/falsy -> the rule is off, unlimited losses allowed", ok9 is True)
+
 # ===================================================================
 print("\n=== 5. DYNAMIC STOPS: ATR, capped so it can only tighten ===")
 eng = DynamicStops(CFG, history={}, atr_by_symbol={"Q": 0.4, "N": 0.9, "W": 3.0})
