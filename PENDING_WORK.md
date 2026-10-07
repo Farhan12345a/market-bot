@@ -2145,3 +2145,61 @@ change**, since the user asked for it directly:
 
 Full suite: 2968 pass, 0 fail (tests/test_0902b.py's 2-strike section,
 tests/test_opening_minutes_throttle.py, tests/test_data_feed.py all new).
+
+## 23. 2026-10-07 — first live day for all 4 new mechanisms (item 22); the whipsaw cluster recurred
+
+Net P&L -$200.41, 72 positions/95 tranches, 27 wins/45 losses (37.5% WR),
+payoff ratio 1.20 - smaller loss than 10-06 and a healthier payoff ratio,
+but the same underlying shape repeated.
+
+**The 28-never-green pattern from item 22 showed up again, smaller but
+same signature**: 15 symbols (AXTI, CEG, ENPH, KLAC, MRVL, MTSI, MTZ, MXL,
+NBIS, NTAP, RBLX, TENB, TSEM, TTMI, U) lost -$530.16 across 35 entries -
+more than the entire day's loss - while the other 37 entries made
++$329.75. Every one of the 35 was RAPID_INCREASE_IMMEDIATE or
+RAPID_DECREASE_CANDIDATE (11 long, 24 short), the same fastest-chase
+general-screener types as 10-06. **MXL lost money both days**
+(10-06: 3 entries/-$106.64, 10-07: 2 entries/-$32.74) - second
+confirmation of the 12-day pull flagging it a persistent loser.
+
+**The 2-strike rule fired correctly on all 15** but only blocked a 3rd/4th
+entry for 4 of them (AXTI, MRVL, TENB, TSEM) - the rest had exactly 2
+entries, so the cap triggered right as they closed their 2nd loss and had
+no further entries to block. This is the rule working exactly as designed
+(it requires 2 losses before it can act), but it confirms the rule alone
+cannot be the fix for this pattern - most of the damage is in each
+symbol's first two entries, which happen before the rule can see anything.
+The opening-minutes throttle also fired once (6/6 within 2min of 09:33 ET).
+
+**Signal ceiling was notably bad on the long/general-screener side**: of
+3,823 signals, the 26 taken returned mean -1.084% / 19.2% hit rate at 15
+min, vs the 3,712 skipped at -0.250% / 41.0% - selection picked the worse
+half by a wide margin (n=26 is small, but this is a bigger gap than any
+prior day's check). Short side was close to neutral (taken -0.061%/44.9%
+vs skipped -0.075%/49.0%), not a concern.
+
+**Lookback-minutes experiment (item 22) clean so far**: 0 of 3,823 signals
+had null/missing signal_pct - no sign of the old IEX-lag failure mode.
+Raw signal count (3,824) was below the last 4 sessions (7358/5059/4308/
+4877) but with a clean null rate this reads as ordinary variation, not
+evidence the window is starving for samples. Keep watching per item 22's
+list before concluding either way.
+
+**No ORPHAN_RECONCILE events, no stuck/phantom positions, no negative-qty
+issues** - short-exit fix and data-feed fix both held clean under a full
+real-load day. One transient order-rejection on AXTI's forced exit
+("insufficient qty available", existing retry-on-failure path) resolved
+itself on retry with no stuck position.
+
+Chart artifact updated with today's narrative and all 4 active experiment
+banners (neutral_multiplier day 2/7; 2-strike rule, opening-minutes
+throttle, and lookback-minutes all day 1 of their own watch periods).
+
+No code changes this pass - pure data review. Next step per item 22's
+watch list: compare this cluster's symbols against 10-06's and the 12-day
+historical pull again after a few more days - if the same handful of
+tickers keeps reappearing as repeat losers independent of which specific
+new guardrail is live, that's the stronger argument for addressing
+`stock_universe`/selection directly (item from the historical-winners
+discussion, still not actioned - user has not yet picked specific symbols
+to exclude/prefer).
