@@ -2203,3 +2203,47 @@ new guardrail is live, that's the stronger argument for addressing
 `stock_universe`/selection directly (item from the historical-winners
 discussion, still not actioned - user has not yet picked specific symbols
 to exclude/prefer).
+
+## 24. 2026-10-08 — RVOL confirmation idea walked back; repeat-loser watch built in shadow mode; no new LIVE change this week
+
+**Checked the RVOL-floor idea from item 23 against the FULL pool before
+building it** (the same discipline that caught the cf_efficiency overclaim
+in item 22). Pooled across all 13 days in logs/daily/: RVOL's rho against
+15-min forward return is +0.005 (long) and +0.024 (short) - both
+statistically zero. Narrowed to just the first 5 minutes of the session
+(where the 10-06 finding came from), rho is actually **-0.123 (p<0.0001)**
+- the opposite sign from what a "low RVOL = fake move" story would predict.
+The one-day finding that motivated the idea does not generalize. **Not
+building the RVOL confirmation gate** - no factor checked so far
+(cf_efficiency, cf_score, RVOL) survives a full pooled read, so there is
+currently no evidenced way to add "more confirmation" to
+RAPID_INCREASE/RAPID_DECREASE that isn't just guessing.
+
+**Built `trading.repeat_loser_watch` instead** - the self-updating version
+of the manual exclude_symbols patch from item 23 (MXL/TWST/TXG/PBF).
+`_compute_repeat_loser_watch` in src/main.py scans the trailing
+`lookback_days` (10) of trade_history.csv every pre-market, collapses
+tranche rows to one P&L per (symbol, entry_time) position, and flags any
+symbol with `min_losing_entries` (3) losing positions AND a net negative
+P&L over the window. Wired into both `select_symbols` call sites: each
+morning, `exclude_symbols` is reset to (the user's static base) | (today's
+flagged set) - never appended to, so a flagged symbol ages back out on its
+own once its bad days fall outside the trailing window, with no hand-edit
+needed. **Shipped in shadow mode** (logs "REPEAT LOSER WATCH: ..." every
+morning, flags nothing for real) - same discipline as conviction_gate.
+Watch the shadow log for a week: does it independently rediscover
+MXL/TWST/TXG/PBF, does it flag anything NEW that then keeps losing, before
+ever setting shadow_mode: false.
+
+**No new LIVE entry change shipped this week, on purpose.** Already
+running concurrently: neutral_multiplier (since 10-06), the 2-strike rule,
+opening_minutes_throttle, and rapid_increase_lookback_minutes (all since
+10-07), plus the manual exclude_symbols patch (10-08, still in its own
+one-week window). Stacking a 6th live change (the repeat-loser watch, had
+it shipped live) on top of an already-crowded batch would make this
+week's read unattributable to any one of them. Recommended holding here
+through the rest of this week before adding or flipping anything else
+live - this is a "let it run" week, not a "ship more" week.
+
+Full suite: 2987 pass, 0 fail (tests/test_repeat_loser_watch.py new, 17
+checks).
