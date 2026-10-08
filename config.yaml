@@ -2923,8 +2923,49 @@ trading:
   exclude_leveraged_etfs: true
   exclude_basket_etfs: true
   # Extra names beyond the two lists above. Symbols here are always refused.
-  exclude_symbols: []
+  #
+  # Added 2026-10-08, at the user's direction, as a Tier 2 entry change held
+  # for its own one-week window per CLAUDE.md. These four are repeat losers
+  # across the 12-day pooled pull, confirmed not a one-off: MXL lost money
+  # on BOTH 2026-10-06 (3 entries, -$106.64) and 2026-10-07 (2 entries,
+  # -$32.74), the only symbol to repeat as a loser across those two days.
+  # Pooled 12-day figures: MXL -$176 (19 trades, persistent), TWST -$210
+  # (10 trades), TXG -$194 (9 trades), PBF -$176 (0% win rate).
+  #
+  # This is a static, manually-curated list - it does not update itself.
+  # The screener re-ranks ~1000 liquid names daily on volatility/volume and
+  # has no memory of which specific names have burned THIS bot's specific
+  # RAPID_INCREASE/RAPID_DECREASE entries before; a name being volatile and
+  # a name being a good fit for this strategy are not the same thing. See
+  # repeat_loser_watch below for the self-updating version of this idea.
+  exclude_symbols: ["MXL", "TWST", "TXG", "PBF"]
   min_avg_volume: 1000000  # Minimum average daily volume
+
+  # ---------------------------------------------------------------------
+  # Repeat-loser watch (added 2026-10-08) - see _compute_repeat_loser_watch
+  # in src/main.py for the full reasoning.
+  # ---------------------------------------------------------------------
+  # The self-updating version of the exclude_symbols patch above: scans the
+  # trailing lookback_days of trade_history.csv every morning and flags any
+  # symbol with min_losing_entries+ losing POSITIONS (tranches collapsed)
+  # and a net negative P&L over that window. A flagged symbol ages back out
+  # on its own once its bad days fall outside the window - no hand-editing
+  # exclude_symbols needed.
+  #
+  # SHADOW MODE FIRST, same discipline as trading.conviction_gate: enabled
+  # here so it runs and logs "REPEAT LOSER WATCH: ..." every pre-market,
+  # but shadow_mode: true means nothing is actually excluded yet. Watch the
+  # shadow log for a week - does it flag the same names the manual
+  # exclude_symbols patch above already caught (MXL etc.), and does it flag
+  # anything NEW that then goes on to lose money again - before ever
+  # setting shadow_mode: false. This is its own entry-change experiment,
+  # separate from and not to be started live at the same time as the manual
+  # exclude_symbols change above.
+  repeat_loser_watch:
+    enabled: true
+    shadow_mode: true
+    lookback_days: 10
+    min_losing_entries: 3
 
 broker:
   paper_trading: true  # Set to false for live trading

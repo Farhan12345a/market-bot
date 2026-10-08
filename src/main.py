@@ -577,6 +577,122 @@ def _compute_conviction_read(config, repo_root=None):
     return shadow_multiplier, label, pool_return
 
 
+def _compute_repeat_loser_watch(config, repo_root=None):
+    """
+    trading.repeat_loser_watch (OFF by default): flags, and in LIVE mode
+    excludes, symbols that have repeatedly lost money for THIS bot's own
+    entries recently - computed fresh every morning from trailing
+    trade_history.csv, not from any price/volume factor.
+
+    WHY THIS EXISTS. The dynamic universe (use_dynamic_universe) re-screens
+    ~1000 liquid names every morning purely on volatility and volume - it
+    has no memory that a specific name has already burned this bot's own
+    entries several times. 2026-10-06 and 2026-10-07 both lost more money in
+    a cluster of repeat-whipsaw RAPID_INCREASE/RAPID_DECREASE entries than
+    the whole day lost overall (PENDING_WORK.md items 22-23), and MXL
+    specifically lost money on BOTH days - the only symbol to repeat. Being
+    volatile enough to rank well and being a good fit for this bot's
+    entries are not the same claim, and nothing upstream checks the second
+    one. (A static patch for the four worst offenders from the 12-day pool
+    - MXL, TWST, TXG, PBF - already went into exclude_symbols directly on
+    2026-10-08; this is the self-updating version that does not need a
+    human to notice and hand-edit the config each time.)
+
+    WHAT IT READS. Every trade_history.csv under logs/daily/ from the most
+    recent `lookback_days` COMPLETED sessions (today excluded - its own
+    trades are still open or too fresh to judge). Tranche rows are
+    collapsed to one P&L per (symbol, entry_time) position first, the same
+    collapse every other day-level stat in this codebase uses - otherwise a
+    position with several partial exits would be counted as several
+    separate "losses". A symbol is flagged only if it has BOTH at least
+    `min_losing_entries` losing positions AND a net negative P&L over the
+    window - either alone can happen to a perfectly fine symbol on an
+    unlucky week.
+
+    SHADOW MODE (shadow_mode: true, the default whenever enabled: true is
+    set). Computed and logged every morning, but nothing is actually added
+    to exclude_symbols - read the shadow log against what each flagged
+    symbol actually does over the following days before ever setting
+    shadow_mode: false. Same discipline as trading.conviction_gate.
+
+    Returns (shadow_set, live_set): shadow_set is always the full flagged
+    set (for the log/record); live_set is identical to it when
+    shadow_mode is explicitly false, and empty otherwise. The caller
+    merges ONLY live_set into exclude_symbols.
+    """
+    import glob as _glob
+    rlw = (config.get("trading") or {}).get("repeat_loser_watch") or {}
+    if not rlw.get("enabled"):
+        return set(), set()
+
+    root = repo_root or "."
+    lookback_days = int(rlw.get("lookback_days", 10))
+    min_losing_entries = int(rlw.get("min_losing_entries", 3))
+
+    day_dirs = sorted(
+        d for d in _glob.glob(os.path.join(root, "logs", "daily", "*"))
+        if os.path.basename(d) < datetime.now().strftime("%Y-%m-%d")
+        and os.path.isfile(os.path.join(d, "trade_history.csv"))
+    )[-lookback_days:]
+
+    per_symbol = {}
+    for d in day_dirs:
+        totals = {}
+        try:
+            with open(os.path.join(d, "trade_history.csv"), newline="") as f:
+                for row in csv.DictReader(f):
+                    symbol = row.get("symbol")
+                    if not symbol:
+                        continue
+                    key = (symbol, row.get("entry_time"))
+                    try:
+                        pl = float(row.get("pl") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    totals[key] = totals.get(key, 0.0) + pl
+        except Exception as e:
+            logger.debug(f"repeat_loser_watch: could not read {d} ({e})")
+            continue
+        for (symbol, _entry_time), pl in totals.items():
+            s = per_symbol.setdefault(
+                symbol, {"entries": 0, "losing_entries": 0, "net_pl": 0.0}
+            )
+            s["entries"] += 1
+            s["net_pl"] += pl
+            if pl < 0:
+                s["losing_entries"] += 1
+
+    flagged = {
+        sym: info for sym, info in per_symbol.items()
+        if info["losing_entries"] >= min_losing_entries and info["net_pl"] < 0
+    }
+
+    shadow_mode = rlw.get("shadow_mode", True)
+    if flagged:
+        detail = ", ".join(
+            f"{sym} ({info['losing_entries']}/{info['entries']} losses, "
+            f"${info['net_pl']:.2f} net)"
+            for sym, info in sorted(flagged.items(), key=lambda kv: kv[1]["net_pl"])
+        )
+        logger.info(
+            f"REPEAT LOSER WATCH: trailing {len(day_dirs)}-day scan flags "
+            f"{len(flagged)} symbol(s) - {detail}"
+            + (" (SHADOW MODE - observation only, nothing excluded)"
+               if shadow_mode else " (LIVE - added to exclude_symbols today)")
+        )
+    else:
+        logger.info(
+            f"REPEAT LOSER WATCH: trailing {len(day_dirs)}-day scan - no "
+            f"symbol met the {min_losing_entries}+ losing entries / "
+            f"net-negative threshold"
+        )
+
+    flagged_symbols = set(flagged)
+    if shadow_mode:
+        return flagged_symbols, set()
+    return flagged_symbols, flagged_symbols
+
+
 def _fetch_catalyst_counts(config, executor, symbols, et):
     """
     trading.catalyst_watch (ON by default, OBSERVATION ONLY - see below):
@@ -5406,6 +5522,14 @@ def main():
         config = load_config()
         logger.info("Config loaded")
 
+        # The user's own hand-curated excludes, captured ONCE before
+        # repeat_loser_watch ever runs. Every day, exclude_symbols is reset
+        # to this base plus whatever that day's scan flags (live_set) - never
+        # appended to, so a symbol a scan once flagged can age back out once
+        # it's no longer in the trailing window, instead of staying excluded
+        # forever by accident.
+        _static_exclude_symbols = list(config["trading"].get("exclude_symbols") or [])
+
         # Initialize broker
         # feed reuses trading.websocket_feed - see AlpacaBroker.__init__'s own
         # comment: the account-level data subscription (free IEX vs paid SIP)
@@ -5566,6 +5690,10 @@ def main():
                         "(late start or mid-session restart) - screening now, "
                         "which eats into the entry window"
                     )
+                    _, _rlw_live = _compute_repeat_loser_watch(config)
+                    config["trading"]["exclude_symbols"] = sorted(
+                        set(_static_exclude_symbols) | _rlw_live
+                    )
                     pending_selection = select_symbols(config, screener, market_data)
                     pending_augmented = False
 
@@ -5664,6 +5792,10 @@ def main():
                 logger.info(
                     f"===== PRE-MARKET: screening at {now:%H:%M:%S} ET, "
                     f"{(market_open_today - now).total_seconds() / 60:.0f} min ahead of the open ====="
+                )
+                _, _rlw_live = _compute_repeat_loser_watch(config)
+                config["trading"]["exclude_symbols"] = sorted(
+                    set(_static_exclude_symbols) | _rlw_live
                 )
                 pending_selection = select_symbols(config, screener, market_data)
                 pending_augmented = False
