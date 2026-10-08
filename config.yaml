@@ -2923,7 +2923,24 @@ trading:
   exclude_leveraged_etfs: true
   exclude_basket_etfs: true
   # Extra names beyond the two lists above. Symbols here are always refused.
-  exclude_symbols: []
+  #
+  # Added 2026-10-08, at the user's direction, as a Tier 2 entry change held
+  # for its own one-week window per CLAUDE.md. These four are repeat losers
+  # across the 12-day pooled pull, confirmed not a one-off: MXL lost money
+  # on BOTH 2026-10-06 (3 entries, -$106.64) and 2026-10-07 (2 entries,
+  # -$32.74), the only symbol to repeat as a loser across those two days.
+  # Pooled 12-day figures: MXL -$176 (19 trades, persistent), TWST -$210
+  # (10 trades), TXG -$194 (9 trades), PBF -$176 (0% win rate).
+  #
+  # This is a static, manually-curated list - it does not update itself.
+  # The screener re-ranks ~1000 liquid names daily on volatility/volume and
+  # has no memory of which specific names have burned THIS bot's specific
+  # RAPID_INCREASE/RAPID_DECREASE entries before; a name being volatile and
+  # a name being a good fit for this strategy are not the same thing. A
+  # self-updating version of this list (built from trailing per-symbol
+  # performance in trade_history.csv, refreshed each morning) is proposed
+  # but not yet built - see PENDING_WORK.md.
+  exclude_symbols: ["MXL", "TWST", "TXG", "PBF"]
   min_avg_volume: 1000000  # Minimum average daily volume
 
 broker:
