@@ -2247,3 +2247,44 @@ live - this is a "let it run" week, not a "ship more" week.
 
 Full suite: 2987 pass, 0 fail (tests/test_repeat_loser_watch.py new, 17
 checks).
+
+## 25. 2026-10-08 (trading day) — worst win rate of the week, driven by shorts; yesterday's config still not deployed
+
+Net P&L -$496.63, 59 positions/71 tranches, 22% win rate (payoff ratio
+1.37 kept the dollar loss from being as bad as the win rate implies).
+**Shorts did almost all the damage**: -$385.85 across 53 positions (23%
+WR) vs longs -$110.77. Session ran heavily bearish-regime (75 of 84
+trade_context rows bearish, 9 bullish) - QQQ wasn't trending up pre-market
+so qqq_list added zero symbols today, expected behavior.
+
+**A genuine puzzle, worth a closer look later**: the short-side SIGNAL
+evidence looked fine today - the 53 taken signals averaged +0.010% at
+15min / 54.7% hit rate, beating the 6,201 skipped signals (-0.158%/47.3%).
+But only 23% of the actual positions taken were winners. Good
+entry-point evidence, bad realized outcome - points at what happens AFTER
+entry (trailing stops, early exits) on a choppy bearish day rather than at
+selection; 15 of 64 short exits were tagged "ran further" after the fact.
+Not actioned - flagging as a candidate topic for a future short-side exit
+conversation, separate from anything already in motion.
+
+**Signal ceiling inert again** (0 long signals over 1.25%, peak 1.246%) -
+nothing to evaluate. **Opening burst remains disabled** per the user's
+2026-10-01 decision - nothing to report. **No crashes, no
+ORPHAN_RECONCILE, no negative-qty positions.**
+
+**Confirms the case for deploying item 24's changes**: exclude_symbols
+(MXL/TWST/TXG/PBF) and repeat_loser_watch were pushed 2026-10-08 but the
+user had not yet run `git pull && ./ops/deploy.sh` on the VPS as of this
+trading day - confirmed via service-log.txt (no "REPEAT LOSER WATCH" log
+lines) and trade_history.csv (MXL, TWST, TXG all traded again today,
+losing a combined -$120.68 - their 5th/6th consecutive losing day). User
+was advised NOT to deploy at 09:23 ET this morning specifically because
+deploying that close to the open risks eating into the entry window
+(restarts the service, forces a late re-screen) - advised to deploy after
+today's close instead, which is still pending as of this entry.
+
+Chart artifact updated with today's narrative; both not-yet-live
+experiments carry an explicit "NOT YET LIVE - pending deploy" note in the
+banner rather than being listed as already running.
+
+No code changes this pass - pure data review.
