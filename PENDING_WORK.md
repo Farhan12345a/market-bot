@@ -2288,3 +2288,59 @@ experiments carry an explicit "NOT YET LIVE - pending deploy" note in the
 banner rather than being listed as already running.
 
 No code changes this pass - pure data review.
+
+## 26. 2026-10-09 (trading day) — deploy confirmed live; repeat_loser_watch's thresholds are too loose; the week's real pattern is bigger than any symbol list
+
+Net P&L -$332.26, 57 positions/63 tranches, win rate still sliding (38% on
+10-07 -> 22% on 10-08 -> ~18%/12% on 10-09 depending on which tool's
+breakeven cutoff is used - ANALYSIS_LOG.md's session-metrics says 10/57,
+build_data.py's own classification says 7/57; not reconciled, both agree
+the day was a weak-win-rate one either way).
+
+**Deploy confirmed live**: "REPEAT LOSER WATCH" logged for the first time
+at 09:05 ET, and MXL/TWST/TXG/PBF did not trade at all today - item 23's
+exclusion is working as intended.
+
+**But the shadow-mode scan's first real run exposed a design problem**:
+with the shipped thresholds (10-day lookback, 3+ losing entries), it
+flagged **42 symbols** - AAON, AXTI, CDNA, CIEN, CRL, CRWD, GME, GRAL,
+HPE, HUBS, INTC, KLAC, LQDA, LRCX, MDB, MKC, MRNA, MRVL, MSTR, NBIS, NTAP,
+NXT, P, PRAX, RBLX, RCL, SPCX, TEM, TTAN, TTMI, VIAV, WING, ZETA, BE,
+BKNG, BRKR, CCL, APLD plus the 4 already manually excluded. At this bot's
+typical win rate, almost any symbol traded more than a handful of times
+over 10 days racks up 3 losses - the threshold as shipped would exclude
+most of the active universe if ever flipped live, not just genuine repeat
+offenders. **Needs tightening before shadow_mode ever comes off** - likely
+either raising min_losing_entries, requiring a worse LOSS RATE rather than
+a raw count (e.g. losing_entries/entries >= some fraction), or both.
+Flagging this now from the first shadow run rather than waiting out a full
+week on a setting that was already going to fail validation.
+
+**The bigger, now 5-day-confirmed pattern**: positions whose price never
+once traded above entry lost -$277 today (25 positions, zero winners) -
+and this exact MFE bucket has now exceeded the ENTIRE day's net loss on
+ALL FIVE trading days this week: 10-05 -$254, 10-06 -$588, 10-07 -$454,
+10-08 -$460, 10-09 -$277 (sum -$2,033 against a 5-day net of -$1,683).
+Every position that moves favorably even briefly nets positive for the
+week, pooled; everything that never does accounts for the entire loss,
+several times over. This is a cleaner, more consistently damning signal
+than any single-symbol list - it says the core problem is a specific
+TYPE of entry (one where price goes nowhere good from the very first
+tick), not particular tickers. Both exclude_symbols and repeat_loser_watch
+attack this by ticker; neither attacks it by this mechanism directly. A
+natural next question: is there anything observable in the first few
+seconds/ticks after entry that distinguishes "never above entry" from
+every other position, cheaply enough to cut it loose fast instead of
+riding it to a full stop-loss? Not investigated yet - flagging as the
+most promising next research thread.
+
+**The negative-edge streak is now 7 sessions** (10-01 through 10-09,
+worst still 10-07 at -0.828pp) and has NOT improved since neutral_
+multiplier (0.25) started on 10-06 - 3 of its 4 days under test are among
+the worst edge readings of the whole streak. Not a reason to revert yet
+(one week isn't up), but no sign of the hoped-for improvement either.
+
+Signal ceiling inert again (peak 1.246%). No crashes, no ORPHAN_RECONCILE,
+no negative-qty positions. Chart artifact updated.
+
+No code changes this pass - pure data review.
