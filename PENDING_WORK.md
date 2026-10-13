@@ -2344,3 +2344,42 @@ Signal ceiling inert again (peak 1.246%). No crashes, no ORPHAN_RECONCILE,
 no negative-qty positions. Chart artifact updated.
 
 No code changes this pass - pure data review.
+
+## 27. 2026-10-12 (trading day) — edge turns positive after 7 negative sessions; neutral_multiplier now has a real negative read
+
+Net P&L -$311.02, 51 positions/60 tranches, 24% win rate, payoff 1.23x.
+**The negative-edge streak broke**: today's edge +0.232pp, the first
+positive day since 2026-09-30 (7 straight negative sessions, 10-01 through
+10-09). One day is not a trend reversal, but it's the first green data
+point in two weeks.
+
+**The neutral_multiplier experiment (item 18, 0.0 -> 0.25, started
+10-06) now has a real sample and the read is negative.** Pooled across
+its 5 trading days so far (10-06, 10-07, 10-08, 10-09, 10-12 - only 3 of
+the 5 actually had neutral-regime trades): n=50 neutral-regime trades,
+net **-$153.72**, only 9 winners (18% win rate). Per-day: 10-06 -$13.88
+(n=8), 10-07 -$9.61 (n=13), 10-08 n=0, 10-09 -$130.23 (n=29, 1 winner -
+3.4% WR), 10-12 n=0. No single day has shown this bucket working. This is
+the clearest read the experiment has had yet, and it argues for reverting
+to 0.0 rather than extending - flagging for a direct conversation with
+the user rather than reverting unilaterally (Tier 4 per CLAUDE.md).
+
+**repeat_loser_watch (still shadow mode) now flags 44 symbols** (up from
+42 on 10-09), confirming the thresholds-too-loose finding from item 26
+still holds - not a new problem, same one. One supporting data point for
+the underlying IDEA even though the thresholds need work: **LQDA, one of
+the 44 flagged names, was today's single worst trade (-$70)**.
+
+**Shorts did almost all of today's damage** (-$294.38 vs longs -$16.64) -
+consistent with the short-side exit question flagged in item 25, not a
+new finding. **The "never above entry" MFE bucket continued**: -$276 (17
+positions, 0 winners) - smaller in dollars than recent days but still
+close to the whole day's loss; this pattern has now run 6 of the last 6
+trading days (10-05 through 10-12, skipping the weekend).
+
+Exclusion of MXL/TWST/TXG/PBF held (none traded). Signal ceiling inert
+(peak 1.240%). QQQ list contributed 0 symbols again. Opening burst
+remains disabled. No crashes, no ORPHAN_RECONCILE, no negative-qty
+positions. Chart artifact updated.
+
+No code changes this pass - pure data review.
