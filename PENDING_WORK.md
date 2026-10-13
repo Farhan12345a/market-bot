@@ -2383,3 +2383,39 @@ remains disabled. No crashes, no ORPHAN_RECONCILE, no negative-qty
 positions. Chart artifact updated.
 
 No code changes this pass - pure data review.
+
+## 28. 2026-10-13 (trading day) — edge back negative; neutral_multiplier's best day yet softens but doesn't reverse item 27's read
+
+Net P&L -$244.61, 65 positions/88 tranches, 29% win rate, payoff 1.37x.
+Edge -0.211pp - Monday's positive reading was one day, not a turnaround.
+
+**Side split flipped**: longs did nearly all the damage today (-$242.06)
+while shorts were flat (-$2.55) - the opposite of the recent run where
+shorts drove the losses (10-08, 10-09, 10-12). Not a contradiction of
+anything already flagged, just a reminder the short-side pattern isn't
+every day.
+
+**neutral_multiplier (item 18/27) had its best day yet**: 20 neutral-
+regime trades, -$14.33, 9 winners (45% WR) - much better than 10-09's
+1-for-29. Pooled across all 6 days with neutral-regime activity so far:
+n=70, net **-$168.05**, 25.7% win rate. Still net negative, but today
+tempers how one-sided item 27's read looked right after 10-09 alone.
+Still flagged as an open question for the user, not reverted (no config
+change has been made since the user hasn't weighed in yet).
+
+**repeat_loser_watch now flags 50 symbols** (42 -> 44 -> 50 over the last
+3 trading days) - continues confirming the too-loose-thresholds finding
+from item 26, nothing new there. **LQDA moved up to the #2 worst pooled
+offender** (-$220.19), reinforcing 10-12's single-worst-trade flag.
+
+**The "never above entry" MFE bucket ran a 7th straight trading day**:
+-$295 (19 positions, 0 winners), again exceeding the day's total loss.
+Still the single most consistent, most actionable pattern across the last
+two weeks - no progress made on investigating it yet (see item 25's
+"natural next question").
+
+Exclusion of MXL/TWST/TXG/PBF held. Signal ceiling inert (peak 1.249%).
+QQQ list contributed 0 symbols again. No crashes, no ORPHAN_RECONCILE, no
+negative-qty positions. Chart artifact updated.
+
+No code changes this pass - pure data review.
