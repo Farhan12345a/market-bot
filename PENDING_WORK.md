@@ -2476,3 +2476,84 @@ test_exclusions.py, test_integration_0902.py, test_monday.py,
 test_pool.py, test_timeline.py updated for the new literal values -
 no new test file, the existing universe/stream-budget coverage already
 exercises this correctly against whatever the live config says).
+
+## 30. 2026-10-14 — found and fixed a week-old bug: stuck phantom positions silently eating max_concurrent_positions capacity
+
+User asked for a deep analysis of 2026-10-13 specifically (what worked,
+what didn't, any bugs). Found one: a genuine, previously-undiscovered bug,
+live for at least a week.
+
+**What was found.** 5 symbols (ASTS, BSP, HUT, LQDA, WK) each had a real,
+complete, properly-closed round trip on an earlier session (confirmed
+entry+exit rows with real prices and P&L in trade_history.csv - 10-09 for
+four of them, 10-12 for LQDA). Despite that, by 10-13 each was STILL
+tracked as an open position in `Strategy.trades`, firing GAP_EXIT's
+warning on every single poll from 13:33 to 19:55 UTC (the whole session)
+against a stale entry_price from days earlier, while
+`reconcile_against_broker` correctly logged "tracked but the broker holds
+NOTHING (phantom)" every ~5 minutes for the same set, all day, every day
+since at least 10-07 (the earliest day with logs available in this
+environment - the end-of-day mismatch set grew 2 -> 5 -> 4 -> 5 -> 5
+across 10-07/08/09/12/13, never shrinking on its own).
+
+**Confirmed real cost**: on 10-13, "entry skipped - at
+max_concurrent_positions (10/10)" fired 277 times while only 9
+legitimately open positions actually existed (verified directly from
+trade_history.csv) - the 5 stuck phantoms were occupying the other slots,
+capping real trading capacity at roughly half for the entire session.
+This has likely been true every day since 10-07, silently, underneath
+every prior routine pass this week (including this session's own earlier
+checks, which correctly treated "FILL QTY SHRANK/GREW" as normal
+pre-existing noise and never looked at RECONCILE's own mismatch set
+closely enough to notice it never shrinks).
+
+**Root cause not fully pinned down.** Traced the mechanism as far as: once
+a tracked position's `qty_remaining` has nothing left for any exit rule to
+act on, `check_exit`'s dispatch never returns a truthy result, so
+`submit_exit_order` - and its own PHANTOM_EXIT cleanup, the only other
+place that calls `drop_phantom` - is never reached again, and the stale
+entry just sits there. Ruled out `correct_entry_qty` (the "FILL QTY
+SHRANK/GREW" mechanism) ever setting a tracked qty to exactly 0 - checked
+every day's logs for that specific message ending in "broker holds 0." and
+found zero occurrences, across the board. The exact original trigger -
+how `qty_remaining` first got stuck without `confirm_exit`'s own delete
+ever firing - is still open. Worth a slower, instrumented investigation
+later if it's seen to recur after this fix, though the fix below does not
+depend on finding it.
+
+**Fix shipped, independent of the exact root cause**: `reconcile_against_
+broker` already detects this precise condition correctly, every single
+cycle - it was just never given the power to act on what it already
+knows, by design ("reports rather than repairs... the right repair
+differs by cause"). The untracked-orphan side of the same reconcile
+already got a real repair for exactly this reason on 2026-09-23
+(`close_orphaned_position`, gated on persisting across >=2 consecutive
+checks). The phantom side never got the symmetric fix. Added it:
+`Executor.clear_phantom_bookkeeping` (extracted from submit_exit_order's
+existing inline PHANTOM_EXIT cleanup, now shared) + a new "PERSISTENT
+TRACKED-PHANTOM AUTO-DROP" block in main.py's reconcile section, same
+persistence gate as the orphan side, explicitly exempting any symbol
+still inside `_pending_entry_verify`'s fill-confirmation grace window so
+a genuinely slow marketable-limit entry is never mistaken for a week-old
+stuck phantom (caught by tests/test_session_sim.py's existing ZZZ
+scenario on the first attempt - a good sign the guard is doing real work,
+not just decoration).
+
+Also documented in CLAUDE.md as a new standing lesson: a detector that
+only logs a bad state is not a safety net by itself once nobody is
+reading the logs closely enough, and the orphan-side repair existing
+since 09-23 while the phantom-side gap sat unfixed for a week+ is the
+concrete example of why "quiet costs" (capacity, not a dramatic loss) are
+easier to let slide than loud ones.
+
+**Rest of 10-13's analysis** (separate from the bug): -$244.61, 65
+positions, 29% win rate - already covered in item 28. The phantom bug
+did not itself show up as a P&L loss (none of the 5 stuck symbols appear
+in 10-13's trade_history.csv at all - no order was ever actually placed
+against them once stuck), so this is a capacity/opportunity-cost finding,
+not a mis-booked-trade one.
+
+Full suite: 3000 pass, 0 fail (tests/test_phantom_exit.py sections 36-38
+new, 20 checks; one iteration caught by test_session_sim.py's existing
+ZZZ race-window test before the _pending_entry_verify guard was added -
+left in as a worked example of the guard mattering, not just asserted).

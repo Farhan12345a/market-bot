@@ -814,6 +814,31 @@ class Executor:
             )
         return order
 
+    def clear_phantom_bookkeeping(self, symbol):
+        """
+        Executor-side cleanup for a symbol CONFIRMED to be a phantom (the
+        broker holds 0 shares for it right now) - shared by submit_exit_
+        order's inline check above and by main.py's persistent-phantom
+        auto-drop in the periodic reconcile block (added 2026-10-14, the
+        symmetric fix to close_orphaned_position's persistent-untracked-
+        long auto-close above).
+
+        Does NOT touch Strategy - callers must also call
+        strategy.drop_phantom(symbol) themselves, exactly as this method's
+        original inline version always required of its caller.
+        """
+        self._open_symbols.discard(symbol)
+        self._entry_recorded_at.pop(symbol, None)
+        self._pending_cost.pop(symbol, None)
+        self.open_entries.pop(symbol, None)
+        self._phantom_dropped_at[symbol] = time.monotonic()
+        # 2026-09-09: without this, retry_unfilled_entries had no way to
+        # know this symbol was just abandoned here and would later force a
+        # fresh buy for it anyway - see that method's own _open_symbols
+        # check, which is the real backstop; this is just not leaving a
+        # stale entry sitting for no reason.
+        self._pending_entry_verify.pop(symbol, None)
+
     def retry_unconfirmed_exits(self, grace_seconds=15, alert_fn=None):
         """
         Verify every marketable-limit exit this executor submitted actually
@@ -2064,17 +2089,7 @@ class Executor:
                     f"(the entry never filled). Dropping the phantom position "
                     f"instead of selling against nothing."
                 )
-                self._open_symbols.discard(symbol)
-                self._entry_recorded_at.pop(symbol, None)
-                self._pending_cost.pop(symbol, None)
-                self.open_entries.pop(symbol, None)
-                self._phantom_dropped_at[symbol] = time.monotonic()
-                # 2026-09-09: without this, retry_unfilled_entries had no
-                # way to know this symbol was just abandoned here and would
-                # later force a fresh buy for it anyway - see that method's
-                # own _open_symbols check, which is the real backstop; this
-                # is just not leaving a stale entry sitting for no reason.
-                self._pending_entry_verify.pop(symbol, None)
+                self.clear_phantom_bookkeeping(symbol)
                 return PHANTOM_EXIT
 
             if live_qty is not None and live_qty < qty:

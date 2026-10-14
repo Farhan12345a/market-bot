@@ -4163,6 +4163,73 @@ def run_trading_day(config, market_data, strategy, executor, symbols, rsi_values
                     for _sym in list(_streak):
                         if _sym not in _untracked_now:
                             _streak.pop(_sym, None)
+
+                    # PERSISTENT TRACKED-PHANTOM AUTO-DROP (2026-10-14). The
+                    # symmetric case to the untracked-long auto-close above:
+                    # a symbol this bot still tracks as open, but the
+                    # broker has held nothing for it across >=2 consecutive
+                    # reconciles.
+                    #
+                    # Found 2026-10-13: ASTS, BSP, HUT, LQDA and WK had each
+                    # closed for real on an earlier session (confirmed, real
+                    # entries and exits already in trade_history.csv), but
+                    # stayed tracked anyway - every subsequent poll re-fired
+                    # GAP_EXIT's warning against a stale entry_price without
+                    # ever actually submitting an exit (qty_remaining was
+                    # already effectively exhausted, so every rule in
+                    # Strategy.check_exit's dispatch found nothing left to
+                    # act on). Because no exit order was ever attempted
+                    # again, submit_exit_order's own PHANTOM_EXIT branch -
+                    # the only other place that calls drop_phantom - was
+                    # never reached either, so the entry just sat there.
+                    # The exact original trigger (how qty_remaining first
+                    # got stuck without the normal confirm_exit delete
+                    # firing) is still not pinned down - see PENDING_WORK.md
+                    # - but reconcile_against_broker already detects this
+                    # precise condition correctly, every single cycle; this
+                    # just finally acts on what it already knows, the same
+                    # way the untracked-long case above has since
+                    # 2026-09-23, rather than requiring the original cause
+                    # to be found first.
+                    #
+                    # Confirmed cost on 2026-10-13: 5 stuck phantoms + 9 real
+                    # open positions read as "10/10" against
+                    # max_concurrent_positions - capping real capacity at
+                    # roughly half for the entire session, every day this
+                    # has been accumulating (first seen 2026-10-07 in the
+                    # logs available when this was diagnosed).
+                    _pstreak = reconcile_state.setdefault("phantom_streak", {})
+                    _phantom_now = set()
+                    if _mm:
+                        for _sym, _reason in _mm:
+                            if "phantom" not in _reason:
+                                continue
+                            if _sym in executor._pending_entry_verify:
+                                # Still within its own fill-confirmation
+                                # grace window (see main.py's exit-check
+                                # loop, which skips these for the same
+                                # reason) - a slow marketable-limit entry
+                                # legitimately reads as "broker holds
+                                # nothing" for a while. Don't count this
+                                # toward the streak at all, so a borderline
+                                # fill isn't dropped right as it clears.
+                                continue
+                            _phantom_now.add(_sym)
+                            _pstreak[_sym] = _pstreak.get(_sym, 0) + 1
+                            if _pstreak[_sym] >= 2:
+                                executor.clear_phantom_bookkeeping(_sym)
+                                strategy.drop_phantom(_sym)
+                                logger.warning(
+                                    f"{_sym}: dropped a persistent phantom "
+                                    f"position found stuck by the periodic "
+                                    f"reconcile - tracked with nothing at "
+                                    f"the broker across >=2 consecutive "
+                                    f"checks."
+                                )
+                                _pstreak[_sym] = 0
+                    for _sym in list(_pstreak):
+                        if _sym not in _phantom_now:
+                            _pstreak.pop(_sym, None)
                 except Exception as e:
                     logger.debug(f"reconcile skipped: {e}")
         if regime_active:

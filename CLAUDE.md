@@ -174,6 +174,44 @@ existing suite - passing tests did NOT catch either of these bugs the first
 time; they only catch them now because the checks were added AFTER each was
 found, not before.
 
+## A detector that only reports never fixes anything by itself
+
+Found 2026-10-14: `Executor.reconcile_against_broker` correctly flagged
+ASTS, BSP, HUT, LQDA and WK as "tracked but the broker holds NOTHING
+(phantom)" on EVERY poll, for at least a week (first seen 2026-10-07 in
+the logs available at the time). It never once repaired any of them,
+because it was deliberately written to only report - "the right repair
+differs by cause" - and the actual repair for a phantom was assumed to
+live entirely in `submit_exit_order`'s own inline check. That assumption
+broke the moment a position's exit-check loop stopped finding anything
+left to act on (its own `qty_remaining` already exhausted, through a path
+that still is not fully pinned down) - with nothing left to exit,
+`submit_exit_order` was never called again, so its PHANTOM_EXIT branch
+never ran either, and the stale entry sat there, each one quietly costing
+a `max_concurrent_positions` slot every single day it went unnoticed.
+
+The lesson, stated generally so it outlives this one bug: **a function
+that detects a bad state and only logs it is not a safety net by itself -
+it is a safety net ONLY for whoever is still reading the logs.** The
+untracked-orphan side of this exact same reconcile already had a real
+repair (`close_orphaned_position`, gated on persisting across >=2
+consecutive checks, added 2026-09-23) specifically because an unprotected
+LONG position carries real market risk. The opposite case - a phantom
+that costs capacity but not open market risk - was left unrepaired for
+over a year of calendar time in this codebase's own age because it never
+produced a dramatic loss, only a slow, silent tax on how many real
+positions could be open at once. Quiet costs are easier to ship past
+review than loud ones; that is backwards from how dangerous they actually
+are to leave unfixed, and is worth remembering the next time something
+"only logs a warning."
+
+Fixed by `Executor.clear_phantom_bookkeeping` + main.py's persistent-
+phantom auto-drop, the direct mirror of the orphan-side fix, same
+persistence gate, explicitly exempting a symbol still inside its own
+`_pending_entry_verify` fill-grace window so a genuinely slow entry is
+never mistaken for a week-old stuck one. Covered by
+`tests/test_phantom_exit.py` sections 36-38.
+
 ## Testing and deployment
 
 - Do NOT run the test suite, commit, or push unless the user explicitly asks.

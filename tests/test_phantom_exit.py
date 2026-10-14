@@ -885,5 +885,92 @@ check("entry_rsi now has a fresh-fetch fallback for when use_rsi_filter is "
       "_report_rsi = symbol_rsi" in src
       and "_report_rsi = market_data.get_rsi(" in src)
 
+print("\n=== 36. clear_phantom_bookkeeping: THE SAME CLEANUP submit_exit_order's "
+      "PHANTOM_EXIT BRANCH ALWAYS DID, NOW SHARED (2026-10-14) ===")
+e36 = Executor(Broker(holdings={}), CFG)
+e36._open_symbols.add("GHOST")
+e36._entry_recorded_at["GHOST"] = time.monotonic()
+e36._pending_cost["GHOST"] = 123.0
+e36.open_entries["GHOST"] = 55.0
+e36._pending_entry_verify["GHOST"] = True
+e36.clear_phantom_bookkeeping("GHOST")
+check("dropped from _open_symbols", "GHOST" not in e36._open_symbols)
+check("dropped from _entry_recorded_at", "GHOST" not in e36._entry_recorded_at)
+check("dropped from _pending_cost", "GHOST" not in e36._pending_cost)
+check("dropped from open_entries", "GHOST" not in e36.open_entries)
+check("dropped from _pending_entry_verify", "GHOST" not in e36._pending_entry_verify)
+check("recorded a phantom-drop timestamp (retry_unfilled_entries' own "
+      "backstop reads this)", "GHOST" in e36._phantom_dropped_at)
+
+print("\n=== 37. THE PERSISTENT-PHANTOM AUTO-DROP (2026-10-14) - the "
+      "symmetric fix to the persistent-untracked-long auto-close (item 34 "
+      "above), for the opposite mismatch: tracked here, broker holds "
+      "NOTHING. Found 2026-10-13 - ASTS/BSP/HUT/LQDA/WK sat stuck for a "
+      "full week, each quietly costing a max_concurrent_positions slot, "
+      "because nothing ever re-triggered submit_exit_order's own "
+      "PHANTOM_EXIT check once qty_remaining had nothing left to act on ===")
+check("wired into the poll loop, right after the untracked-long block",
+      "executor.clear_phantom_bookkeeping(_sym)" in src
+      and "strategy.drop_phantom(_sym)" in src)
+check("...gated on the symbol persisting across consecutive reconciles, "
+      "not firing on the first sighting - same discipline as item 34's "
+      "orphan_streak",
+      '_pstreak[_sym] = _pstreak.get(_sym, 0) + 1' in src
+      and "_pstreak[_sym] >= 2" in src)
+check("...only counts a mismatch whose reason actually says phantom - "
+      "never the untracked-orphan or side-flip reasons from the same "
+      "reconcile pass",
+      'if "phantom" not in _reason' in src)
+check("...and explicitly exempts a symbol still inside its own fill-grace "
+      "window (_pending_entry_verify) - a slow marketable-limit entry can "
+      "legitimately read as broker-holds-nothing for a while and must "
+      "never be mistaken for a week-old stuck phantom",
+      "if _sym in executor._pending_entry_verify" in src)
+
+print("\n=== 38. END-TO-END: A SESSION-SIM SCENARIO SHAPED LIKE THE 10-13 "
+      "BUG ACTUALLY RECOVERS THE SLOT ===")
+# HUT closed for real days ago but is still tracked with nothing left to
+# exit - exactly the shape found in production. Two consecutive reconcile
+# passes should drop it; a single sighting must not.
+b38 = Broker(holdings={})
+e38 = Executor(b38, CFG)
+s38 = Strategy(CFG)
+s38.trades["HUT"] = TradeManager("HUT", 80.0, 30, CFG)
+s38.trades["HUT"].qty_remaining = 0
+e38._open_symbols.add("HUT")
+
+
+def one_reconcile_pass(streak):
+    mm, _ = e38.reconcile_against_broker(list(s38.get_open_trades().keys()))
+    now = set()
+    for sym, reason in mm:
+        if "phantom" not in reason or sym in e38._pending_entry_verify:
+            continue
+        now.add(sym)
+        streak[sym] = streak.get(sym, 0) + 1
+        if streak[sym] >= 2:
+            e38.clear_phantom_bookkeeping(sym)
+            s38.drop_phantom(sym)
+            streak[sym] = 0
+    for sym in list(streak):
+        if sym not in now:
+            streak.pop(sym, None)
+    return mm
+
+
+streak38 = {}
+mm1 = one_reconcile_pass(streak38)
+check("first sighting: HUT is reported as a phantom mismatch",
+      any(s == "HUT" for s, _ in mm1), mm1)
+check("...but a single sighting does not drop it yet",
+      "HUT" in s38.trades, list(s38.trades))
+check("...and the max_concurrent_positions slot is still occupied",
+      "HUT" in e38._open_symbols)
+mm2 = one_reconcile_pass(streak38)
+check("second consecutive sighting: NOW it's dropped from Strategy",
+      "HUT" not in s38.trades, list(s38.trades))
+check("...and the slot is freed on the executor side too",
+      "HUT" not in e38._open_symbols)
+
 print(f"\n{P} passed, {F} failed")
 raise SystemExit(1 if F else 0)
