@@ -2557,3 +2557,56 @@ Full suite: 3000 pass, 0 fail (tests/test_phantom_exit.py sections 36-38
 new, 20 checks; one iteration caught by test_session_sim.py's existing
 ZZZ race-window test before the _pending_entry_verify guard was added -
 left in as a worked example of the guard mattering, not just asserted).
+
+## 31. 2026-10-14 (trading day) — both of yesterday's changes confirmed live and working; smallest loss in weeks
+
+Net P&L -$154.22, 95 positions/124 tranches, 35% win rate, payoff 1.58x -
+the smallest loss in weeks. Edge +0.376pp, the second positive-edge day in
+the last two weeks (the other was 10-12).
+
+**Both changes from item 29/30 confirmed live and working on their first
+real day**:
+- Wider pool: pre-market log showed "35 symbols + 8 benchmarks" subscribed
+  (up from 25) - `num_stocks_to_trade`/`stream_max_subscriptions` took
+  effect as configured.
+- Phantom auto-drop: fired for real for the first time - PENG got stuck
+  exactly the way ASTS/BSP/HUT/LQDA/WK did last week, and the new
+  mechanism caught and cleared it after 2 consecutive reconcile checks
+  (~5 minutes) instead of it sitting stuck for a week. None of last
+  week's original 5 stuck symbols reappeared today.
+
+**Too early to credit the wider pool with the smaller loss/positive
+edge** - one day, and the whole week has been noisy regardless of this
+specific change. Worth watching for the rest of its one-week window
+before concluding anything.
+
+**Continuing, not new**: exclude_symbols held (none of the 4 traded).
+repeat_loser_watch flags 50 symbols, stable vs yesterday - LQDA was
+today's worst trade for the SECOND time this week (-$82 today, -$70 on
+10/12), reinforcing that the underlying idea has merit even though the
+threshold tuning is still unresolved. The "never above entry" MFE bucket
+ran an 8th straight trading day (-$526, 27 positions, 0 winners) -
+unchanged status: still the longest-running unaddressed pattern in this
+dataset, still no investigation started on what it would take to catch
+these early instead of riding them to a full stop.
+
+Signal ceiling inert (peak 1.240%). QQQ list contributed 0 symbols. No
+crashes, no negative-qty positions. Chart artifact updated.
+
+**Infrastructure note**: this session's container was reset between
+10-13 and 10-14 (the market-bot clone and the daily-chart scratchpad
+tooling were both gone). Re-cloned the repo from GitHub (no data lost -
+everything was already pushed) and rebuilt `build_data.py` and
+`index.html` from scratch, reading the published artifact's own HTML back
+to recover the exact trades.json schema it expects. Found and fixed one
+new bug while rebuilding: the recreated script initially mishandled
+trade_paths.csv's timestamp column, which carries an explicit `-04:00` ET
+offset, while trade_history.csv's entry_time/exit_time columns are UTC
+with no offset - conflating the two put some path points hours off their
+real position on the chart until normalizing both to UTC before comparing
+them. Verified the rebuilt pipeline's totals match a direct independent
+computation from trade_history.csv exactly (95 positions, 124 tranches,
+-$154.22, 33/62/0) before publishing.
+
+No code changes to the live bot this pass - pure data review plus
+tooling recovery.
