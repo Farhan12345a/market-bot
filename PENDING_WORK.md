@@ -2419,3 +2419,60 @@ QQQ list contributed 0 symbols again. No crashes, no ORPHAN_RECONCILE, no
 negative-qty positions. Chart artifact updated.
 
 No code changes this pass - pure data review.
+
+## 29. 2026-10-13 — isolated re-run of the wider-pool test (num_stocks_to_trade 25->35, stream_max_subscriptions 30->45)
+
+User asked directly: is the Alpaca paid-data upgrade (Algo Trader Plus,
+$99/mo, live since 2026-09-17) worth keeping? Investigation found:
+
+- Its STATED purpose (fixing opening-burst fill rates) never improved
+  (0%, 21%, 0%, 0% after the switch, same as the ~20% it got on free IEX
+  before) and was independently reattributed by the user on 2026-09-27 to
+  Alpaca's paper-simulator fill delays, not the data feed.
+- A bug (fixed 2026-10-07, item 23/24) meant the REST-path benefit wasn't
+  even fully realized for its first 3 weeks.
+- Raw day-level P&L got slightly worse after 09-17 vs before, but that
+  comparison is hopelessly confounded by dozens of unrelated changes in
+  both windows - not used as evidence either way.
+- **The one real, checkable structural benefit - unlimited websocket
+  symbols vs the free tier's 30-symbol hard cap - has gone almost
+  entirely UNUSED.** Checked actual subscription counts across 9 days
+  spanning before and after the upgrade: every single one capped at
+  exactly 30, the SAME number as the old free-tier limit.
+  `stream_max_subscriptions` was raised 25->30 on the switch date and
+  never touched again until today.
+- It was tried wider exactly once, 2026-09-24 (->60/->27), but confounded
+  with THREE other simultaneous changes (qqq_list_top_n, earnings_list_
+  top_n, and that day's opening-burst tuning) and reverted the next day
+  along with all of them - nobody ever got a clean read. Split by
+  list_source that day: general_screener (the part that actually used
+  the wider pool) made +$69.88 (18 positions); qqq_list (the unrelated
+  simultaneous change) lost -$254.18 (15 positions) and accounts for the
+  whole day's net loss. One profitable day on the wider pool, n=18, never
+  repeated or isolated since.
+
+**Action taken, at the user's explicit direction**: re-run this test
+properly isolated. `num_stocks_to_trade: 25 -> 35`, `stream_max_
+subscriptions: 30 -> 45`, with `qqq_list_top_n` (2) and `earnings_list_
+top_n` (3) deliberately UNTOUCHED this time. Tier 5 per CLAUDE.md - held
+for a week, compared via ops/session-metrics.py against this baseline.
+
+Known risk carried over from 09-24's own finding (a wider subscribed set
+diluted stream freshness for the opening burst specifically) does not
+apply here since opening_burst has been disabled since 2026-10-01.
+Symbols beyond the new 45-symbol cap still get REST prices, not dropped
+from the watchlist - and REST now correctly uses the paid SIP feed too
+(item 23's fix), unlike during the 09-24 test.
+
+**This is now a SIXTH concurrent live experiment** alongside item 18/27
+(neutral_multiplier), the 2-strike rule, opening_minutes_throttle, the
+2-min lookback, and exclude_symbols/repeat_loser_watch. Flagged plainly
+rather than silently added - this week's attribution is getting
+genuinely crowded, and a result that moves will need care before being
+credited to any one of these six.
+
+Full suite: 2985 pass, 0 fail (tests/test_0902b.py, test_ctx.py,
+test_exclusions.py, test_integration_0902.py, test_monday.py,
+test_pool.py, test_timeline.py updated for the new literal values -
+no new test file, the existing universe/stream-budget coverage already
+exercises this correctly against whatever the live config says).

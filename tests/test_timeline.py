@@ -274,7 +274,11 @@ if prev.returncode == 0:
         # as of the 2026-09-27 qqq_list_top_n trim - that change only moves
         # slots between screener and qqq_list, doesn't touch total breadth
         # enough to need more headroom.
-        "stream_max_subscriptions": 30,
+        # 30 -> 45 on 2026-10-13, alongside num_stocks_to_trade 25 -> 35 -
+        # the clean, isolated re-run of the 09-24 wider-pool test, this time
+        # without qqq_list_top_n/earnings_list_top_n moving too. See
+        # config.yaml's comment on this key.
+        "stream_max_subscriptions": 45,
         # 50 -> 200 on 2026-09-29. Sized for the OLD counting model, where
         # every SUBMITTED entry charged the budget whether it filled or not.
         # main.py's entries_triggered now refunds a slot when an entry is
@@ -317,7 +321,13 @@ if prev.returncode == 0:
         # bit more, add more stocks to screener from qqq"), moving 2 more
         # slots from qqq_list_top_n (4 -> 2) - a 4th bullish day in the same
         # direction. See config.yaml's comment on this key.
-        "num_stocks_to_trade": 25,
+        # 25 -> 35 on 2026-10-13, at the user's explicit direction, as its
+        # own isolated held Tier 5 experiment - testing whether the wider
+        # pool the Algo Trader Plus upgrade enabled (but which has sat
+        # unused at the old free-tier's 30-symbol number for a month) is
+        # itself profitable, without moving qqq_list_top_n/earnings_list_
+        # top_n at the same time the way the confounded 09-24 test did.
+        "num_stocks_to_trade": 35,
         # 3 -> 5 -> 4 on 2026-09-30, on explicit user request, after the
         # 2026-09-29 extended-hours analysis found ~12 symbols exhausting
         # all 3 attempts by midday. 4 -> 3 on 2026-10-02, explicit user

@@ -82,12 +82,11 @@ check("25 watched, 25 budget -> 'every tradeable name gets live prices'",
       any("every tradeable name" in m for m in cap.msgs), cap.msgs)
 cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(CFG, [f"S{i}" for i in range(150)])
 check("150 watched -> explicit warning", any("exceeds the stream budget" in m for m in cap.msgs), cap.msgs)
-# 30-symbol budget as of 2026-09-25 (unique symbols, not channel-subs) -
-# reverted from the 60 tried alongside num_stocks_to_trade's 15->27 on
-# 2026-09-24, see config.yaml's comment on stream_max_subscriptions.
-# 150 watched leaves 120 on REST.
-check("names how many run on REST", any("120 symbol" in m for m in cap.msgs), cap.msgs)
-check("quantifies it as a percentage", any("80% of the" in m for m in cap.msgs), cap.msgs)
+# 45-symbol budget as of 2026-10-13 (unique symbols, not channel-subs) -
+# the isolated, held re-run of the wider-pool test, see config.yaml's
+# comment on stream_max_subscriptions. 150 watched leaves 105 on REST.
+check("names how many run on REST", any("105 symbol" in m for m in cap.msgs), cap.msgs)
+check("quantifies it as a percentage", any("70% of the" in m for m in cap.msgs), cap.msgs)
 noticks=copy.deepcopy(CFG); noticks["trading"]["use_trade_ticks_for_entry"]=False
 cap.msgs.clear(); M._warn_if_watchlist_outruns_the_stream(noticks, [f"S{i}" for i in range(14)])
 check("ticks off changes NOTHING now - the cap counts symbols, not channels",

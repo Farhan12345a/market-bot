@@ -560,7 +560,15 @@ trading:
   # serving 33/46 watched symbols, 0 with a baseline, at 09:30:08 when order
   # submission started) - not confirmed as the sole cause, but not run back
   # up again alongside everything else that's being pulled back.
-  stream_max_subscriptions: 30
+  #
+  # 30 -> 45 on 2026-10-13, alongside num_stocks_to_trade 25->35 (see that
+  # key for the full reasoning - this is the clean, isolated re-run of the
+  # 09-24 test, this time without qqq_list_top_n/earnings_list_top_n moving
+  # too). 35 + stream_reserve_index_slots(2) + sector benchmarks (~5-8)
+  # comfortably fits inside 45 with headroom, rather than sitting at the
+  # truncating edge the way 25+7=32-vs-cap-30 was quietly doing before this
+  # change.
+  stream_max_subscriptions: 45
   # iex -> sip on 2026-09-17, Algo Trader Plus ($99/mo) now active. IEX
   # carries ~2% of US volume - see the opening_burst.decide_by comment above
   # and the two-day-running FROG/IOT/OKTA/ZS/S/CRWD/FSLY/HPE fill-failure
@@ -2623,7 +2631,46 @@ trading:
   # (n=27) - via ops/qqq-list-origin.py's source x regime breakdown. n=4
   # bullish days now, same direction every time since tracking started;
   # still not the 2-week bar, but a 4/4 streak in one direction.
-  num_stocks_to_trade: 25  # Number of top stocks to select each day
+  # 25 -> 35 on 2026-10-13, at the user's explicit direction, as its own
+  # isolated held experiment (Tier 5 per CLAUDE.md - one week, compared
+  # against this baseline via ops/session-metrics.py). qqq_list_top_n (2)
+  # and earnings_list_top_n (3) are deliberately UNTOUCHED - this tests the
+  # general screener's own wider pool alone, nothing else.
+  #
+  # Why now: the account's Algo Trader Plus upgrade (2026-09-17) lifted the
+  # free tier's 30-symbol websocket cap entirely, but stream_max_subscriptions
+  # was only ever raised to 30 that one time and never again - in practice,
+  # every session since 09-17 has still capped at exactly 30 subscribed
+  # symbols, the SAME number as the old free-tier limit. The "unlimited"
+  # capability has been paid for but functionally unused for a month.
+  #
+  # It was tried widened exactly once before, 2026-09-24 (num_stocks_to_trade
+  # 15->27, stream_max_subscriptions 30->60), but confounded with THREE other
+  # changes the same day (qqq_list_top_n 10->18, earnings_list_top_n 3->5,
+  # and the opening-burst mechanism's own tuning) and reverted the next day
+  # along with all of them together - nobody ever got a clean read on the
+  # wider pool alone. Split by list_source that day: general_screener (the
+  # part that actually used the wider pool) made +$69.88 (18 positions);
+  # qqq_list (the unrelated, simultaneous change) lost -$254.18 (15
+  # positions) and accounts for the whole day's net loss. One profitable
+  # day on the wider pool, never repeated or isolated since.
+  #
+  # Known risk, carried over from that day's own finding: a wider subscribed
+  # set can dilute STREAM FRESHNESS for the opening burst specifically
+  # (33/46 watched symbols had a fresh bar at 09:30:08 on 09-24, plausibly
+  # contributing to that day's 8/14 phantom fills) - but opening_burst is
+  # disabled as of 2026-10-01, so that specific risk does not apply to this
+  # run. Symbols beyond stream_max_subscriptions are never dropped from the
+  # watchlist, only pushed to REST (~15min-delayed on the old free tier;
+  # read live on the current paid SIP REST path per the 2026-10-07 fix).
+  #
+  # Running alongside several other live experiments (items 18/27 neutral_
+  # multiplier, the 2-strike rule, opening_minutes_throttle, the 2-min
+  # lookback, and exclude_symbols/repeat_loser_watch) - a sixth concurrent
+  # change makes this week messier to attribute than usual. Flagged rather
+  # than silently added; if any of those conclude and revert during this
+  # window, that's one less confound, not a reason to stop this one early.
+  num_stocks_to_trade: 35  # Number of top stocks to select each day
   # ---------------------------------------------------------------------
   # Opening-move history (added 2026-08-21)
   # ---------------------------------------------------------------------
