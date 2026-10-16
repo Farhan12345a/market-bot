@@ -2610,3 +2610,44 @@ computation from trade_history.csv exactly (95 positions, 124 tranches,
 
 No code changes to the live bot this pass - pure data review plus
 tooling recovery.
+
+## 32. 2026-10-15 (trading day) — worst day of the stretch; the primary/extended short pattern already flipped
+
+Net P&L -$658.55, 98 positions/121 tranches, 30% win rate, payoff 0.86x -
+the worst day in six weeks (worse than 10-06's -$510.65 and 10-08's
+-$496.63). Edge -0.332pp, sharply negative again after two recent green
+readings (10-12, 10-14). Shorts did most of the damage (-$499.83 vs longs
+-$158.72).
+
+**The primary/extended-hours short pattern flagged yesterday already
+flipped.** 10-14 showed primary (+$150.19, 51% WR) carrying the day while
+extended hours gave it back (-$215.28, 40% WR). Today: primary -$462.85
+(25% WR) was the WORSE half, extended -$36.98 (38% WR) the better one -
+the opposite shape. Pooled across all 7 comparable days now: primary beat
+extended on 4 (10-08, 10-09, 10-14, roughly flat 10-12), extended beat
+primary on 2 (10-02, today), flat on 1 (9-29). Confirms yesterday's own
+caution was right - no reliable lean yet, just noise on a 7-day sample.
+Keep tracking; still nothing to act on.
+
+**The phantom-position auto-drop (item 30, shipped 10-14) fired FIVE
+times today** (RKLB, TRU, TEAM, PENG, OKTA) - up from one yesterday (PENG
+itself). Each caught and cleared within its 2-check (~5min) gate, exactly
+as designed - no crashes, no lingering stuck positions, no false drops of
+a genuinely slow fill. Worth watching whether this frequency scales with
+the wider pool (more tracked positions open at once -> more chances for
+whatever race causes the underlying qty_remaining-stuck-at-zero state) or
+is just day-to-day variance - one data point either way so far.
+
+**Continuing, not new**: exclude_symbols held. repeat_loser_watch flags 52
+symbols (50 -> 50 -> 52), still too broad to go live. The "never above
+entry" MFE bucket ran a 9th straight trading day (-$539, 28 positions, 0
+winners) - still the single most consistent, least-addressed pattern in
+the dataset. PENG was today's single worst trade (-$133) - same symbol
+the phantom-drop caught, almost certainly coincidental (different
+mechanisms - a bad signal vs. a stale-tracking bug) but noted since it's
+the same name two days running.
+
+Signal ceiling inert (peak 1.250%). QQQ list contributed 0 symbols. No
+crashes, no negative-qty positions. Chart artifact updated.
+
+No code changes this pass - pure data review.
