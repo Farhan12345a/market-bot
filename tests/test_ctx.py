@@ -24,7 +24,7 @@ check("streamed count recorded", c["symbols_streamed"]==14, c)
 check("REST count is the remainder", c["symbols_rest"]==45, c)
 check("ticks flag recorded", c["trade_ticks"] is True, c)
 check("price source is stream", c["price_source"]=="stream")
-check("feed named", c["feed"]=="sip")
+check("feed named", c["feed"]=="iex")
 
 n2=N(); M._set_run_context(CFG, n2, syms, None)
 check("no stream -> 0 streamed", n2.run_context["symbols_streamed"]==0)
@@ -94,9 +94,9 @@ check("no context -> push unchanged from before", t2.startswith("P&L"), t2.split
 
 print("\n=== E. CONFIG FOR MONDAY ===")
 t_=CFG["trading"]
-check("cap is 45 as of 2026-10-13 (the isolated, held wider-pool re-run - see num_stocks_to_trade's own comment)", t_["stream_max_subscriptions"]==45, t_["stream_max_subscriptions"])
+check("cap is 29 as of 2026-10-19 (emergency revert - Algo Trader Plus was cancelled, see stream_max_subscriptions' own comment)", t_["stream_max_subscriptions"]==29, t_["stream_max_subscriptions"])
 check("ticks stay ON for Monday", t_["use_trade_ticks_for_entry"] is True)
 budget = t_["stream_max_subscriptions"]   # unique symbols; ticks are free
-check("yields 45 streamed symbols - ticks no longer halve it", budget==45, budget)
+check("yields 29 streamed symbols - ticks no longer halve it", budget==29, budget)
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

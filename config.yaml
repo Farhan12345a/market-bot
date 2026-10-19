@@ -568,13 +568,29 @@ trading:
   # comfortably fits inside 45 with headroom, rather than sitting at the
   # truncating edge the way 25+7=32-vs-cap-30 was quietly doing before this
   # change.
-  stream_max_subscriptions: 45
-  # iex -> sip on 2026-09-17, Algo Trader Plus ($99/mo) now active. IEX
-  # carries ~2% of US volume - see the opening_burst.decide_by comment above
-  # and the two-day-running FROG/IOT/OKTA/ZS/S/CRWD/FSLY/HPE fill-failure
-  # pattern (09-15, 09-16: 4 of 5 opening-burst submissions never filled,
-  # both days) that motivated paying for the full consolidated tape.
-  websocket_feed: "sip"
+  #
+  # 45 -> 29 on 2026-10-19, EMERGENCY REVERT. The user cancelled Algo
+  # Trader Plus (discussed 2026-10-14) and the downgrade took effect over
+  # the 10-17/10-18 weekend. 2026-10-19 ran the ENTIRE session on a
+  # websocket auth error ("insufficient subscription") in a 5-second
+  # crash/reconnect loop - 4552 tracebacks logged - because this was still
+  # requesting 42 symbols (35 + 7 benchmarks) against a free-tier 30-symbol
+  # hard cap. Zero trades all day (entries_triggered=0): not a P&L loss,
+  # but a full lost trading day. The wider-pool experiment (item 29) is
+  # moot now that its prerequisite (the lifted cap) no longer exists - back
+  # to the pre-experiment value, 1 under the documented free-tier limit of
+  # 30 (not 30 itself - see this key's 2026-09-02 history above for why
+  # sitting exactly at a vendor limit is worse than one under it).
+  stream_max_subscriptions: 29
+  # sip -> iex on 2026-10-19, same emergency revert. The paid feed this
+  # was switched to on 2026-09-17 no longer exists on the account - every
+  # REST call was ALSO failing all session ("subscription does not permit
+  # querying recent SIP data"), on top of the websocket auth loop above.
+  # AlpacaBroker.feed and PriceStream both read this same key, so one
+  # change fixes both failure points. Revisit if Algo Trader Plus (or
+  # another paid tier) is ever bought again - see 2026-09-17's comment
+  # above for the original reasoning in favor of it.
+  websocket_feed: "iex"
 
   # Subscribe to live TRADES as well as bars, and use the latest tick as the
   # price for ENTRY DETECTION. Exits keep reading 1-minute bar closes.
@@ -2670,7 +2686,19 @@ trading:
   # change makes this week messier to attribute than usual. Flagged rather
   # than silently added; if any of those conclude and revert during this
   # window, that's one less confound, not a reason to stop this one early.
-  num_stocks_to_trade: 35  # Number of top stocks to select each day
+  #
+  # 35 -> 25 on 2026-10-19, EMERGENCY REVERT alongside stream_max_
+  # subscriptions and websocket_feed (see those keys' own comments) - the
+  # user cancelled Algo Trader Plus and the downgrade took effect over the
+  # weekend. This experiment's entire premise was the lifted free-tier cap;
+  # with that cap back, there is no pool left to widen into. 2026-10-19
+  # itself traded ZERO positions all day because of the resulting websocket
+  # auth crash loop, not because of this value specifically, but running 35
+  # against a 29-subscription budget would have been self-defeating even
+  # once the stream itself reconnected. Ended inconclusive - 3 partial days
+  # (10-14, 10-15, 10-16) is not enough to read, and never will be now that
+  # its prerequisite is gone. Revisit if a paid tier is ever bought again.
+  num_stocks_to_trade: 25  # Number of top stocks to select each day
   # ---------------------------------------------------------------------
   # Opening-move history (added 2026-08-21)
   # ---------------------------------------------------------------------

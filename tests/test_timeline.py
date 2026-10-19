@@ -276,9 +276,11 @@ if prev.returncode == 0:
         # enough to need more headroom.
         # 30 -> 45 on 2026-10-13, alongside num_stocks_to_trade 25 -> 35 -
         # the clean, isolated re-run of the 09-24 wider-pool test, this time
-        # without qqq_list_top_n/earnings_list_top_n moving too. See
+        # without qqq_list_top_n/earnings_list_top_n moving too.
+        # 45 -> 29 on 2026-10-19, EMERGENCY REVERT - Algo Trader Plus was
+        # cancelled, the free-tier 30-symbol cap applies again. See
         # config.yaml's comment on this key.
-        "stream_max_subscriptions": 45,
+        "stream_max_subscriptions": 29,
         # 50 -> 200 on 2026-09-29. Sized for the OLD counting model, where
         # every SUBMITTED entry charged the budget whether it filled or not.
         # main.py's entries_triggered now refunds a slot when an entry is
@@ -327,7 +329,11 @@ if prev.returncode == 0:
         # unused at the old free-tier's 30-symbol number for a month) is
         # itself profitable, without moving qqq_list_top_n/earnings_list_
         # top_n at the same time the way the confounded 09-24 test did.
-        "num_stocks_to_trade": 35,
+        # 35 -> 25 on 2026-10-19, EMERGENCY REVERT alongside stream_max_
+        # subscriptions and websocket_feed - Algo Trader Plus was cancelled,
+        # ending this experiment inconclusive (only 3 partial days). Back to
+        # the value this started from.
+        "num_stocks_to_trade": 25,
         # 3 -> 5 -> 4 on 2026-09-30, on explicit user request, after the
         # 2026-09-29 extended-hours analysis found ~12 symbols exhausting
         # all 3 attempts by midday. 4 -> 3 on 2026-10-02, explicit user
