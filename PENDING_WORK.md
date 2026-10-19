@@ -2651,3 +2651,47 @@ Signal ceiling inert (peak 1.250%). QQQ list contributed 0 symbols. No
 crashes, no negative-qty positions. Chart artifact updated.
 
 No code changes this pass - pure data review.
+
+## 33. 2026-10-16 (trading day) — best day in the dataset, almost entirely the short strategy; neutral_multiplier's week is now overdue for a decision
+
+Net P&L **+$604.64**, 100 positions/142 tranches, 49% win rate, payoff
+1.80x - the best day recorded this session, beating 8-27's +$534.60.
+Regime read bearish almost all day (143 of 151 rows). Shorts +$623.59,
+longs -$18.96 - the short strategy did essentially the entire day's work.
+
+**Primary-window shorts had an exceptional day**: +$649.93 at 73.1% win
+rate (49/67). Extended-hours shorts gave back a little (-$26.34, 53% WR)
+but were irrelevant against a day this size. This is the 3rd clear
+primary-beats-extended day (joining 10-08, 10-09, 10-14) - pooled across
+8 comparable days now: primary wins 5, extended wins 2 (10-02, 10-15),
+flat 1 (9-29). The lean is a bit more consistent than it looked after
+10-15's reversal, but 2 clean counterexamples in 8 days is still thin -
+not acting on it yet, keep tracking.
+
+**The "never above entry" MFE bucket ran a 10th straight trading day**
+(-$378, 20 positions, zero winners) - notably, it STILL produced zero
+winners even on the best day of the whole dataset. This is the clearest
+evidence yet that this bucket is a structural pattern independent of
+whether the day overall is good or bad, not something that only shows up
+on bad days. Meanwhile the "+1.0% or better" bucket alone contributed
++$1,256 on a perfect 28-for-28 - today's gain came overwhelmingly from
+positions that ran strongly favorable, same as every other day, just
+scaled up.
+
+**Edge read -0.519pp despite the big dollar day** - a reminder that "the
+day made money" and "the selection logic picked well" are different
+questions; today answers them oppositely.
+
+**neutral_multiplier (item 18/27) is now on day 9 of its "one week" held
+experiment** (started 10-06, roughly 2 calendar weeks elapsed counting
+the weekend) and the user still hasn't weighed in on reverting vs.
+extending since the negative pooled read on 10-13 (n=70, -$168.05, 25.7%
+WR). This has sat open long enough that it's worth raising again
+proactively rather than waiting for the user to ask.
+
+repeat_loser_watch flags 51 symbols (stable, down 1 from 52). Exclusion
+of MXL/TWST/TXG/PBF held. Signal ceiling inert (peak 1.248%). Phantom
+auto-drop fired once (back to typical frequency after 10-15's five). No
+crashes, no negative-qty positions. Chart artifact updated.
+
+No code changes this pass - pure data review.
