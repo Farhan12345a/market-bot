@@ -66,9 +66,11 @@ check("AlpacaBroker is constructed with feed=trading.websocket_feed, not "
       'feed=config["trading"].get("websocket_feed", "iex")' in msrc)
 
 print("\n=== D. SHIPPED CONFIG ===")
-check("websocket_feed is sip in the live config - the account IS paid, "
-      "this just makes the REST path actually use it",
-      CFG["trading"]["websocket_feed"] == "sip")
+check("websocket_feed is iex in the live config as of 2026-10-19 - Algo "
+      "Trader Plus was cancelled, so the paid sip feed no longer applies; "
+      "this still makes the REST path match whatever the account actually "
+      "has, same as when it was sip",
+      CFG["trading"]["websocket_feed"] == "iex")
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)

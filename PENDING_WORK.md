@@ -2695,3 +2695,49 @@ auto-drop fired once (back to typical frequency after 10-15's five). No
 crashes, no negative-qty positions. Chart artifact updated.
 
 No code changes this pass - pure data review.
+
+## 34. 2026-10-19 (trading day) — ZERO trades: Algo Trader Plus cancellation broke data access all day, emergency config revert
+
+**Net P&L $0.00 - not a loss, a total outage.** `trade_history.csv`,
+`trade_context.csv` and `trade_paths.csv` each contain only their header
+row. `entries_triggered=0` for the entire session. This is exactly the
+risk flagged in passing during the 10-14 conversation about the Alpaca
+cancellation: the subscription downgrade (disclosed by the user 10-16/17)
+took effect over the 10-17/10-18 weekend, and `config.yaml` still asked
+for the paid tier's settings (`websocket_feed: sip`,
+`stream_max_subscriptions: 45`, `num_stocks_to_trade: 35`, all from the
+10-13 isolated wider-pool experiment). The account no longer has access
+to any of that.
+
+**What actually happened on the wire**: the websocket's `_auth()` call
+raised `ValueError: insufficient subscription` on every connection
+attempt, all day - 4,552 `Traceback` occurrences in the service log, a
+continuous 5-second crash/reconnect loop from open to close. REST calls
+failed in parallel with `"subscription does not permit querying recent
+SIP data."` There was no gap where the bot limped along on stale or
+partial data - every path to live prices was closed at once, so nothing
+was ever ranked, screened, or entered.
+
+**Emergency revert, applied today**: all three paid-tier settings rolled
+back to their pre-9/17 free-tier values -
+`stream_max_subscriptions: 45 -> 29` (one under the documented 30-symbol
+free cap, deliberately not sitting exactly on the vendor's limit),
+`websocket_feed: "sip" -> "iex"`, `num_stocks_to_trade: 35 -> 25`. This
+also closes out the 10-13 wider-pool experiment (item 29) as
+**inconclusive** - only 3 partial trading days (10-14, 10-15, 10-16)
+before its prerequisite (the lifted free-tier cap) was pulled out from
+under it. Full test suite (3000 checks) updated and passing with the
+reverted values before committing - eight test files had the paid-tier
+literals hardcoded from the 10-13 change and needed the same revert.
+
+**Why this wasn't caught sooner**: nothing in the bot itself watches for
+"the subscription tier changed under me" - it only finds out by failing
+to authenticate. There's no proactive check run between the cancellation
+taking effect (over a weekend, no trading) and the first trading day
+after it (today). Worth considering a startup self-check that fails
+loudly and immediately (rather than via a 5-second crash loop) if the
+configured feed doesn't match what the account can actually reach - not
+built today, just noted.
+
+No signal-ceiling, QQQ-origin, or short-side data to review - nothing
+traded. Chart artifact published showing the empty day for the record.
