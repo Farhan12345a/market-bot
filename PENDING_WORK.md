@@ -2741,3 +2741,23 @@ built today, just noted.
 
 No signal-ceiling, QQQ-origin, or short-side data to review - nothing
 traded. Chart artifact published showing the empty day for the record.
+
+## 35. 2026-10-20 (trading day) — ZERO trades again: yesterday's fix was committed but never deployed
+
+**Net P&L $0.00, second straight lost day.** `entries_triggered=0` again,
+9,106 `insufficient subscription` occurrences in today's service log (more
+than 10/19's 4,552, since the crash loop ran the full extended session
+too). This is NOT a repeat of the same undiscovered bug - it's the same
+bug from item 34, still live, because the fix was never deployed.
+
+**Confirmed directly from today's own log**: `PriceStream starting for 40
+symbols on the sip feed` - the VPS is still running the pre-revert
+config. The commit that fixed `websocket_feed`/`stream_max_subscriptions`/
+`num_stocks_to_trade` (f5318d9, 2026-10-19) is correct and sitting in
+GitHub, but `git pull && ./ops/deploy.sh` evidently was not run on the
+Droplet before today's session started - this container cannot deploy
+directly (no SSH access), only the user can run that on the VPS.
+
+Flagged to the user via push notification with the specific deploy
+command needed. No code changes this pass - the fix already exists, it
+just needs to actually reach the running process.
