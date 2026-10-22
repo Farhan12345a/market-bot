@@ -2761,3 +2761,27 @@ directly (no SSH access), only the user can run that on the VPS.
 Flagged to the user via push notification with the specific deploy
 command needed. No code changes this pass - the fix already exists, it
 just needs to actually reach the running process.
+
+## 36. 2026-10-21 (trading day) — CONFIRMED FIXED: fix deployed overnight, normal trading resumed
+
+Net P&L **+$80.86**, 62 positions, 45% win rate, payoff 1.70x. The user
+ran `git pull && ./ops/deploy.sh` overnight (02:03 UTC) picking up
+commit 9883817. Today's own log confirms the fix actually took: `PriceStream
+starting for 29 symbols on the iex feed`, **zero** `insufficient
+subscription` errors (vs 4,552 on 10/19 and 9,106 on 10/20),
+`entries_triggered=62`. First clean session since 10/16.
+
+Edge read -0.024pp (flat, selection roughly matched the do-nothing
+benchmark) on a quiet +0.029% SPY day. Signal ceiling inert again (peak
+1.236%, 0 over - 11th straight inert day for this control group). The
+"never above entry" MFE bucket lost again (-$99, 13 positions, 0
+winners) - still the single most consistent pattern in the whole
+dataset, present again on the very first day data resumed. QQQ-list vs
+general_screener in bullish regime: general_screener +$35.67 (59
+tranches) vs qqq_list -$0.26 (3 tranches) - same direction as the
+9/27 finding, but n=3 today adds negligible weight. No crashes, no
+phantom/orphan reconciles, no negative-qty positions - mechanically
+clean. Chart artifact updated.
+
+No code changes this pass - pure confirmation that the prior fix is
+live and working.
