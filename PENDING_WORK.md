@@ -2785,3 +2785,43 @@ clean. Chart artifact updated.
 
 No code changes this pass - pure confirmation that the prior fix is
 live and working.
+
+## 37. 2026-10-22 (trading day) — 2nd clean day post-outage; signal ceiling bound for the first time in a month, strong direction
+
+Net P&L **+$57.34**, 60 positions, 40% win rate, payoff 1.71x. Fix holds
+for a 2nd straight day - zero `insufficient subscription` errors,
+`entries_triggered=60`. Edge read **+0.637pp** on a flat SPY day
+(+0.029%) - a genuinely good selection day, not a rising tide.
+
+**Signal ceiling (rapid_increase_max_pct=1.25%) bound for the first time
+since 09-24** - 50 signals refused (peak 1.956%), all correctly skipped
+(taken=0 among them). Their forward returns: mean **+1.742%** at 15min,
+**+2.455%** at 30min - versus +0.053% for the rest of the population.
+Same direction as 09-24 (+0.131%/+0.233% vs -0.159%) but a much bigger
+gap this time. Still only the 2nd non-zero session in ~2 months -
+nowhere near the ~10-session bar the routine sets before this is
+actionable, but the direction (ceiling costing winners) has now shown up
+both times it's had anything to say. Running tally, zero days since
+skipped: 2026-09-25 through 2026-10-21, inert the whole stretch.
+
+**Phantom auto-drop (the 10/14 fix) fired cleanly on CMCSA** - caught at
+2 consecutive reconciles, dropped automatically, no manual
+intervention. Working exactly as designed.
+
+**QQQ-list contributed 0 symbols today** (QQQ wasn't trending pre-market).
+**Short-side signal journal**: worth noting the routine's own standing
+description ("taken is hardcoded False, nothing is ever acted on") is
+now stale - the live short_strategy pulls from this same candidate list
+and today shows taken=42 (real executed shorts), not 0. This has
+evidently been true since the short strategy went live (it was
+contributing real P&L as far back as 10/16's best-day writeup) but the
+daily-routine instructions were never updated to reflect it. Worth
+fixing the routine's own text so this isn't re-noticed as a surprise
+each time; not fixing it now since this routine can't edit its own
+stored trigger prompt.
+
+The "never above entry" MFE bucket lost again (-$114, 9 positions, 0
+winners) - still the single most consistent pattern in the dataset.
+No negative-qty positions, no other crashes. Chart artifact updated.
+
+No code changes this pass - pure data review.
