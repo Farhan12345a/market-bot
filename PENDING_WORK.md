@@ -2825,3 +2825,30 @@ winners) - still the single most consistent pattern in the dataset.
 No negative-qty positions, no other crashes. Chart artifact updated.
 
 No code changes this pass - pure data review.
+
+## 38. 2026-10-23 (trading day) — 3rd clean day post-outage; never-above-entry bucket confirms a 3rd straight day
+
+Net P&L **+$43.23**, 50 positions, 44% win rate, payoff 1.46x. Fix holds
+for a 3rd straight day - zero `insufficient subscription` errors,
+`entries_triggered=50`. Edge read -0.264pp on a flat SPY day (+0.022%) -
+first negative edge read since the outage, selection lagged the
+do-nothing benchmark today.
+
+Signal ceiling back to inert (peak 1.238%, 0 over) after yesterday's
+50-over outlier - still only 2 non-zero sessions total out of ~2
+months.
+
+**"Never above entry" MFE bucket lost again** (-$95, 9 positions, 0
+winners) - a 3rd straight confirming day since trading resumed (10/21:
+-$99/13, 10/22: -$114/9, 10/23: -$95/9). This was raised directly to the
+user today as the clearest candidate for an actual config change -
+zero winners on every tracked day for weeks, independent of whether the
+rest of the day is good or bad. Any fix touches entry/exit logic
+(Tier 1/5 under CLAUDE.md), so it needs its own held, one-variable
+experiment, not a quick tweak - noted to the user as something worth a
+dedicated conversation if they want to pursue it.
+
+No QQQ-list contribution today (QQQ wasn't trending pre-market, 2nd day
+running). No negative-qty positions, no crashes. Chart artifact updated.
+
+No code changes this pass - pure data review.
