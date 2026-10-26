@@ -2852,3 +2852,39 @@ No QQQ-list contribution today (QQQ wasn't trending pre-market, 2nd day
 running). No negative-qty positions, no crashes. Chart artifact updated.
 
 No code changes this pass - pure data review.
+
+## 39. 2026-10-26 (trading day) — first losing day since the outage, entirely bullish regime but still negative; signal ceiling direction reversed
+
+Net P&L **-$95.73**, 39 positions, 31% win rate, payoff 1.18x - the
+first losing session since trading resumed 10/21, but nothing broken:
+fix still holds (zero `insufficient subscription` errors,
+`entries_triggered=39`), and the 2 `FLATTEN_ALL` exits at close were
+the normal end-of-day sweep (both small winners, CHWY +$2.45, WDAY
++$3.57) - not an emergency flatten. Daily loss limit never came close
+(max drawdown ~$152 vs a $1,386 limit).
+
+**Entire session traded in a bullish regime** (100% of trade_context
+rows) and still lost (-$114.40 pooled, 49% WR, avg -$1.82/trade) - a
+clean counterexample to the "wins come when the market trends one
+direction" read from a couple weeks back. Bullish alone isn't
+sufficient; regime direction is not the whole story. Edge read -0.244pp
+on a flat SPY day (+0.024%).
+
+**Signal ceiling bound for a 3rd time (32 over, peak 1.892%), but the
+direction reversed** from the prior two non-zero days: these over-
+ceiling signals FELL at 15min (-0.272%) while the rest of the population
+rose (+0.186%), nearly converging by 30min (+0.432% vs +0.444%). Three
+non-zero sessions now (09-24 rose, 10-22 rose big, 10-26 fell) with no
+consistent direction - exactly the "flips sign between sessions, tells
+you nothing" case this tracking exists to catch. The earlier lean
+toward "the ceiling is costing winners" does not hold up anymore;
+walking this back rather than letting it stand uncorrected.
+
+The "never above entry" MFE bucket lost again (-$52, 8 positions, 0
+winners) - a 4th straight confirming day. Notably the next bucket up
+("green, under +0.5%") ALSO produced zero winners today (-$148, 19
+positions) - worth watching whether this spreads to a second bucket or
+was a one-off. No negative-qty positions, no QQQ-list contribution,
+no other crashes. Chart artifact updated.
+
+No code changes this pass - pure data review.
