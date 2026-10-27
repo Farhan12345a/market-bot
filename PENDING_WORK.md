@@ -2888,3 +2888,44 @@ was a one-off. No negative-qty positions, no QQQ-list contribution,
 no other crashes. Chart artifact updated.
 
 No code changes this pass - pure data review.
+
+## 40. 2026-10-27 (trading day) — 2nd straight losing day, edge clearly negative; traced a real (but deliberate) ceiling gap
+
+Net P&L **-$155.35**, 53 positions, 25% win rate, payoff 1.80x. Fix
+holds (zero `insufficient subscription` errors, `entries_triggered=53`),
+EOD flatten was the normal close-out. Edge read **-0.895pp** on a flat
+SPY day (+0.018%) - the worst selection-quality read since trading
+resumed, and taken signals themselves averaged a negative forward
+return (-0.972%).
+
+**Both of the two lowest MFE buckets produced zero winners for a 2nd
+straight day**: "never above entry" (-$163, 0/16) and "green, under
++0.5%" (-$209, 0/21). The pattern flagged yesterday as worth watching
+("does this spread to a second bucket") has now held 2 days running -
+a real escalation worth tracking as a 3rd data point tomorrow.
+
+**Investigated why 3 of today's 13 over-ceiling signals were actually
+TAKEN** (all CVLT, signal_pct up to 4.823% vs the 1.25% ceiling) -
+traced to `rapid_increase_max_pct_streamed_only: true`
+(config.yaml:792), which deliberately exempts REST-sourced (non-
+streamed) symbols from the ceiling entirely, since REST prices run
+~15min delayed and a stale "+4.8% move" isn't the same signal a live
+one would be (see the comment at src/main.py:4605-4611). This is NOT a
+bug - it is working exactly as designed - but CVLT's price_source was
+REST, the ceiling never touched it, and the trade lost money almost
+exactly the way the code's own comment warns it can: -$9.48 total
+today, a minor piece of the day's loss, not the main driver. Worth
+tracking whether this recurs; not urgent on its own. This also means
+the daily "over ceiling" tally the routine reports includes signals
+the live gate never actually touches (REST-sourced ones) - worth
+keeping in mind when reading that count going forward.
+
+Signal ceiling direction this time: the 10 skipped over-ceiling
+signals fell hard (-2.77% at 15min, -0.94% at 30min) vs the rest of the
+population (-0.06%/+0.11%) - a 4th non-zero session with yet another
+different magnitude, still no stable direction across sessions.
+
+No negative-qty positions, no crashes, no QQQ-list contribution. Chart
+artifact updated.
+
+No code changes this pass - pure data review and root-cause tracing.
