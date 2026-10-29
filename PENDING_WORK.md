@@ -2929,3 +2929,39 @@ No negative-qty positions, no crashes, no QQQ-list contribution. Chart
 artifact updated.
 
 No code changes this pass - pure data review and root-cause tracing.
+
+## 41. 2026-10-28 (trading day) — 3rd straight losing day; the pattern now lines up with the user's own chop hypothesis
+
+Net P&L **-$207.87**, 42 positions, 21% win rate, payoff 1.38x - a 3rd
+straight losing session, each one bigger than the last (10/26:
+-$95.73, 10/27: -$155.35, 10/28: -$207.87). Nothing broken: fix holds,
+daily loss limit nowhere close (-$232 realized vs a $1,378 limit).
+Edge read **-0.745pp** on a flat SPY day (+0.033%) - a 3rd straight day
+of negative edge (-0.244, -0.895, -0.745pp).
+
+**Checked whether these 3 days share a mechanical cause: they do.**
+Pulled `REGIME CHANGE` lines from each day's service-log:
+  - 10/26: 2 confirmed regime changes (BULLISH -> CHOPPY -> BULLISH)
+  - 10/27: 5 confirmed changes (NEUTRAL -> CHOPPY -> BULLISH -> BEARISH
+    -> BULLISH -> BEARISH -> BULLISH), including a genuine confirmed
+    CHOPPY period
+  - 10/28: 5 confirmed changes (BEARISH -> NEUTRAL -> BEARISH -> NEUTRAL
+    -> BEARISH -> NEUTRAL -> BEARISH), none of them CHOPPY specifically
+    but constantly flipping bearish/neutral all session
+All three losing days had multiple intraday regime reversals, unlike
+the clean, mostly single-direction days earlier in the month that
+performed well. This is a direct, mechanical match for the hypothesis
+the user raised on 2026-10-19 ("my wins come when the market is
+overall going one direction") - not a coincidence across 3 days, and
+worth telling the user now rather than waiting for a 4th data point,
+given how cleanly it lines up with something they already suspected.
+Flagged via push notification.
+
+Signal ceiling inert today (0 over, peak 1.234%). The "never above
+entry" MFE bucket lost again (-$140, 0/5) - a 5th straight zero-winner
+day. The adjacent "green under +0.5%" bucket's 2-day zero-winner streak
+did NOT extend to a 3rd day (2/28 winners today). No negative-qty
+positions, no crashes, no QQQ-list contribution. Chart artifact
+updated.
+
+No code changes this pass - pure data review.
