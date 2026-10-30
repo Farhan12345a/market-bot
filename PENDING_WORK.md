@@ -2965,3 +2965,58 @@ positions, no crashes, no QQQ-list contribution. Chart artifact
 updated.
 
 No code changes this pass - pure data review.
+
+## 42. 2026-10-29 (trading day) — 4th straight losing day, worst yet, now clearly concentrated in the short strategy
+
+Net P&L **-$404.06**, 64 positions, 34% win rate, payoff 0.84x - a 4th
+straight losing session, nearly double the prior worst (10/26:
+-$95.73, 10/27: -$155.35, 10/28: -$207.87, 10/29: -$404.06; cumulative
+-$863.01). Nothing broken: fix holds, daily loss limit nowhere close
+(-$464 realized vs a $1,368 limit).
+
+**Unlike the prior 3 days, edge read POSITIVE today (+0.261pp)** -
+selection itself was fine. The loss is concentrated almost entirely in
+the short strategy: longs +$94.30 (61 positions) vs shorts -$498.36
+(29 positions). Pulled the same split across all 4 days:
+
+  longs:  -$95.73, -$161.92, -$62.95, +$94.30  (total -$226.30)
+  shorts:   $0.00,   +$6.57, -$144.92, -$498.36 (total -$636.71)
+
+The short side's damage has escalated sharply each day and now
+accounts for most of the 4-day total, reversing the earlier framing
+(10/28's writeup treated this as a general chop problem affecting
+everything equally - today shows it is specifically the short side
+bearing the brunt).
+
+**Traced today's short losses to a specific mechanism, not a bug**: a
+brief bearish/choppy window (09:38-09:47 ET, confirmed CHOPPY, 5
+regime changes total) was followed by a sustained BULLISH regime for
+4+ hours. The regime gate correctly blocked NEW shorts once bullish
+was confirmed (`short_regime_size_multiplier` -> 0.0, mirrors the long
+side's bearish gate) but, by design, does not force-exit positions
+already open when the regime flips - "Open positions and their exits
+are untouched" on every regime-change line. Shorts opened in that
+9-minute window rode the multi-hour reversal down via their own exit
+ladder: GOOG/GOOGL hit TRAILING_STOP, FTNT/ZS hit the -1.0% final
+exit, and GAP_EXIT fired 3 times (DDOG/CVNA/OKTA, -$145.52 combined) -
+GAP_EXIT is the documented safety net for a move too fast for the
+normal ladder (src/strategy/strategy.py:1040-1044), working exactly as
+designed; its frequency today (3x, versus rare on calmer days) is
+itself a symptom of how sharp the reversal was, not a flaw in it.
+
+This is a real structural exposure worth the user knowing about
+explicitly: a short strategy that only gates NEW entries by regime has
+no mechanism to reduce risk on ALREADY-OPEN shorts when the regime
+flips against them mid-session - which is exactly what happened today.
+Flagged via push notification given the severity and the 4-day
+cumulative total. Not proposing a specific fix from this routine
+(Tier 1/4 territory under CLAUDE.md); worth a dedicated conversation if
+the user wants to consider options (e.g., tightening short exits
+specifically on a regime flip, or something else).
+
+The "never above entry" MFE bucket had its worst day yet in the streak
+(-$375, 0/15) - a 6th straight zero-winner day. No negative-qty
+positions, no crashes, no QQQ-list contribution. Chart artifact
+updated.
+
+No code changes this pass - pure data review and root-cause tracing.
