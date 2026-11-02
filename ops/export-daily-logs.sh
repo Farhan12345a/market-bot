@@ -22,10 +22,25 @@ for f in trade_history trade_paths signal_journal trade_context short_signal_jou
   { head -1 "$src"; grep -E "^$DATE,|,$DATE," "$src" || true; } > "$OUT/${f}.csv"
 done
 
-# 2. The service log for market hours that day (09:00-17:00 ET = 13:00-21:00 UTC).
+# 2. The service log for market hours that day (09:00-17:00 ET). Computed
+#    from ET, not hardcoded as UTC - 09:00-17:00 ET is 13:00-21:00 UTC
+#    during EDT but 14:00-22:00 UTC during EST, and a fixed "13:00/21:00"
+#    (this script's own value until the 2026-11-02 DST rollback, the first
+#    one since it was written) silently exports an hour short every day of
+#    standard time: that day's service-log.txt cut off at 20:15 UTC with no
+#    "Daily session complete" line, because the window's own upper bound had
+#    quietly become 16:00 ET instead of the intended 17:00 ET. `date -d`
+#    with TZ set, round-tripped through epoch seconds (plain `-u -d "<ET
+#    string>"` does NOT do this conversion - -u overrides TZ on the INPUT
+#    side too, so it parses the string as UTC instead of converting it),
+#    so this tracks the US DST calendar automatically in both directions.
 #    Named .txt, not .log - the whole logs/ tree (including *.log) is
 #    gitignored on purpose, so this file avoids that extension too.
-journalctl -u market-bot --since "$DATE 13:00:00" --until "$DATE 21:00:00" \
+_since_epoch=$(TZ="America/New_York" date -d "$DATE 09:00:00" +%s)
+_until_epoch=$(TZ="America/New_York" date -d "$DATE 17:00:00" +%s)
+_since_utc=$(date -u -d "@$_since_epoch" +"%Y-%m-%d %H:%M:%S")
+_until_utc=$(date -u -d "@$_until_epoch" +"%Y-%m-%d %H:%M:%S")
+journalctl -u market-bot --since "$_since_utc" --until "$_until_utc" \
   --no-pager > "$OUT/service-log.txt" 2>/dev/null || true
 
 # 3. Refresh the multi-day rollup so it reflects today too

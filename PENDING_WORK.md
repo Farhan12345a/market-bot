@@ -3054,3 +3054,51 @@ negative-qty positions, no crashes, no QQQ-list contribution. Chart
 artifact updated.
 
 No code changes this pass - pure data review.
+
+## 44. 2026-11-02 (trading day) — DST rollback broke the daily log export window; found and fixed
+
+**Today's own -$177.19/18-trade reading is almost certainly INCOMPLETE,
+not a true session result.** DST ended 2026-11-01 (the US "fall back").
+`ops/export-daily-logs.sh` pulled `service-log.txt` using a journalctl
+window hardcoded as UTC - `--since "$DATE 13:00:00" --until "$DATE
+21:00:00"`, with a comment reading "09:00-17:00 ET = 13:00-21:00 UTC."
+That mapping is only correct during EDT (UTC-4). Today, the first
+trading day of standard time (UTC-5) this season, the true window is
+14:00-22:00 UTC - an hour later on both ends - but the script still
+used the old numbers.
+
+**Confirmed from today's own export**: `service-log.txt` cuts off at
+20:15 UTC (3:15pm EST) with no "Daily session complete" line at all -
+every prior day's export reliably ends with that line. The export's
+own git commit landed at 20:17:14 UTC, over 45 minutes before the
+market's actual 4pm ET close (now 21:00 UTC in standard time). The
+live trading day almost certainly continued past what this export
+captured - today's P&L/trade-count figures above, and the published
+chart, should be read as a partial snapshot, not the full session.
+
+**Fixed**: `ops/export-daily-logs.sh`'s journalctl window is now
+computed from ET via `TZ="America/New_York" date`, round-tripped
+through epoch seconds (plain `date -u -d "<ET string>"` does NOT do
+this - `-u` forces the INPUT to be parsed as UTC too, silently
+discarding the TZ var), so it self-corrects for every future DST
+transition rather than needing a manual fix twice a year. Verified
+against both today's date (-> 14:00-22:00 UTC, EST) and a mid-EDT date
+(-> 13:00-21:00 UTC) before committing.
+
+**What this fix does NOT cover**: whatever actually INVOKES this
+script on a schedule (a VPS crontab, not tracked in this repo and
+invisible to this routine) - if that trigger itself fires at a fixed
+UTC time, it could still fire before the trading day ends even with
+this fix, same root class of problem as the script's own window was.
+Worth the user checking `crontab -l` (or wherever this is scheduled)
+on the Droplet to confirm it also accounts for the DST shift, or at
+minimum re-running `ops/export-daily-logs.sh 2026-11-02` by hand once
+the day is actually over to get a complete export for today
+specifically.
+
+Flagged via push notification given this affects every day's data
+collection until fixed, not just today, and the fix needs deploying
+(`git pull`) on the VPS like every other code change this session.
+
+No negative-qty positions, no crashes in the partial log available.
+Chart artifact updated with the caveat stated plainly.
