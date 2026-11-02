@@ -3020,3 +3020,37 @@ positions, no crashes, no QQQ-list contribution. Chart artifact
 updated.
 
 No code changes this pass - pure data review and root-cause tracing.
+
+## 43. 2026-10-30 (trading day) — losing streak breaks, and it's a clean mirror of the 10/29 finding
+
+Net P&L **+$108.65**, 66 positions, 35% win rate, payoff 2.37x - the
+first winning day after 4 straight losses (-$95.73, -$155.35,
+-$207.87, -$404.06). Nothing broken: fix holds, only 4 regime changes
+today (fewer than the 5 on each of the two worst days).
+
+**Regime settled into a single sustained direction**: bearish from the
+open, 2 brief CHOPPY flickers in the first 3 minutes, then confirmed
+BEARISH from 10:35 ET onward for the entire rest of the session - no
+reversals after mid-morning. Because the regime gate sizes new longs
+at 0x during bearish, **zero new longs were entered all day** - every
+one of today's 81 tranches was a short (RAPID_DECREASE_CANDIDATE).
+The short strategy's own selection worked well: taken shorts fell
+further afterward (mean -0.246% at 15min) than the skipped population
+(-0.071%) - the opposite of a selection problem, a genuinely good
+picking day.
+
+This reinforces rather than complicates 10/29's finding: the losing
+streak was driven by repeated regime REVERSALS catching already-open
+shorts on the wrong side of a flip, not by the short strategy being
+broken outright. Today had one sustained direction the whole way, and
+the same strategy that lost heavily on reversal days worked cleanly.
+Not proof of anything fixed - just a consistent data point in the same
+direction as the theory, and a relief that the streak was conditions-
+driven rather than a new defect.
+
+The "never above entry" MFE bucket lost again (-$160, 0/15) - a 7th
+straight zero-winner day, present on both good and bad days alike. No
+negative-qty positions, no crashes, no QQQ-list contribution. Chart
+artifact updated.
+
+No code changes this pass - pure data review.
