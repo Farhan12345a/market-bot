@@ -3102,3 +3102,30 @@ collection until fixed, not just today, and the fix needs deploying
 
 No negative-qty positions, no crashes in the partial log available.
 Chart artifact updated with the caveat stated plainly.
+
+## 45. 2026-11-03 (trading day) — confirms item 44's fix was necessary but not sufficient: the cron trigger itself is the real cause
+
+Net P&L shows **-$36.79**, 14 positions - same caveat as yesterday:
+almost certainly incomplete. Checked whether yesterday's fix
+(`ops/export-daily-logs.sh`'s journalctl window computed from ET
+instead of hardcoded UTC) actually solved the truncation. It didn't,
+and the reason is now clear: **today's export commit landed at
+20:17:12 UTC - virtually identical to yesterday's 20:17:14 UTC**,
+before and after the fix was deployed. Since the script's internal
+window can only return log entries that already exist by the moment
+it runs, this proves the proximate cause was never the window's own
+math - it's whatever schedules the script's INVOCATION (a VPS cron job
+or similar, not tracked in this repo, invisible to this routine) firing
+at a fixed ~20:15-20:17 UTC regardless of what the script does
+internally once it's running.
+
+Yesterday's fix is still correct and worth keeping (it will matter once
+the invocation itself happens late enough in the day), but it does not
+by itself solve the problem. **The user needs to check/adjust whatever
+cron or scheduler invokes `ops/export-daily-logs.sh` on the Droplet** -
+this routine has no visibility into that and cannot fix it. Flagged
+again via push notification since this is now a confirmed, 2-day-running
+data-quality issue, not a one-off.
+
+No crashes, no negative-qty positions in the partial log available (19
+rows / 0 negative). Chart artifact updated with the same caveat.
