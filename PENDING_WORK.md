@@ -3148,3 +3148,27 @@ cron. No crashes, no negative-qty positions. Chart artifact updated
 with the same caveat as the last two days.
 
 No code changes this pass.
+
+## 47. 2026-11-05 (trading day) — best day since 10/16, another clean single-direction regime day
+
+Net P&L **+$418.42**, 37 positions, 62% win rate, payoff 2.15x - best
+day since 10/16's +$604.64. Only 1 regime change all session (NEUTRAL
+-> BEARISH at 09:34 ET, held the rest of the day). Bearish regime gate
+meant zero new longs - all 67 tranches were shorts. "+1.0% or better"
+MFE bucket a perfect 18/18 (+$532), carrying the day. Edge read
+-0.808pp despite the big win - the gain came from a sustained
+favorable market move more than superior selection, consistent with
+10/30's finding that clean single-direction days (bullish or bearish)
+are when the short strategy performs best, reinforcing rather than
+adding new evidence to that pattern.
+
+"Never above entry" lost again (-$81, 0/5) - present even on the best
+day in three weeks, still the most consistent structural pattern in
+the dataset. No crashes, no negative-qty positions, no QQQ-list
+contribution.
+
+Export truncation (items 44-46) continues unresolved, 4th straight day
+(~20:17 UTC, no session-complete line) - no new information, not
+re-flagging with another notification.
+
+No code changes this pass.
