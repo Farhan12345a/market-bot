@@ -3172,3 +3172,19 @@ Export truncation (items 44-46) continues unresolved, 4th straight day
 re-flagging with another notification.
 
 No code changes this pass.
+
+## 48. 2026-11-06 (trading day) — quiet, roughly flat day; export truncation unresolved (5th day)
+
+Net P&L **-$49.60**, 39 positions, 44% win rate, payoff 1.03x -
+essentially a wash. Edge +0.086pp (near-neutral) on a quiet +0.056%
+SPY day, 6 regime changes - a choppier shape than 11/05's single-
+direction day, though the result was mild rather than sharply negative.
+"Never above entry" lost again (-$106, 0/8) - still the single most
+consistent pattern across every day tracked regardless of regime
+shape. No crashes, no negative-qty positions, no QQQ-list contribution.
+
+Export truncation (items 44-47) continues unresolved, 5th straight day
+(~20:17 UTC, no session-complete line) - no new information, not
+re-flagging with another notification.
+
+No code changes this pass.
