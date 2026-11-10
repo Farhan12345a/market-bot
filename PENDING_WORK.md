@@ -3188,3 +3188,21 @@ Export truncation (items 44-47) continues unresolved, 5th straight day
 re-flagging with another notification.
 
 No code changes this pass.
+
+## 49. 2026-11-09 (trading day) — clean no-reversal day, strong positive edge; export truncation unresolved (6th trading day)
+
+Net P&L **+$63.60**, 23 positions, 48% win rate, payoff 1.63x. Edge
+read **+0.701pp** on a flat SPY day (+0.037%) - a genuinely good
+selection day. Zero regime changes all session - the cleanest shape
+yet. Signal ceiling bound again (33 over, peak 1.851%, mild "rose
+further" lean +0.419% vs +0.234%) - a 4th non-zero session with yet
+another different magnitude, still no stable, actionable direction.
+"Green under +0.5%" MFE bucket zero winners again (-$118, 0/11); "+1.0%
+or better" carried the day (+$180, 8/8). No crashes, no negative-qty
+positions, no QQQ-list contribution.
+
+Export truncation (items 44-48) continues unresolved, 6th straight
+trading day (~20:17 UTC, no session-complete line) - no new
+information, not re-flagging with another notification.
+
+No code changes this pass.
