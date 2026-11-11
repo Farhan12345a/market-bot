@@ -3206,3 +3206,25 @@ trading day (~20:17 UTC, no session-complete line) - no new
 information, not re-flagging with another notification.
 
 No code changes this pass.
+
+## 50. 2026-11-10 (trading day) — choppier day, mild negative edge, shorts took the bigger hit again
+
+Net P&L **-$270.89**, 47 positions, 26% win rate, payoff 0.51x. Edge
+-0.176pp (mildly negative) on a flat +0.040% SPY day, 6 regime changes
+- a choppier shape, consistent with the late-October pattern. Losses
+spread across most sector complexes. Shorts took the larger hit again
+(-$217.36, 32 tranches) vs longs (-$53.54, 24 tranches) - same lean as
+10/26-29's reversal days.
+
+Signal ceiling bound hard (72 over, peak 1.940%) and rose sharply
+afterward (+1.94% mean at 15min vs +0.01% rest) - a 5th non-zero
+session, matching the "costing winners" direction from 09-24/10-22
+rather than 10-26/27's reversal. Still mixed across all 5 sessions,
+not actionable.
+
+"Never above entry" lost again (-$128, 0/12). No crashes, no
+negative-qty positions, daily loss limit nowhere close (-$294 vs
+$1,353 limit). Export truncation continues unresolved, 7th straight
+trading day - no new information.
+
+No code changes this pass.
