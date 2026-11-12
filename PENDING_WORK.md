@@ -3267,3 +3267,17 @@ truncation continues unresolved, 8th straight trading day - no new
 information.
 
 No code changes this pass.
+
+## 52. 2026-11-12 (trading day) — mild red day, bounce-back from yesterday's record low
+
+Net P&L **-$86.40**, 52 positions, 37% win rate, payoff 1.29x - modest
+loss, nowhere near 11/11's -$508.59. Edge -0.094pp (near-neutral) on a
+flat +0.052% SPY day, only 3 regime changes - a much calmer open than
+yesterday's 4-flip whipsaw. Signal ceiling inert (0 over). "Never above
+entry" lost again (-$171, 0/14) - unchanged pattern. No crashes, no
+negative-qty positions, no QQQ-list contribution.
+
+Export truncation continues unresolved, 9th straight trading day - no
+new information.
+
+No code changes this pass.
