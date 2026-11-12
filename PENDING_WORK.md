@@ -3228,3 +3228,42 @@ $1,353 limit). Export truncation continues unresolved, 7th straight
 trading day - no new information.
 
 No code changes this pass.
+
+## 51. 2026-11-11 (trading day) — worst day in the dataset: 4 regime flips in 12 minutes at the open
+
+Net P&L **-$508.59**, 35 positions, only 3 winners (9% win rate),
+payoff 0.80x - the worst day recorded this session, surpassing
+10/29's -$404.06. Nothing broken: no crashes, no negative-qty
+positions, daily loss limit nowhere close (-$522 realized vs a
+$1,343 limit).
+
+**The open was the most unstable yet recorded**: 4 confirmed regime
+changes inside the first 12 minutes (BULLISH->NEUTRAL->BEARISH->
+BULLISH->BEARISH, 09:34-09:46 ET), then a long bullish stretch, then
+a CHOPPY confirmation at 14:44 ET - 6 changes total, worse whipsaw
+than any prior day. SPY itself was flat (+0.025%) - not a market
+crash, specifically a regime-read instability problem.
+
+Edge read -0.806pp, and critically the TAKEN population itself
+averaged -0.723% forward return - today's selection was genuinely
+poor, not just unlucky on good picks. Losses spread broadly across
+both longs (-$167.54, 11) and shorts (-$341.04, 29) and across most
+sector complexes - LRCX and NET were each both longed and shorted the
+same day as the regime flipped under them. Exit reasons were
+dominated by stops firing as designed (7 FINAL_EXIT_-1.0%, 12
+TRAILING_STOP, 3 GAP_EXIT) - the safety mechanisms worked correctly,
+there were just an unusual number of them given how many positions
+got caught on the wrong side of a flip.
+
+This extends rather than contradicts the regime-reversal pattern
+flagged on 10/29 and 11/10 - the most extreme version of it yet, and
+a severe but mechanically ordinary bad day, not a new defect. Flagged
+via push notification given it's a new worst-day record.
+
+Both lowest MFE buckets combined for 0 winners across 30 positions
+(-$281/0-11 and -$262/0-19) - "never above entry" alone is now at its
+worst single-day dollar total. No QQQ-list contribution. Export
+truncation continues unresolved, 8th straight trading day - no new
+information.
+
+No code changes this pass.
