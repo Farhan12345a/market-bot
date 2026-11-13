@@ -3281,3 +3281,54 @@ Export truncation continues unresolved, 9th straight trading day - no
 new information.
 
 No code changes this pass.
+
+## 53. 2026-11-13 (trading day) — second container reset wiped the scratchpad; chart tooling rebuilt from scratch (verified exact), good trading day
+
+**Operational**: this container's scratchpad (venv + daily_viz tooling) was
+wiped again (first time was 2026-10-14) - `/home/user/market-bot` and
+everything under `/tmp/.../scratchpad/` were gone at session start.
+Recovered via `git clone` (source of truth, nothing lost - everything
+had been pushed) plus rebuilding the venv (same `numpy<2` ABI fix as
+10/14/10/19) and rewriting `build_data.py` from scratch.
+
+This time, rather than reconstructing the script from memory, read
+`src/analytics/trade_recorder.py` directly from the fresh clone to
+confirm `make_trade_id`'s exact string transform and the `gain_pct`
+formula (`direction * (price - entry_price) / entry_price * 100`),
+and read the published artifact's own `trades.json` back (via the
+Artifact tool) to get the exact field schema. Found and fixed two real
+bugs before trusting it against live data:
+  - `trade_history.csv`'s own `pl_pct` column is already
+    percentage-scale (e.g. -0.7452 means -0.7452%, confirmed against a
+    FIRST_EXIT_-0.7% stop-out), but trades.json's schema expects `pl_pct`
+    as a true fraction (index.html's table multiplies by 100 for
+    display) - divide by 100 on the way in, and `marker_gain_pct`
+    becomes the raw CSV value unchanged, not a second multiplication.
+  - Shorts (`RAPID_DECREASE_CANDIDATE`) signal from
+    `short_signal_journal.csv`, a SEPARATE file from the long side's
+    `signal_journal.csv` - missing it silently starved the pre-entry
+    lead-in line for every short trade (10/59 positions had one instead
+    of the expected ~40, on the day this was first noticed). Fixed by
+    reading both files for the preline match.
+
+Verified the rebuilt script against 11/12 (already reported, known-
+good numbers): exact match on P&L, position/tranche counts, win/loss
+split, AND the per-exit `pl_pct`/`marker_gain_pct` values against the
+one trade visible in the previously-published artifact - not just the
+day's rollup.
+
+**Today's trading**: Net P&L **+$142.86**, 59 positions, 47% win rate,
+payoff 1.43x. Edge +0.117pp (mildly positive) on a flat +0.051% SPY
+day, only 3 regime changes - calm, no repeat of 11/11's whipsaw.
+Overwhelmingly short-driven (83 of 91 tranches). "+1.0% or better" MFE
+bucket a perfect 18/18 (+$598), carrying the day. "Never above entry"
+lost again (-$292, 0/12) - its worst single-day dollar total yet,
+continuing the unbroken zero-winner streak. Signal ceiling inert.
+QQQ-list contributed for the first time in a while (+$86, 2/4). No
+crashes, no negative-qty positions.
+
+Export truncation (items 44-52) continues unresolved, 10th straight
+trading day - no new information.
+
+No src/ code changes this pass - only the scratchpad tooling rebuild
+and ops_daily routine.
