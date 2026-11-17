@@ -3357,3 +3357,19 @@ limit nowhere close (-$373 vs $1,333). Stops fired as designed
 unresolved, 11th straight trading day - no new information.
 
 No code changes this pass.
+
+## 55. 2026-11-17 (trading day) — quiet, thin day with narrow breadth
+
+Net P&L **+$21.31**, 17 positions, 53% win rate, payoff 1.07x. Breadth
+was the standout feature: only 1,722 signals across 9 symbols, far
+thinner than a typical session (usually 3,000-5,000 signals / 20-28
+symbols) - the market gave the bot little to work with. 7 regime
+changes despite the thin tape, choppy without being especially costly
+this time (unlike 11/16). Edge -0.586pp despite the positive dollar
+result - mostly sample noise with only 17 positions. Signal ceiling
+inert. No crashes, no negative-qty positions.
+
+Export truncation continues unresolved, 12th straight trading day - no
+new information.
+
+No code changes this pass.
