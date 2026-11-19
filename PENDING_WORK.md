@@ -3373,3 +3373,25 @@ Export truncation continues unresolved, 12th straight trading day - no
 new information.
 
 No code changes this pass.
+
+## 56. 2026-11-18 (trading day) — red day driven by two TGT shorts; signal ceiling bound hard (new records)
+
+Net P&L **-$186.42**, 25 positions, 36% win rate, payoff 0.73x. Edge
+-2.389pp, though skewed by a thin signal population (2,298 signals /
+12 symbols). Two TGT shorts (earnings-list) accounted for -$151.77 on
+their own, stopped out normally (BREAKEVEN_STOP, FINAL_EXIT_-0.66%) -
+a volatile earnings-reaction name moving against the position twice,
+nothing exotic.
+
+**Signal ceiling bound hard**: 145 over, peak 3.326% - both the
+largest over-ceiling count and peak yet recorded. Rose afterward
+(+0.63% vs -0.10%) - a 7th non-zero session, and the 5th of those 7
+pointing the "costing winners" direction (09-24, 10-22, 11-10, 11-16,
+11-18) vs 2 the other way (10-26, 10-27). Getting closer to, but still
+short of, the ~10-session bar for acting on it.
+
+No crashes, no negative-qty positions, nothing broken. Export
+truncation continues unresolved, 13th straight trading day - no new
+information.
+
+No code changes this pass.
