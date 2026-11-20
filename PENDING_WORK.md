@@ -3395,3 +3395,24 @@ truncation continues unresolved, 13th straight trading day - no new
 information.
 
 No code changes this pass.
+
+## 57. 2026-11-19 (trading day) — good day on a low win rate, carried by the top MFE bucket
+
+Net P&L **+$126.58**, 24 positions, 38% win rate, payoff 2.77x - fewer
+winners than losers but they ran far enough to carry the day. Edge
++0.420pp on a flat +0.091% SPY day - a genuinely good selection day.
+4 regime changes. "+1.0% or better" MFE bucket a perfect 8/8 (+$307);
+both lowest buckets combined for 0 winners across 14 positions, same
+persistent shape as always.
+
+Signal ceiling bound again (18 over, peak 1.520%) - 8th non-zero
+session, and this time FELL further than the rest (-0.61% vs -0.34%),
+matching "the ceiling is working" rather than "costing winners."
+Running tally across all 8 non-zero sessions: 5 rose, 3 fell - still
+mixed, approaching but not at the ~10-session bar for acting on it.
+
+No crashes, no negative-qty positions, nothing broken. Export
+truncation continues unresolved, 14th straight trading day - no new
+information.
+
+No code changes this pass.
