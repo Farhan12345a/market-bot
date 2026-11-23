@@ -3416,3 +3416,20 @@ truncation continues unresolved, 14th straight trading day - no new
 information.
 
 No code changes this pass.
+
+## 58. 2026-11-20 (trading day) — losing day despite positive edge, payoffs ran small
+
+Net P&L **-$170.52**, 36 positions, 47% win rate, payoff 0.39x. Edge
++0.491pp on a flat +0.090% SPY day - genuinely good selection, but
+winners were small (avg +$5.44) against bigger losses (avg -$13.84) -
+an asymmetric-payoff day, not a bad-picking day. 6 regime changes.
+"Green under +0.5%" lost big (-$193, 2/13), "never above entry" lost
+again (-$70, 0/8) - together outweighing the two higher buckets'
+combined +$91. Signal ceiling barely bound (6 over, too small a
+sample to read direction from).
+
+No crashes, no negative-qty positions, nothing broken. Export
+truncation continues unresolved, 15th straight trading day - no new
+information.
+
+No code changes this pass.
