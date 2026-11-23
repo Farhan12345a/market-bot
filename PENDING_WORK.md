@@ -3433,3 +3433,17 @@ truncation continues unresolved, 15th straight trading day - no new
 information.
 
 No code changes this pass.
+
+## 59. 2026-11-23 (trading day) — essentially flat on the dollar line, weak on edge
+
+Net P&L **-$14.80**, 22 positions, 45% win rate, payoff 1.11x - close
+to breakeven in dollar terms. Edge read sharply negative (-1.847pp) on
+a flat +0.081% SPY day - taken trades underperformed the signal
+population by a wide margin even though the bottom line barely moved.
+Only 2 regime changes, calm session. Signal ceiling inert.
+
+No crashes, no negative-qty positions, nothing broken. Export
+truncation continues unresolved, 16th straight trading day - no new
+information.
+
+No code changes this pass.
