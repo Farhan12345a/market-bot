@@ -3447,3 +3447,22 @@ truncation continues unresolved, 16th straight trading day - no new
 information.
 
 No code changes this pass.
+
+## 60. 2026-11-24 (trading day) — essentially a scratch day, positive edge
+
+Net P&L **-$3.02**, 23 positions, 52% win rate, payoff 0.88x - about
+as close to dead flat as a day gets. Edge +0.443pp on a flat +0.096%
+SPY day - genuinely good selection despite the wash result. 5 regime
+changes.
+
+Signal ceiling bound (36 over, peak 1.774%) - 9th non-zero session,
+mild lean toward "costing winners" (over-ceiling -0.198% vs rest
+-0.286% at 15min, though both negative). Running tally now roughly
+6 of 9 non-zero sessions leaning that direction vs 3 the other way -
+close to, but not yet at, the ~10-session bar for acting on it.
+
+No crashes, no negative-qty positions, nothing broken. Export
+truncation continues unresolved, 17th straight trading day - no new
+information.
+
+No code changes this pass.
