@@ -3466,3 +3466,19 @@ truncation continues unresolved, 17th straight trading day - no new
 information.
 
 No code changes this pass.
+
+## 61. 2026-11-25 (trading day) — good dollar day on a low win rate, carried by the top bucket
+
+Net P&L **+$67.10**, 33 positions, 33% win rate, payoff 2.46x - fewer
+winners than losers but they ran far enough to cover the rest. Edge
+-1.599pp on a flat +0.120% SPY day - selection lagged the benchmark
+despite the positive dollar result, same split seen a few times
+recently. Only 2 regime changes, calm. "+1.0% or better" a clean 7/7
+(+$327); both lowest buckets combined for 0 winners across 18
+positions (-$281) - same persistent shape. Signal ceiling inert.
+
+No crashes, no negative-qty positions, nothing broken. Export
+truncation continues unresolved, 18th straight trading day - no new
+information.
+
+No code changes this pass.
