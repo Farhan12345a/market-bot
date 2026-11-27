@@ -3482,3 +3482,46 @@ truncation continues unresolved, 18th straight trading day - no new
 information.
 
 No code changes this pass.
+
+## 2026-11-26 (Thanksgiving) — market closed, skipped
+
+logs/daily/2026-11-26/ exists but every file is header-only (0 data
+rows, service-log.txt reads "No entries") - confirms the market did
+not open. No chart rebuild, no checks, no notification.
+
+## 62. 2026-11-27 (trading day, Black Friday half-day) — even split, positive edge, clean top bucket again
+
+Net P&L **+$119.24**, 28 positions, 50% win rate, payoff 1.89x, on the
+shortened post-Thanksgiving session. Edge +2.478pp on a nearly flat
++0.053% SPY day - selection beat the benchmark as well as the dollar
+line, a cleaner result than most of last week. 3 regime changes
+(BEARISH&rarr;NEUTRAL&rarr;BEARISH&rarr;BULLISH, all inside the first
+half hour, then calm). "+1.0% or better" MFE bucket went a clean 8/8
+(+$221); the two lowest buckets combined for only 2 winners across 14
+positions (-$126) - same persistent shape as every prior day. Signal
+ceiling inert (0 over, peak 1.248% against 1.25%).
+
+One brief broker-side race on a PLTR short cover: a forced market
+exit failed once on "insufficient qty" (the cancel of the prior
+marketable-limit order hadn't settled broker-side yet), retried, and
+settled normally a few seconds later with no stuck position - the
+same cancel-confirmation race already on record, not new. Two
+transient RECONCILE mismatches (TSLA, PLTR), both the broker momentarily
+showing a position the bot had an exit in flight for; both cleared on
+the next sweep, no repeat, no orphan left open. No negative-qty
+positions, no crashes.
+
+Note for future routine runs: the trigger's short-side section still
+describes shorts as "pure data collection, NOT IMPLEMENTED, hardcoded
+taken=False" - stale. Shorts have been a live, regime-gated trading
+path since late September (see CLAUDE.md's short-strategy history);
+today's trade_history.csv has real short positions (PLTR, HUT, TSLA
+among others) with real fills and P&L, already included in the
+headline numbers above, consistent with how prior daily entries in
+this log have handled them. Not a new finding, just flagging that the
+routine's own boilerplate text needs updating next time it's touched.
+
+Export truncation status not re-checked this pass (holiday-shortened
+week) - no new information either way on the VPS cron.
+
+No code changes this pass.
